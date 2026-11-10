@@ -507,6 +507,7 @@ fn a_descriptor_the_validator_cannot_honour_fails_closed() {
                     protocol: "ato.state.filesystem@1".to_owned(),
                     mount: "/state/data".to_owned(),
                     access: StateAccess::ReadWrite,
+                    save: None,
                     mount_required: None,
                 }];
             },

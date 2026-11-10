@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ato_computation::ContentRef;
-use ato_formation::authoring::STATE_FILESYSTEM_PROTOCOL;
+use ato_formation::authoring::{STATE_FILESYSTEM_PROTOCOL, StateSaveDeclaration};
 use ato_objects::{
     CapsuleBundleDocument, PORTABLE_APPLICATION_BUNDLE_VERSION, PortableApplicationBundle,
     PortableDependencyProfile, decode_capsule_bundle_document,
@@ -17,11 +17,15 @@ use thiserror::Error;
 
 use crate::instance_snapshot::{
     BROWSER_INSTANCE_STATE_PROTOCOL, INSTANCE_SNAPSHOT_SCHEMA, InstanceSnapshotResourceV1,
-    InstanceSnapshotV1, attach_instance_snapshot, capture_filesystem_state,
+    InstanceSnapshotSaveV1, InstanceSnapshotV1, attach_instance_snapshot, capture_filesystem_state,
     capture_snapshot_resource_assets, decode_browser_state, encode_browser_state,
     rebind_snapshot_resource_assets, restore_filesystem_state, validate_snapshot,
 };
 use crate::portability_export::repack_portable_dependencies;
+use crate::state_continuity::{
+    self, STATE_CODE_IMPORT_DIGEST_MISMATCH, STATE_CODE_RESTORE_DIGEST_MISMATCH,
+    StateCompatibility, StateContinuityRefusal, StateMigrationApproval,
+};
 use crate::{bundle_sha256, validate_bundle_for_derivation};
 
 pub const LOCAL_APPLICATION_SCHEMA: &str = "ato.local-application/1";
@@ -73,6 +77,36 @@ pub enum LocalInstanceError {
         path: PathBuf,
         source: std::io::Error,
     },
+    /// Saved data cannot be restored by this Derivation. The code is stable and
+    /// user-facing; the detail names the slot/format/version involved.
+    #[error("saved Instance state cannot be restored here ({code}): {detail}")]
+    StateContinuity { code: &'static str, detail: String },
+}
+
+impl LocalInstanceError {
+    /// The stable code of a state-continuity refusal, when this error is one.
+    pub fn state_continuity_code(&self) -> Option<&'static str> {
+        match self {
+            Self::StateContinuity { code, .. } => Some(code),
+            _ => None,
+        }
+    }
+}
+
+fn state_refusal(refusal: StateContinuityRefusal) -> LocalInstanceError {
+    LocalInstanceError::StateContinuity {
+        code: refusal.code,
+        detail: refusal.detail,
+    }
+}
+
+/// The Run gate's named refusal: the state the Run would receive is not the
+/// saved state. The detail keeps the specific observation that failed.
+fn run_state_unverified(detail: impl std::fmt::Display) -> LocalInstanceError {
+    LocalInstanceError::StateContinuity {
+        code: state_continuity::STATE_CODE_INSTANCE_STATE_UNVERIFIED,
+        detail: detail.to_string(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +143,16 @@ pub struct LocalRestoredSnapshot {
     pub assets: Vec<LocalRestoredAsset>,
 }
 
+/// What a Run of one Instance will actually receive, observed before it starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalRunStateObservation {
+    /// The saved-data point the Run's state was verified against. `None` when the
+    /// Instance carries no saved data.
+    pub snapshot_ref: Option<String>,
+    /// Saved slots whose live state was observed against the saved digest.
+    pub observed_slots: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalRestoredResource {
@@ -117,6 +161,11 @@ pub struct LocalRestoredResource {
     pub content_ref: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_content_ref: Option<String>,
+    /// The save format/version the snapshot declared for this slot. Absent for
+    /// data written before per-slot save declarations existed, which keeps the
+    /// restored metadata byte-identical for those Instances.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save: Option<InstanceSnapshotSaveV1>,
     pub path: String,
 }
 
@@ -227,31 +276,103 @@ impl LocalApplicationStore {
         Ok(Self { root })
     }
 
+    /// Import a portable Capsule as an independent Instance.
+    ///
+    /// Saved data is validated and compared with the selected Derivation before
+    /// anything is materialized. A difference that needs a migration is refused
+    /// here; [`Self::import_with_state_migration`] is the approved path.
     pub fn import(
         &self,
         bundle_bytes: &[u8],
         selected_derivation: Option<&str>,
     ) -> Result<LocalInstanceMetadata, LocalInstanceError> {
-        let bundle = match decode_capsule_bundle_document(bundle_bytes)
-            .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?
-        {
-            CapsuleBundleDocument::PortableApplicationV3(bundle)
-            | CapsuleBundleDocument::PortableApplicationV4(bundle) => bundle,
-            CapsuleBundleDocument::ComputationV2(_) => {
-                return Err(LocalInstanceError::NotPortableApplication);
-            }
-        };
+        self.import_with_state_migration(
+            bundle_bytes,
+            selected_derivation,
+            StateMigrationApproval::not_granted(),
+        )
+    }
+
+    /// Import, restoring saved data through the selected Derivation.
+    ///
+    /// Restore order, enforced here: validate the saved schema, compare the
+    /// target Derivation's declared slots/formats with the saved resources, and
+    /// — only with an explicit `approval` — transform an identity-copy
+    /// migration and verify the digests of what was imported. Nothing is
+    /// written to the Instance before those steps pass, so a refusal leaves the
+    /// saved data and the source bundle byte-for-byte untouched.
+    pub fn import_with_state_migration(
+        &self,
+        bundle_bytes: &[u8],
+        selected_derivation: Option<&str>,
+        approval: StateMigrationApproval,
+    ) -> Result<LocalInstanceMetadata, LocalInstanceError> {
+        let bundle = portable_bundle(bundle_bytes)?;
+        // Saved data is validated on read: an unknown schema is refused by name
+        // before any other requirement is checked, so a newer producer never
+        // looks like a partial restore.
+        if let Some(snapshot_ref) = bundle.index.instance_snapshot_ref.as_deref() {
+            let saved = snapshot_from_bundle(&bundle, snapshot_ref)?;
+            state_continuity::validate_saved_data(&saved).map_err(state_refusal)?;
+        }
         let selected_derivation = match selected_derivation {
-            Some(reference) => reference,
-            None if bundle.index.derivations.len() == 1 => &bundle.index.derivations[0],
+            Some(reference) => reference.to_owned(),
+            None if bundle.index.derivations.len() == 1 => bundle.index.derivations[0].clone(),
             None => {
                 return Err(LocalInstanceError::DerivationRequired {
                     count: bundle.index.derivations.len(),
                 });
             }
         };
-        let validated = validate_bundle_for_derivation(&bundle, selected_derivation)
+        // The declared slots/formats are compared with the saved data BEFORE the
+        // rest of the bundle is validated, so a Derivation that cannot read this
+        // saved data is refused by its own name rather than as a generic profile
+        // violation. Incompatibilities end the import here; a declared-readable
+        // version difference is handled below, where approval is required.
+        if let Some(snapshot_ref) = bundle.index.instance_snapshot_ref.as_deref() {
+            let saved = snapshot_from_bundle(&bundle, snapshot_ref)?;
+            let target_state = derivation_state_of(&bundle, &selected_derivation)?;
+            state_continuity::compare_state_slots_before_admission(&saved, &target_state)
+                .map_err(state_refusal)?;
+        }
+        let bytes = bundle_bytes.to_vec();
+        let validated = validate_bundle_for_derivation(&bundle, &selected_derivation)
             .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
+        // The D switch gate. No saved byte is materialized before it passes.
+        let saved = match validated.instance_snapshot_ref.as_ref() {
+            None => None,
+            Some(snapshot_ref) => {
+                let snapshot = snapshot_from_bundle(&bundle, snapshot_ref.as_str())?;
+                let compatibility = state_continuity::compare_state_slots(
+                    &snapshot,
+                    &validated.derivation.state,
+                    validated.realization,
+                )
+                .map_err(state_refusal)?;
+                let content = snapshot_content_map(&bundle, &snapshot)?;
+                // Observe what is about to be imported before writing anything.
+                state_continuity::observe_imported_content(&snapshot, &content)
+                    .map_err(state_refusal)?;
+                match compatibility {
+                    StateCompatibility::Compatible => Some(snapshot),
+                    StateCompatibility::MigrationRequired(migrations) => {
+                        if !approval.is_granted() {
+                            return Err(state_refusal(
+                                state_continuity::migration_approval_refusal(&migrations),
+                            ));
+                        }
+                        // v0 has one migration and it is an identity copy: the
+                        // target declared the saved version readable, so the
+                        // saved bytes AND their declared version are kept. The
+                        // source bundle (and its K) is never rewritten; the
+                        // approval is what changes.
+                        state_continuity::migrate_snapshot(&snapshot, &migrations)
+                            .map_err(state_refusal)?;
+                        Some(snapshot)
+                    }
+                }
+            }
+        };
         let application_id = application_id(&validated.application_ref.to_string())?;
         let created_at = observed_at();
         let application = LocalApplicationMetadata {
@@ -264,11 +385,11 @@ impl LocalApplicationStore {
         create_dir_all(&application_root.join("bundles"))?;
         ensure_application(&application_root.join("application.json"), &application)?;
 
-        let transport_sha256 = bundle_sha256(bundle_bytes);
+        let transport_sha256 = bundle_sha256(&bytes);
         let bundle_path = application_root
             .join("bundles")
             .join(format!("{}.capsule", digest_hex(&transport_sha256)?));
-        create_or_verify(&bundle_path, bundle_bytes)?;
+        create_or_verify(&bundle_path, &bytes)?;
 
         let instance_id = new_id("linst");
         let instance = LocalInstanceMetadata {
@@ -298,6 +419,11 @@ impl LocalApplicationStore {
                 .map(|snapshot_ref| self.materialize_snapshot(&instance_id, &bundle, snapshot_ref))
                 .transpose()?;
             self.prepare_filesystem_state(&instance_id, &validated, restored.as_ref())?;
+            // Restore is successful only after the digests of the bytes this
+            // Instance actually holds are observed against the saved index.
+            if let (Some(snapshot), Some(restored)) = (saved.as_ref(), restored.as_ref()) {
+                observe_restored_content(&instance_root, snapshot, restored)?;
+            }
             create_canonical(&instance_root.join("instance.json"), &instance)
         })();
         if let Err(error) = prepared {
@@ -365,7 +491,139 @@ impl LocalApplicationStore {
             )));
         }
         verify_restored_snapshot(&root, &restored)?;
+        // Restored metadata must trace to the saved resources it claims to come
+        // from: the saved-data index is never evidence on its own.
+        let bundle_bytes = self.bundle_bytes(&instance)?;
+        let bundle = portable_bundle(&bundle_bytes)?;
+        let snapshot = snapshot_from_bundle(&bundle, reference)?;
+        trace_restored_to_saved(&snapshot, &restored)?;
         Ok(Some(restored))
+    }
+
+    /// Restore evidence for this Instance: the restored copies.
+    ///
+    /// Recomputes the digest of every saved resource and Asset from the restored
+    /// files this Instance holds — including a fresh capture of the restored
+    /// filesystem state — and compares each with the saved-data index. A
+    /// snapshot reference alone is never evidence.
+    ///
+    /// The filesystem capture compares what a Run would read, so this is valid
+    /// only while no Run is mutating the state; a running Instance's state
+    /// legitimately differs from the saved point until it is saved again. The
+    /// Run gate built on this is [`Self::observe_run_state`], which also checks
+    /// that the selected Derivation can receive the saved data.
+    pub fn observe_restored_digests(&self, instance_id: &str) -> Result<(), LocalInstanceError> {
+        let instance = self.instance(instance_id)?;
+        let Some(snapshot_ref) = instance.data_snapshot_ref.as_deref() else {
+            return Ok(());
+        };
+        let bundle_bytes = self.bundle_bytes(&instance)?;
+        let bundle = portable_bundle(&bundle_bytes)?;
+        let snapshot = snapshot_from_bundle(&bundle, snapshot_ref)?;
+        state_continuity::validate_saved_data(&snapshot).map_err(state_refusal)?;
+        let restored = read_restored_snapshot(&self.snapshot_root(instance_id, snapshot_ref)?)?;
+        if restored.snapshot_ref != snapshot_ref {
+            return Err(LocalInstanceError::InvalidState(
+                "restored snapshot metadata does not name the saved snapshot".to_owned(),
+            ));
+        }
+        observe_restored_content(&self.instance_root(instance_id)?, &snapshot, &restored)
+    }
+
+    /// The state a Run of this Instance will actually receive, observed before
+    /// the Run starts.
+    ///
+    /// Unlike [`Self::observe_restored_digests`], which checks the restored
+    /// copies, this is the Run gate: it first requires the saved data to be
+    /// deliverable to the selected Derivation, then re-hashes the live state the
+    /// workload will read (a fresh capture of every declared filesystem slot,
+    /// the restored browser-state bytes the static surface will receive, and
+    /// every Asset) and compares each with the saved-data index. Only when that
+    /// succeeds is the saved snapshot reference evidence; a mismatch fails with
+    /// `instance_state_unverified`, so no receipt may cite a snapshot the Run
+    /// did not actually receive.
+    pub fn observe_run_state(
+        &self,
+        instance_id: &str,
+        derivation_ref: &str,
+    ) -> Result<LocalRunStateObservation, LocalInstanceError> {
+        let instance = self.instance(instance_id)?;
+        if instance.selected_derivation_ref != derivation_ref {
+            return Err(LocalInstanceError::InvalidState(format!(
+                "local instance `{instance_id}` is selected for `{}`, not `{derivation_ref}`",
+                instance.selected_derivation_ref
+            )));
+        }
+        let Some(snapshot_ref) = instance.data_snapshot_ref.as_deref() else {
+            return Ok(LocalRunStateObservation {
+                snapshot_ref: None,
+                observed_slots: Vec::new(),
+            });
+        };
+        let bundle_bytes = self.bundle_bytes(&instance)?;
+        let bundle = portable_bundle(&bundle_bytes)?;
+        let selected = validate_bundle_for_derivation(&bundle, derivation_ref)
+            .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
+        let snapshot = snapshot_from_bundle(&bundle, snapshot_ref)?;
+        let unverified = |refusal: StateContinuityRefusal| {
+            run_state_unverified(format!("local Instance `{instance_id}`: {refusal}"))
+        };
+        state_continuity::validate_saved_data(&snapshot).map_err(unverified)?;
+        state_continuity::check_state_delivery(
+            &snapshot,
+            &selected.derivation.state,
+            selected.realization,
+        )
+        .map_err(unverified)?;
+        let restored = read_restored_snapshot(&self.snapshot_root(instance_id, snapshot_ref)?)?;
+        if restored.snapshot_ref != snapshot_ref {
+            return Err(run_state_unverified(LocalInstanceError::InvalidState(
+                "restored snapshot metadata does not name the saved snapshot".to_owned(),
+            )));
+        }
+        observe_restored_content(&self.instance_root(instance_id)?, &snapshot, &restored).map_err(
+            |error| match error {
+                LocalInstanceError::StateContinuity { code, detail } => run_state_unverified(
+                    format!("local Instance `{instance_id}`: {code}: {detail}"),
+                ),
+                other => other,
+            },
+        )?;
+        Ok(LocalRunStateObservation {
+            snapshot_ref: Some(snapshot_ref.to_owned()),
+            observed_slots: snapshot
+                .resources
+                .iter()
+                .map(|resource| resource.slot.clone())
+                .collect(),
+        })
+    }
+
+    /// Whether another declared Derivation could restore this Instance's saved
+    /// data, and which migration that would need.
+    ///
+    /// This is the pre-switch comparison: it reads the saved resources and the
+    /// target Derivation's declarations and never writes anything.
+    pub fn state_compatibility_for_derivation(
+        &self,
+        instance_id: &str,
+        target_derivation_ref: &str,
+    ) -> Result<StateCompatibility, LocalInstanceError> {
+        let instance = self.instance(instance_id)?;
+        let bundle_bytes = self.bundle_bytes(&instance)?;
+        let bundle = portable_bundle(&bundle_bytes)?;
+        let validated = validate_bundle_for_derivation(&bundle, target_derivation_ref)
+            .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
+        let Some(snapshot_ref) = validated.instance_snapshot_ref.as_ref() else {
+            return Ok(StateCompatibility::Compatible);
+        };
+        let snapshot = snapshot_from_bundle(&bundle, snapshot_ref.as_str())?;
+        state_continuity::compare_state_slots(
+            &snapshot,
+            &validated.derivation.state,
+            validated.realization,
+        )
+        .map_err(state_refusal)
     }
 
     pub fn local_surface_snapshot(
@@ -624,6 +882,9 @@ impl LocalApplicationStore {
                 if resource.protocol == STATE_FILESYSTEM_PROTOCOL && resource.slot == state.id {
                     let mut resource = resource.clone();
                     resource.content_ref = filesystem_ref.clone();
+                    // Declare the format this Run wrote, so another Derivation
+                    // can compare instead of guessing.
+                    resource.save = declared_snapshot_save(&state.save);
                     snapshot.resources.push(resource);
                     replaced = true;
                     continue;
@@ -680,6 +941,9 @@ impl LocalApplicationStore {
                 slot: state.id.clone(),
                 protocol: STATE_FILESYSTEM_PROTOCOL.to_owned(),
                 content_ref: filesystem_ref,
+                // Declare the format this Run wrote. A route that declares
+                // nothing keeps the legacy declaration its saved data implies.
+                save: declared_snapshot_save(&state.save),
             });
         }
         snapshot
@@ -1029,8 +1293,9 @@ impl LocalApplicationStore {
             .payload_bytes(&snapshot_ref)
             .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
         let snapshot: InstanceSnapshotV1 = serde_json::from_slice(&snapshot_bytes)?;
-        validate_snapshot(&snapshot)
-            .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
+        // Saved data is validated on read, with a named refusal for a schema
+        // this build does not carry; never a partially restored Instance.
+        state_continuity::validate_saved_data(&snapshot).map_err(state_refusal)?;
         let root = self.snapshot_root(instance_id, snapshot_ref.as_str())?;
         create_dir_all(&root.join("resources"))?;
         create_dir_all(&root.join("assets"))?;
@@ -1039,6 +1304,15 @@ impl LocalApplicationStore {
         let mut asset_uris = BTreeMap::new();
         for asset in &snapshot.assets {
             let bytes = snapshot_content(bundle, &asset.content_ref)?;
+            if bundle_sha256(&bytes) != asset.content_ref {
+                return Err(state_refusal(StateContinuityRefusal::new(
+                    STATE_CODE_IMPORT_DIGEST_MISMATCH,
+                    format!(
+                        "imported content for saved Asset `{}` does not match its declared digest `{}`",
+                        asset.alias, asset.content_ref
+                    ),
+                )));
+            }
             if bytes.len() as u64 != asset.size {
                 return Err(LocalInstanceError::InvalidState(format!(
                     "portable Asset `{}` size does not match its metadata",
@@ -1064,6 +1338,16 @@ impl LocalApplicationStore {
         let mut resources = Vec::with_capacity(snapshot.resources.len());
         for (index, resource) in snapshot.resources.iter().enumerate() {
             let source_bytes = snapshot_content(bundle, &resource.content_ref)?;
+            // Observe what was imported, not just the index that names it.
+            if bundle_sha256(&source_bytes) != resource.content_ref {
+                return Err(state_refusal(StateContinuityRefusal::new(
+                    STATE_CODE_IMPORT_DIGEST_MISMATCH,
+                    format!(
+                        "imported content for saved slot `{}` does not match its declared digest `{}`",
+                        resource.slot, resource.content_ref
+                    ),
+                )));
+            }
             let bytes =
                 rebind_snapshot_resource_assets(&snapshot, resource, &source_bytes, &asset_uris)
                     .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
@@ -1077,6 +1361,7 @@ impl LocalApplicationStore {
                 protocol: resource.protocol.clone(),
                 content_ref,
                 source_content_ref,
+                save: resource.save.clone(),
                 path,
             });
         }
@@ -1111,6 +1396,239 @@ fn snapshot_content(
     bundle
         .payload_bytes(&reference)
         .map_err(|error| LocalInstanceError::Bundle(error.to_string()))
+}
+
+/// The declared state slots of one Derivation, decoded without validating the
+/// rest of the route: the pre-switch comparison must name an incompatibility
+/// before generic bundle validation gets a chance to report it differently.
+fn derivation_state_of(
+    bundle: &PortableApplicationBundle,
+    derivation_ref: &str,
+) -> Result<Vec<ato_formation::authoring::BoundState>, LocalInstanceError> {
+    if !bundle
+        .index
+        .derivations
+        .iter()
+        .any(|value| value == derivation_ref)
+    {
+        return Err(LocalInstanceError::Bundle(format!(
+            "selected derivation `{derivation_ref}` is not declared by this bundle"
+        )));
+    }
+    let reference = ContentRef::parse(derivation_ref.to_owned())
+        .map_err(|error| LocalInstanceError::InvalidState(error.to_string()))?;
+    let bytes = bundle
+        .payload_bytes(&reference)
+        .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
+    let derivation: ato_formation::authoring::BoundDerivation = serde_json::from_slice(&bytes)?;
+    Ok(derivation.state)
+}
+
+fn snapshot_from_bundle(
+    bundle: &PortableApplicationBundle,
+    snapshot_ref: &str,
+) -> Result<InstanceSnapshotV1, LocalInstanceError> {
+    let reference = ContentRef::parse(snapshot_ref.to_owned())
+        .map_err(|error| LocalInstanceError::InvalidState(error.to_string()))?;
+    let bytes = bundle
+        .payload_bytes(&reference)
+        .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+/// The saved-data declaration for a slot a Run just wrote: the Derivation's own
+/// declaration, or nothing when it declares nothing (the legacy pair).
+fn declared_snapshot_save(
+    declaration: &Option<StateSaveDeclaration>,
+) -> Option<InstanceSnapshotSaveV1> {
+    declaration.as_ref().map(|save| InstanceSnapshotSaveV1 {
+        format: save.format.clone(),
+        version: save.version,
+    })
+}
+
+fn snapshot_content_map(
+    bundle: &PortableApplicationBundle,
+    snapshot: &InstanceSnapshotV1,
+) -> Result<BTreeMap<String, Vec<u8>>, LocalInstanceError> {
+    let mut content = BTreeMap::new();
+    for reference in snapshot
+        .resources
+        .iter()
+        .map(|resource| &resource.content_ref)
+        .chain(snapshot.assets.iter().map(|asset| &asset.content_ref))
+    {
+        content.insert(reference.clone(), snapshot_content(bundle, reference)?);
+    }
+    Ok(content)
+}
+
+/// The restored metadata must trace to the saved resources it claims to come
+/// from: same slots, same protocols, the save declaration the writer made, and
+/// content that came from the saved digest (directly, or through the Asset
+/// alias rebinding that restore performs).
+///
+/// This never reads the state directory, so it is safe while a Run is live.
+fn trace_restored_to_saved(
+    snapshot: &InstanceSnapshotV1,
+    restored: &LocalRestoredSnapshot,
+) -> Result<(), LocalInstanceError> {
+    for resource in &snapshot.resources {
+        let restored_resource = restored
+            .resources
+            .iter()
+            .find(|candidate| {
+                candidate.slot == resource.slot && candidate.protocol == resource.protocol
+            })
+            .ok_or_else(|| {
+                state_refusal(StateContinuityRefusal::new(
+                    STATE_CODE_RESTORE_DIGEST_MISMATCH,
+                    format!(
+                        "saved slot `{}` is indexed but was not restored",
+                        resource.slot
+                    ),
+                ))
+            })?;
+        if restored_resource.save != resource.save {
+            return Err(state_refusal(StateContinuityRefusal::new(
+                STATE_CODE_RESTORE_DIGEST_MISMATCH,
+                format!(
+                    "restored slot `{}` does not carry the save declaration its saved data names",
+                    resource.slot
+                ),
+            )));
+        }
+        let traced = restored_resource.content_ref == resource.content_ref
+            || restored_resource.source_content_ref.as_deref()
+                == Some(resource.content_ref.as_str());
+        if !traced {
+            return Err(state_refusal(StateContinuityRefusal::new(
+                STATE_CODE_RESTORE_DIGEST_MISMATCH,
+                format!(
+                    "restored slot `{}` did not come from the saved digest `{}`",
+                    resource.slot, resource.content_ref
+                ),
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The restore gate: recompute every digest from the bytes this Instance
+/// actually holds and compare it with the saved-data index.
+///
+/// This is what makes a restore successful: the presence of a snapshot
+/// reference — or of the materialized files it names — is never evidence that
+/// the imported bytes were the saved ones.
+fn observe_restored_content(
+    instance_root: &Path,
+    snapshot: &InstanceSnapshotV1,
+    restored: &LocalRestoredSnapshot,
+) -> Result<(), LocalInstanceError> {
+    let root = instance_root
+        .join("snapshots")
+        .join(digest_hex(&restored.snapshot_ref)?);
+    let restored_path = |relative: &str| -> Result<PathBuf, LocalInstanceError> {
+        let path = Path::new(relative);
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(state_refusal(StateContinuityRefusal::new(
+                STATE_CODE_RESTORE_DIGEST_MISMATCH,
+                format!("restored snapshot path is unsafe: `{relative}`"),
+            )));
+        }
+        Ok(root.join(path))
+    };
+    trace_restored_to_saved(snapshot, restored)?;
+    for resource in &snapshot.resources {
+        let restored_resource = restored
+            .resources
+            .iter()
+            .find(|candidate| {
+                candidate.slot == resource.slot && candidate.protocol == resource.protocol
+            })
+            .ok_or_else(|| {
+                state_refusal(StateContinuityRefusal::new(
+                    STATE_CODE_RESTORE_DIGEST_MISMATCH,
+                    format!(
+                        "saved slot `{}` is indexed but was not restored",
+                        resource.slot
+                    ),
+                ))
+            })?;
+        let bytes = read(&restored_path(&restored_resource.path)?).map_err(|error| {
+            state_refusal(StateContinuityRefusal::new(
+                STATE_CODE_RESTORE_DIGEST_MISMATCH,
+                format!(
+                    "restored slot `{}` cannot be observed: {error}",
+                    resource.slot
+                ),
+            ))
+        })?;
+        if bundle_sha256(&bytes) != restored_resource.content_ref {
+            return Err(state_refusal(StateContinuityRefusal::new(
+                STATE_CODE_RESTORE_DIGEST_MISMATCH,
+                format!(
+                    "restored slot `{}` does not match its recorded digest `{}`",
+                    resource.slot, restored_resource.content_ref
+                ),
+            )));
+        }
+        if resource.protocol == STATE_FILESYSTEM_PROTOCOL {
+            // The Run reads the restored tree, so recompute the saved archive's
+            // digest from that tree. This is the observation the requirement
+            // names: not the index, the bytes the Run will actually import.
+            let state_path = instance_root.join("state").join(&resource.slot);
+            let observed = capture_filesystem_state(&state_path)
+                .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
+            if bundle_sha256(&observed) != resource.content_ref {
+                return Err(state_refusal(StateContinuityRefusal::new(
+                    STATE_CODE_RESTORE_DIGEST_MISMATCH,
+                    format!(
+                        "restored filesystem state `{}` does not observe the saved digest `{}`",
+                        resource.slot, resource.content_ref
+                    ),
+                )));
+            }
+        }
+    }
+    for asset in &snapshot.assets {
+        let restored_asset = restored
+            .assets
+            .iter()
+            .find(|candidate| candidate.alias == asset.alias)
+            .ok_or_else(|| {
+                state_refusal(StateContinuityRefusal::new(
+                    STATE_CODE_RESTORE_DIGEST_MISMATCH,
+                    format!(
+                        "saved Asset `{}` is indexed but was not restored",
+                        asset.alias
+                    ),
+                ))
+            })?;
+        let bytes = read(&restored_path(&restored_asset.path)?).map_err(|error| {
+            state_refusal(StateContinuityRefusal::new(
+                STATE_CODE_RESTORE_DIGEST_MISMATCH,
+                format!(
+                    "restored Asset `{}` cannot be observed: {error}",
+                    asset.alias
+                ),
+            ))
+        })?;
+        if bundle_sha256(&bytes) != asset.content_ref || bytes.len() as u64 != asset.size {
+            return Err(state_refusal(StateContinuityRefusal::new(
+                STATE_CODE_RESTORE_DIGEST_MISMATCH,
+                format!(
+                    "restored Asset `{}` does not match its saved digest `{}`",
+                    asset.alias, asset.content_ref
+                ),
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn local_asset_id(instance_id: &str, alias: &str) -> String {
@@ -1381,6 +1899,7 @@ mod tests {
         PortableRealizationKind, build_dynamic_process_oci_bundle, build_multi_derivation_bundle,
         build_static_bundle, validate_bytes_all,
     };
+    use base64::Engine;
 
     fn fixture_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-static-k")
@@ -1395,6 +1914,27 @@ mod tests {
     }
 
     fn stateful_fixture() -> (Vec<u8>, PortableApplicationBundle, String) {
+        let (bytes, bundle, process, _) = stateful_fixture_with_save(None);
+        (bytes, bundle, process)
+    }
+
+    fn save_declaration(
+        format: &str,
+        version: u32,
+        compatible_versions: &[u32],
+    ) -> StateSaveDeclaration {
+        StateSaveDeclaration {
+            format: format.to_owned(),
+            version,
+            compatible_versions: compatible_versions.to_vec(),
+        }
+    }
+
+    /// A two-Derivation capsule (process + OCI) over one filesystem state slot,
+    /// with the save declaration both routes state for it.
+    fn stateful_fixture_with_save(
+        save: Option<StateSaveDeclaration>,
+    ) -> (Vec<u8>, PortableApplicationBundle, String, String) {
         let environment = BTreeMap::from([
             ("APP_DB_PATH".to_owned(), "/data/notes.sqlite".to_owned()),
             ("PYTHONDONTWRITEBYTECODE".to_owned(), "1".to_owned()),
@@ -1432,6 +1972,7 @@ mod tests {
                 id: "data".to_owned(),
                 mount: "/data".to_owned(),
                 mount_required: None,
+                save,
             }),
             bindings: Vec::new(),
             requirements: vec![PortableHttpRequirementSpec {
@@ -1447,15 +1988,235 @@ mod tests {
         };
         let (bytes, bundle) = build_dynamic_process_oci_bundle(&stateful_fixture_root(), &spec)
             .expect("stateful fixture should build");
-        let process = validate_bytes_all(&bytes)
+        let routes = validate_bytes_all(&bytes)
             .expect("stateful fixture should validate")
+            .1;
+        let route_ref = |kind| {
+            routes
+                .iter()
+                .find(|route| route.realization == kind)
+                .expect("stateful fixture should contain the route")
+                .derivation_ref
+                .to_string()
+        };
+        (
+            bytes,
+            bundle,
+            route_ref(PortableRealizationKind::LocalProcess),
+            route_ref(PortableRealizationKind::OciContainer),
+        )
+    }
+
+    fn instance_json_path(store: &LocalApplicationStore, instance_id: &str) -> PathBuf {
+        store
+            .instance_root(instance_id)
+            .unwrap()
+            .join("instance.json")
+    }
+
+    fn write_and_save_filesystem_state(
+        store: &LocalApplicationStore,
+        instance_id: &str,
+        filename: &str,
+        bytes: &[u8],
+    ) -> LocalInstanceMetadata {
+        let state_dir = store
+            .filesystem_state_paths(instance_id)
+            .unwrap()
+            .remove("data")
+            .expect("the fixture declares one state slot");
+        fs::write(state_dir.join(filename), bytes).unwrap();
+        let run = store.claim_run(instance_id).unwrap();
+        let saved = store
+            .save_filesystem_state_for_run(instance_id, &run.token)
+            .unwrap()
+            .expect("a state-bearing Run saves its slot");
+        store.release_run(instance_id, &run.token).unwrap();
+        saved
+    }
+
+    fn read_state_file(
+        store: &LocalApplicationStore,
+        instance_id: &str,
+        filename: &str,
+    ) -> Vec<u8> {
+        let state_dir = store
+            .filesystem_state_paths(instance_id)
+            .unwrap()
+            .remove("data")
+            .unwrap();
+        fs::read(state_dir.join(filename)).unwrap()
+    }
+
+    fn saved_resource(bytes: &[u8]) -> InstanceSnapshotResourceV1 {
+        let bundle = validate_bytes_all(bytes).unwrap().0;
+        let snapshot = snapshot_from_bundle(
+            &bundle,
+            bundle
+                .index
+                .instance_snapshot_ref
+                .as_deref()
+                .expect("a saved bundle names its snapshot"),
+        )
+        .unwrap();
+        assert_eq!(snapshot.resources.len(), 1);
+        snapshot.resources[0].clone()
+    }
+
+    /// The reference a re-encoded bundle declares for one realization.
+    fn route_of(bytes: &[u8], kind: PortableRealizationKind) -> String {
+        validate_bytes_all(bytes)
+            .unwrap()
             .1
             .into_iter()
-            .find(|route| route.realization == PortableRealizationKind::LocalProcess)
-            .expect("stateful fixture should contain process route")
+            .find(|route| route.realization == kind)
+            .unwrap()
             .derivation_ref
-            .to_string();
-        (bytes, bundle, process)
+            .to_string()
+    }
+
+    /// Re-encode the bundle with one Derivation's state slot declaring `save`,
+    /// so the fixture can express two Ds that save the same slot differently.
+    fn bundle_with_state_save(
+        bytes: &[u8],
+        derivation_ref: &str,
+        save: StateSaveDeclaration,
+    ) -> Vec<u8> {
+        let mut bundle = validate_bytes_all(bytes).unwrap().0;
+        let reference = ContentRef::parse(derivation_ref.to_owned()).unwrap();
+        let payload = bundle.payload_bytes(&reference).unwrap();
+        let mut derivation: ato_formation::authoring::BoundDerivation =
+            serde_json::from_slice(&payload).unwrap();
+        derivation.state[0].save = Some(save);
+        let new_bytes = serde_jcs::to_vec(&derivation).unwrap();
+        let new_ref = derivation.derivation_ref().unwrap();
+        bundle
+            .index
+            .derivations
+            .retain(|value| value != derivation_ref);
+        bundle.index.derivations.push(new_ref.clone());
+        bundle.index.derivations.sort();
+        bundle
+            .index
+            .objects
+            .retain(|descriptor| descriptor.reference != derivation_ref);
+        bundle
+            .index
+            .objects
+            .push(ato_objects::PortableBundleObjectDescriptor {
+                reference: new_ref.clone(),
+                kind: ato_objects::PortableBundleObjectKind::Structured,
+                schema: Some(ato_formation::authoring::BOUND_DERIVATION_SCHEMA.to_owned()),
+                size: new_bytes.len() as u64,
+            });
+        bundle
+            .index
+            .objects
+            .sort_by(|left, right| left.reference.cmp(&right.reference));
+        bundle
+            .payloads
+            .retain(|payload| payload.reference != derivation_ref);
+        bundle.payloads.push(ato_objects::PortableBundlePayload {
+            reference: new_ref,
+            bytes: base64::engine::general_purpose::STANDARD.encode(&new_bytes),
+        });
+        bundle
+            .payloads
+            .sort_by(|left, right| left.reference.cmp(&right.reference));
+        ato_objects::encode_portable_application_bundle(&bundle).unwrap()
+    }
+
+    /// Re-encode the bundle with one Derivation declaring no state slot at all.
+    /// Returns the bytes and the DerivationRef the rewritten route now has.
+    fn bundle_without_derivation_state(bytes: &[u8], derivation_ref: &str) -> (Vec<u8>, String) {
+        let mut bundle = validate_bytes_all(bytes).unwrap().0;
+        let reference = ContentRef::parse(derivation_ref.to_owned()).unwrap();
+        let payload = bundle.payload_bytes(&reference).unwrap();
+        let mut derivation: ato_formation::authoring::BoundDerivation =
+            serde_json::from_slice(&payload).unwrap();
+        derivation.state.clear();
+        let new_bytes = serde_jcs::to_vec(&derivation).unwrap();
+        let new_ref = derivation.derivation_ref().unwrap();
+        bundle
+            .index
+            .derivations
+            .retain(|value| value != derivation_ref);
+        bundle.index.derivations.push(new_ref.clone());
+        bundle.index.derivations.sort();
+        bundle
+            .index
+            .objects
+            .retain(|descriptor| descriptor.reference != derivation_ref);
+        bundle
+            .index
+            .objects
+            .push(ato_objects::PortableBundleObjectDescriptor {
+                reference: new_ref.clone(),
+                kind: ato_objects::PortableBundleObjectKind::Structured,
+                schema: Some(ato_formation::authoring::BOUND_DERIVATION_SCHEMA.to_owned()),
+                size: new_bytes.len() as u64,
+            });
+        bundle
+            .index
+            .objects
+            .sort_by(|left, right| left.reference.cmp(&right.reference));
+        bundle
+            .payloads
+            .retain(|payload| payload.reference != derivation_ref);
+        bundle.payloads.push(ato_objects::PortableBundlePayload {
+            reference: new_ref.clone(),
+            bytes: base64::engine::general_purpose::STANDARD.encode(&new_bytes),
+        });
+        bundle
+            .payloads
+            .sort_by(|left, right| left.reference.cmp(&right.reference));
+        (
+            ato_objects::encode_portable_application_bundle(&bundle).unwrap(),
+            new_ref,
+        )
+    }
+
+    /// Re-encode the bundle with its saved data declaring another schema, to
+    /// prove an unknown saved-data version is refused rather than restored.
+    fn bundle_with_snapshot_schema(bytes: &[u8], schema: &str) -> Vec<u8> {
+        let mut bundle = validate_bytes_all(bytes).unwrap().0;
+        let old_ref = bundle.index.instance_snapshot_ref.clone().unwrap();
+        let payload = bundle
+            .payload_bytes(&ContentRef::parse(old_ref.clone()).unwrap())
+            .unwrap();
+        let mut snapshot: InstanceSnapshotV1 = serde_json::from_slice(&payload).unwrap();
+        snapshot.schema = schema.to_owned();
+        let new_bytes = serde_jcs::to_vec(&snapshot).unwrap();
+        let new_ref = bundle_sha256(&new_bytes);
+        bundle
+            .index
+            .objects
+            .retain(|descriptor| descriptor.reference != old_ref);
+        bundle
+            .payloads
+            .retain(|payload| payload.reference != old_ref);
+        bundle
+            .index
+            .objects
+            .push(ato_objects::PortableBundleObjectDescriptor {
+                reference: new_ref.clone(),
+                kind: ato_objects::PortableBundleObjectKind::Structured,
+                schema: Some(schema.to_owned()),
+                size: new_bytes.len() as u64,
+            });
+        bundle
+            .index
+            .objects
+            .sort_by(|left, right| left.reference.cmp(&right.reference));
+        bundle.payloads.push(ato_objects::PortableBundlePayload {
+            reference: new_ref.clone(),
+            bytes: base64::engine::general_purpose::STANDARD.encode(&new_bytes),
+        });
+        bundle
+            .payloads
+            .sort_by(|left, right| left.reference.cmp(&right.reference));
+        bundle.index.instance_snapshot_ref = Some(new_ref);
+        ato_objects::encode_portable_application_bundle(&bundle).unwrap()
     }
 
     fn snapshot_fixture() -> (InstanceSnapshotV1, BTreeMap<String, Vec<u8>>) {
@@ -1470,6 +2231,7 @@ mod tests {
                     slot: "main".to_owned(),
                     protocol: DATA_JSON_PROTOCOL.to_owned(),
                     content_ref: saved_data_ref.clone(),
+                    save: None,
                 }],
                 assets: vec![InstanceSnapshotAssetV1 {
                     alias: "asset-1".to_owned(),
@@ -1511,6 +2273,7 @@ mod tests {
                     slot: "main".to_owned(),
                     protocol: BROWSER_INSTANCE_STATE_PROTOCOL.to_owned(),
                     content_ref: browser_state_ref.clone(),
+                    save: None,
                 }],
                 assets: vec![InstanceSnapshotAssetV1 {
                     alias: "asset-1".to_owned(),
@@ -1534,6 +2297,12 @@ mod tests {
     }
 
     fn bundle_with_snapshot() -> (Vec<u8>, PortableApplicationBundle) {
+        bundle_with_browser_snapshot()
+    }
+
+    /// A saved bundle whose resource is `ato.data.json@1` — not deliverable to
+    /// any v0 route, so a restore through it must be refused by name.
+    fn bundle_with_data_json_snapshot() -> Vec<u8> {
         let (_, source) = build_static_bundle(&fixture_root(), "fixture").unwrap();
         let (_, source) = repack_portable_dependencies(
             &source,
@@ -1542,7 +2311,9 @@ mod tests {
         )
         .unwrap();
         let (snapshot, content) = snapshot_fixture();
-        attach_instance_snapshot(&source, snapshot, &content).unwrap()
+        attach_instance_snapshot(&source, snapshot, &content)
+            .unwrap()
+            .0
     }
 
     fn bundle_with_browser_snapshot() -> (Vec<u8>, PortableApplicationBundle) {
@@ -1889,7 +2660,8 @@ mod tests {
     #[test]
     fn filesystem_state_save_roundtrips_through_an_independent_instance() {
         let root = tempfile::tempdir().unwrap();
-        let (bytes, original, process_ref) = stateful_fixture();
+        let (bytes, original, process_ref, _) =
+            stateful_fixture_with_save(Some(save_declaration("app.notes.save", 1, &[])));
         let store = LocalApplicationStore::open(root.path()).unwrap();
         let imported = store.import(&bytes, Some(&process_ref)).unwrap();
         let state_path = store
@@ -1992,5 +2764,517 @@ mod tests {
         let error = store.restored_snapshot(&instance.instance_id).unwrap_err();
 
         assert!(error.to_string().contains("does not match"));
+    }
+
+    #[test]
+    fn cross_derivation_state_round_trip_restores_each_derivation() {
+        let root = tempfile::tempdir().unwrap();
+        let (bytes, source, process_ref, oci_ref) =
+            stateful_fixture_with_save(Some(save_declaration("app.notes.save", 1, &[])));
+        let original_derivations = source.index.derivations.clone();
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+
+        // Save under the process Derivation.
+        let first = store.import(&bytes, Some(&process_ref)).unwrap();
+        let first_saved =
+            write_and_save_filesystem_state(&store, &first.instance_id, "notes.sqlite", b"one");
+        let saved_under_process = store.export_instance(&first.instance_id).unwrap();
+        assert_eq!(
+            saved_resource(&saved_under_process).save,
+            Some(InstanceSnapshotSaveV1 {
+                format: "app.notes.save".to_owned(),
+                version: 1,
+            }),
+            "the writer's declaration travels with the saved data"
+        );
+
+        // Restore and update under the other declared Derivation.
+        let second = store.import(&saved_under_process, Some(&oci_ref)).unwrap();
+        assert_eq!(
+            read_state_file(&store, &second.instance_id, "notes.sqlite"),
+            b"one"
+        );
+        let second_saved =
+            write_and_save_filesystem_state(&store, &second.instance_id, "notes.sqlite", b"two");
+        assert_eq!(second.selected_derivation_ref, oci_ref);
+        assert_eq!(second_saved.selected_derivation_ref, oci_ref);
+        assert_eq!(second_saved.available_derivation_refs, original_derivations);
+        let saved_under_oci = store.export_instance(&second.instance_id).unwrap();
+
+        // Restore the original Derivation again and see the update.
+        let third = store.import(&saved_under_oci, Some(&process_ref)).unwrap();
+        assert_eq!(
+            read_state_file(&store, &third.instance_id, "notes.sqlite"),
+            b"two"
+        );
+        assert_eq!(third.selected_derivation_ref, process_ref);
+        assert_eq!(first_saved.selected_derivation_ref, process_ref);
+        assert_ne!(first.contract_ref, second.contract_ref);
+        assert_ne!(second.contract_ref, third.contract_ref);
+    }
+
+    #[test]
+    fn incompatible_saved_formats_are_refused_by_name_without_data_loss() {
+        let root = tempfile::tempdir().unwrap();
+        let (bytes, _, process_ref, oci_ref) =
+            stateful_fixture_with_save(Some(save_declaration("app.notes.save", 1, &[])));
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let first = store.import(&bytes, Some(&process_ref)).unwrap();
+        write_and_save_filesystem_state(&store, &first.instance_id, "notes.sqlite", b"one");
+        let saved = store.export_instance(&first.instance_id).unwrap();
+        let instance_bytes = fs::read(instance_json_path(&store, &first.instance_id)).unwrap();
+
+        let other_format = bundle_with_state_save(
+            &saved,
+            &oci_ref,
+            save_declaration("app.notes.other-save", 1, &[]),
+        );
+        let other_format_ref = route_of(&other_format, PortableRealizationKind::OciContainer);
+        let error = store
+            .import(&other_format, Some(&other_format_ref))
+            .unwrap_err();
+        assert_eq!(
+            error.state_continuity_code(),
+            Some(state_continuity::STATE_CODE_FORMAT_INCOMPATIBLE),
+            "a different save format is refused by name: {error}"
+        );
+
+        let newer_version =
+            bundle_with_state_save(&saved, &oci_ref, save_declaration("app.notes.save", 2, &[]));
+        let newer_version_ref = route_of(&newer_version, PortableRealizationKind::OciContainer);
+        let error = store
+            .import(&newer_version, Some(&newer_version_ref))
+            .unwrap_err();
+        assert_eq!(
+            error.state_continuity_code(),
+            Some(state_continuity::STATE_CODE_VERSION_INCOMPATIBLE),
+            "an undeclared version difference is refused by name: {error}"
+        );
+
+        // Refusal is total: the saved data and the source Instance are unchanged.
+        assert_eq!(store.export_instance(&first.instance_id).unwrap(), saved);
+        assert_eq!(
+            fs::read(instance_json_path(&store, &first.instance_id)).unwrap(),
+            instance_bytes
+        );
+        assert_eq!(
+            fs::read_dir(root.path().join("instances")).unwrap().count(),
+            1,
+            "a refused switch leaves no partial Instance behind"
+        );
+    }
+
+    #[test]
+    fn a_derivation_that_declares_no_state_cannot_read_saved_state() {
+        let root = tempfile::tempdir().unwrap();
+        let (bytes, _, process_ref, oci_ref) = stateful_fixture_with_save(None);
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let first = store.import(&bytes, Some(&process_ref)).unwrap();
+        write_and_save_filesystem_state(&store, &first.instance_id, "notes.sqlite", b"one");
+        let saved = store.export_instance(&first.instance_id).unwrap();
+
+        // This bundle would be refused by generic validation too; the point is
+        // that the import names the state reason first.
+        let (other, other_ref) = bundle_without_derivation_state(&saved, &oci_ref);
+        let error = store.import(&other, Some(&other_ref)).unwrap_err();
+
+        assert_eq!(
+            error.state_continuity_code(),
+            Some(state_continuity::STATE_CODE_SLOT_UNDECLARED),
+            "switching to a Derivation that would silently drop saved state is refused by name: {error}"
+        );
+        assert_eq!(store.export_instance(&first.instance_id).unwrap(), saved);
+        assert_eq!(
+            fs::read_dir(root.path().join("instances")).unwrap().count(),
+            1
+        );
+    }
+
+    #[test]
+    fn cross_derivation_migration_needs_approval_and_is_an_identity_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let (bytes, _, process_ref, oci_ref) =
+            stateful_fixture_with_save(Some(save_declaration("app.notes.save", 1, &[])));
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let first = store.import(&bytes, Some(&process_ref)).unwrap();
+        write_and_save_filesystem_state(&store, &first.instance_id, "notes.sqlite", b"one");
+        let saved = store.export_instance(&first.instance_id).unwrap();
+        let saved_resource_before = saved_resource(&saved);
+
+        // The other Derivation reads v1 unchanged and now saves v2.
+        let migrated_source = bundle_with_state_save(
+            &saved,
+            &oci_ref,
+            save_declaration("app.notes.save", 2, &[1]),
+        );
+
+        let migrated_source_ref = route_of(&migrated_source, PortableRealizationKind::OciContainer);
+        let refused = store
+            .import(&migrated_source, Some(&migrated_source_ref))
+            .unwrap_err();
+        assert_eq!(
+            refused.state_continuity_code(),
+            Some(state_continuity::STATE_CODE_MIGRATION_APPROVAL_REQUIRED),
+            "a migration needs explicit approval: {refused}"
+        );
+        assert_eq!(
+            fs::read_dir(root.path().join("instances")).unwrap().count(),
+            1
+        );
+
+        let migrated = store
+            .import_with_state_migration(
+                &migrated_source,
+                Some(&migrated_source_ref),
+                StateMigrationApproval::granted(),
+            )
+            .unwrap();
+        assert_eq!(
+            read_state_file(&store, &migrated.instance_id, "notes.sqlite"),
+            b"one"
+        );
+        let migrated_export = store.export_instance(&migrated.instance_id).unwrap();
+        let migrated_resource = saved_resource(&migrated_export);
+        assert_eq!(
+            migrated_resource.save,
+            Some(InstanceSnapshotSaveV1 {
+                format: "app.notes.save".to_owned(),
+                version: 1,
+            }),
+            "reading v1 is not converting it: the saved version is preserved"
+        );
+        assert_eq!(
+            migrated_resource.content_ref, saved_resource_before.content_ref,
+            "the migration copies the saved bytes, it does not reinterpret them"
+        );
+        assert_eq!(
+            saved_resource(&migrated_export),
+            saved_resource_before,
+            "export/import keeps the saved resource byte-for-byte"
+        );
+        assert_eq!(
+            migrated_export, migrated_source,
+            "the approved import keeps the v1 saved bundle as it is"
+        );
+        // The original saved data is untouched byte-for-byte.
+        assert_eq!(store.export_instance(&first.instance_id).unwrap(), saved);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_migration_commit_leaves_the_original_saved_data_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let (bytes, _, process_ref, oci_ref) =
+            stateful_fixture_with_save(Some(save_declaration("app.notes.save", 1, &[])));
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let first = store.import(&bytes, Some(&process_ref)).unwrap();
+        write_and_save_filesystem_state(&store, &first.instance_id, "notes.sqlite", b"one");
+        let saved = store.export_instance(&first.instance_id).unwrap();
+        let instance_bytes = fs::read(instance_json_path(&store, &first.instance_id)).unwrap();
+        let snapshot_ref = store
+            .instance(&first.instance_id)
+            .unwrap()
+            .data_snapshot_ref
+            .unwrap();
+        let restored_before = fs::read(
+            store
+                .snapshot_root(&first.instance_id, &snapshot_ref)
+                .unwrap()
+                .join("snapshot.json"),
+        )
+        .unwrap();
+
+        let migrated_source = bundle_with_state_save(
+            &saved,
+            &oci_ref,
+            save_declaration("app.notes.save", 2, &[1]),
+        );
+        // The approved migration transforms (identity copy) and verifies, but
+        // committing the new Instance fails.
+        let instances = root.path().join("instances");
+        fs::set_permissions(&instances, fs::Permissions::from_mode(0o555)).unwrap();
+        let migrated_source_ref = route_of(&migrated_source, PortableRealizationKind::OciContainer);
+        let error = store
+            .import_with_state_migration(
+                &migrated_source,
+                Some(&migrated_source_ref),
+                StateMigrationApproval::granted(),
+            )
+            .unwrap_err();
+        fs::set_permissions(&instances, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(matches!(error, LocalInstanceError::Io { .. }), "{error}");
+        assert_eq!(store.export_instance(&first.instance_id).unwrap(), saved);
+        assert_eq!(
+            fs::read(instance_json_path(&store, &first.instance_id)).unwrap(),
+            instance_bytes
+        );
+        assert_eq!(
+            fs::read(
+                store
+                    .snapshot_root(&first.instance_id, &snapshot_ref)
+                    .unwrap()
+                    .join("snapshot.json"),
+            )
+            .unwrap(),
+            restored_before
+        );
+        assert_eq!(
+            fs::read_dir(root.path().join("instances")).unwrap().count(),
+            1
+        );
+    }
+
+    #[test]
+    fn an_unknown_saved_data_schema_is_refused_by_name() {
+        let root = tempfile::tempdir().unwrap();
+        let (bytes, _, process_ref) = stateful_fixture();
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let first = store.import(&bytes, Some(&process_ref)).unwrap();
+        write_and_save_filesystem_state(&store, &first.instance_id, "notes.sqlite", b"one");
+        let saved = store.export_instance(&first.instance_id).unwrap();
+
+        let unsupported = bundle_with_snapshot_schema(&saved, "ato.portable-instance-snapshot/2");
+        let error = store.import(&unsupported, Some(&process_ref)).unwrap_err();
+
+        assert_eq!(
+            error.state_continuity_code(),
+            Some(state_continuity::STATE_CODE_SNAPSHOT_SCHEMA_UNKNOWN),
+            "a newer saved-data schema is refused by name: {error}"
+        );
+        assert_eq!(store.export_instance(&first.instance_id).unwrap(), saved);
+        assert_eq!(
+            fs::read_dir(root.path().join("instances")).unwrap().count(),
+            1
+        );
+    }
+
+    #[test]
+    fn restore_succeeds_only_after_the_imported_digest_is_observed() {
+        let root = tempfile::tempdir().unwrap();
+        let (bytes, _, process_ref, _) =
+            stateful_fixture_with_save(Some(save_declaration("app.notes.save", 1, &[])));
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let first = store.import(&bytes, Some(&process_ref)).unwrap();
+        write_and_save_filesystem_state(&store, &first.instance_id, "notes.sqlite", b"one");
+        let saved = store.export_instance(&first.instance_id).unwrap();
+
+        let restored = store.import(&saved, Some(&process_ref)).unwrap();
+        store
+            .observe_restored_digests(&restored.instance_id)
+            .unwrap();
+
+        // The snapshot reference alone is not evidence: with the restored
+        // content gone, the observation must fail.
+        let snapshot_ref = store
+            .instance(&restored.instance_id)
+            .unwrap()
+            .data_snapshot_ref
+            .unwrap();
+        let snapshot_root = store
+            .snapshot_root(&restored.instance_id, &snapshot_ref)
+            .unwrap();
+        let state = store
+            .restored_snapshot(&restored.instance_id)
+            .unwrap()
+            .unwrap();
+        fs::remove_file(snapshot_root.join(&state.resources[0].path)).unwrap();
+
+        let error = store
+            .observe_restored_digests(&restored.instance_id)
+            .unwrap_err();
+        assert_eq!(
+            error.state_continuity_code(),
+            Some(state_continuity::STATE_CODE_RESTORE_DIGEST_MISMATCH)
+        );
+        assert!(store.restored_snapshot(&restored.instance_id).is_err());
+    }
+
+    #[test]
+    fn a_run_that_changes_the_restored_state_cannot_claim_the_saved_digest() {
+        let root = tempfile::tempdir().unwrap();
+        let (bytes, _, process_ref, _) =
+            stateful_fixture_with_save(Some(save_declaration("app.notes.save", 1, &[])));
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let first = store.import(&bytes, Some(&process_ref)).unwrap();
+        write_and_save_filesystem_state(&store, &first.instance_id, "notes.sqlite", b"one");
+        let saved = store.export_instance(&first.instance_id).unwrap();
+
+        let restored = store.import(&saved, Some(&process_ref)).unwrap();
+        store
+            .observe_restored_digests(&restored.instance_id)
+            .unwrap();
+        let state_dir = store
+            .filesystem_state_paths(&restored.instance_id)
+            .unwrap()
+            .remove("data")
+            .unwrap();
+        fs::write(state_dir.join("notes.sqlite"), b"changed by the Run").unwrap();
+
+        let error = store
+            .observe_restored_digests(&restored.instance_id)
+            .unwrap_err();
+
+        assert_eq!(
+            error.state_continuity_code(),
+            Some(state_continuity::STATE_CODE_RESTORE_DIGEST_MISMATCH)
+        );
+    }
+
+    #[test]
+    fn an_undeclared_save_format_is_refused_on_a_derivation_switch() {
+        let root = tempfile::tempdir().unwrap();
+        // Legacy fixture: neither route declares a save format.
+        let (bytes, _, process_ref, oci_ref) = stateful_fixture_with_save(None);
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let first = store.import(&bytes, Some(&process_ref)).unwrap();
+        write_and_save_filesystem_state(&store, &first.instance_id, "notes.sqlite", b"one");
+        let saved = store.export_instance(&first.instance_id).unwrap();
+
+        let error = store.import(&saved, Some(&oci_ref)).unwrap_err();
+
+        assert_eq!(
+            error.state_continuity_code(),
+            Some(state_continuity::STATE_CODE_FORMAT_UNDECLARED),
+            "an undeclared save format is not a shared legacy format: {error}"
+        );
+        assert_eq!(store.export_instance(&first.instance_id).unwrap(), saved);
+        assert_eq!(
+            fs::read_dir(root.path().join("instances")).unwrap().count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_data_json_snapshot_is_refused_as_undeliverable() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = bundle_with_data_json_snapshot();
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+
+        let error = store.import(&bytes, None).unwrap_err();
+
+        assert_eq!(
+            error.state_continuity_code(),
+            Some(state_continuity::STATE_CODE_RESOURCE_NOT_DELIVERABLE),
+            "a data.json resource is delivered to no v0 route: {error}"
+        );
+        assert_eq!(
+            fs::read_dir(root.path().join("instances")).unwrap().count(),
+            0
+        );
+    }
+
+    #[test]
+    fn observe_run_state_verifies_the_state_a_run_receives() {
+        let root = tempfile::tempdir().unwrap();
+        let (bytes, _, process_ref, _) =
+            stateful_fixture_with_save(Some(save_declaration("app.notes.save", 1, &[])));
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let instance = store.import(&bytes, Some(&process_ref)).unwrap();
+        write_and_save_filesystem_state(&store, &instance.instance_id, "notes.sqlite", b"one");
+
+        let observed = store
+            .observe_run_state(&instance.instance_id, &process_ref)
+            .unwrap();
+
+        assert_eq!(
+            observed.snapshot_ref,
+            store
+                .instance(&instance.instance_id)
+                .unwrap()
+                .data_snapshot_ref
+        );
+        assert_eq!(observed.observed_slots, vec!["data".to_owned()]);
+    }
+
+    #[test]
+    fn observe_run_state_refuses_live_state_that_changed() {
+        let root = tempfile::tempdir().unwrap();
+        let (bytes, _, process_ref, _) =
+            stateful_fixture_with_save(Some(save_declaration("app.notes.save", 1, &[])));
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let instance = store.import(&bytes, Some(&process_ref)).unwrap();
+        write_and_save_filesystem_state(&store, &instance.instance_id, "notes.sqlite", b"one");
+
+        // The live state the Run would read is no longer the saved state.
+        let state_dir = store
+            .filesystem_state_paths(&instance.instance_id)
+            .unwrap()
+            .remove("data")
+            .unwrap();
+        fs::write(state_dir.join("notes.sqlite"), b"changed after the save").unwrap();
+
+        let error = store
+            .observe_run_state(&instance.instance_id, &process_ref)
+            .unwrap_err();
+
+        assert_eq!(
+            error.state_continuity_code(),
+            Some(state_continuity::STATE_CODE_INSTANCE_STATE_UNVERIFIED),
+            "the Run gate names the unverified state: {error}"
+        );
+        assert!(
+            error.to_string().contains(instance.instance_id.as_str()),
+            "the refusal names the Instance: {error}"
+        );
+    }
+
+    #[test]
+    fn observe_run_state_requires_the_selected_derivation() {
+        let root = tempfile::tempdir().unwrap();
+        let (bytes, _, process_ref, oci_ref) =
+            stateful_fixture_with_save(Some(save_declaration("app.notes.save", 1, &[])));
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let instance = store.import(&bytes, Some(&process_ref)).unwrap();
+
+        let error = store
+            .observe_run_state(&instance.instance_id, &oci_ref)
+            .unwrap_err();
+
+        assert!(
+            matches!(error, LocalInstanceError::InvalidState(_)),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn same_derivation_restart_does_not_require_save_format_declarations() {
+        let root = tempfile::tempdir().unwrap();
+        // Legacy route and legacy saved data: no declaration on either side.
+        let (bytes, _, process_ref) = stateful_fixture();
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let instance = store.import(&bytes, Some(&process_ref)).unwrap();
+        write_and_save_filesystem_state(&store, &instance.instance_id, "notes.sqlite", b"one");
+
+        // Starting the same selected Derivation again is not a format switch.
+        let observed = store
+            .observe_run_state(&instance.instance_id, &process_ref)
+            .unwrap();
+        assert!(observed.snapshot_ref.is_some());
+    }
+
+    #[test]
+    fn new_state_declarations_stay_absent_from_legacy_bytes() {
+        let (bytes, _, process_ref) = stateful_fixture();
+        let bundle = validate_bytes_all(&bytes).unwrap().0;
+        let derivation_bytes = bundle
+            .payload_bytes(&ContentRef::parse(process_ref).unwrap())
+            .unwrap();
+        assert!(
+            !String::from_utf8(derivation_bytes)
+                .unwrap()
+                .contains("\"save\""),
+            "a route that declares no save format keeps its exact bytes"
+        );
+
+        let (snapshot, _) = snapshot_fixture();
+        assert!(
+            !serde_jcs::to_string(&snapshot)
+                .unwrap()
+                .contains("\"save\""),
+            "a legacy saved resource keeps its exact bytes"
+        );
     }
 }
