@@ -57,6 +57,10 @@ enum Command {
         /// The Port the served app declares (defaults to tasks).
         #[arg(long, default_value = "tasks")]
         app_port: String,
+        /// Allow binding the plaintext API to a non-loopback address. Without
+        /// it the bearer token would cross the network in the clear.
+        #[arg(long)]
+        allow_plaintext_bind: bool,
     },
     /// Ask a running coordinator for its health.
     Health {
@@ -262,11 +266,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             apps_dir,
             app_instance,
             app_port,
+            allow_plaintext_bind,
         } => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
-            runtime.block_on(serve(db, addr, token, apps_dir, app_instance, app_port))
+            runtime.block_on(serve(
+                db,
+                addr,
+                token,
+                apps_dir,
+                app_instance,
+                app_port,
+                allow_plaintext_bind,
+            ))
         }
     }
 }
@@ -278,7 +291,18 @@ async fn serve(
     apps_dir: Option<PathBuf>,
     app_instance: Option<String>,
     app_port: String,
+    allow_plaintext_bind: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let socket: std::net::SocketAddr = addr
+        .parse()
+        .map_err(|_| format!("invalid --addr {addr} (expected IP:port)"))?;
+    if !socket.ip().is_loopback() && !allow_plaintext_bind {
+        return Err(
+            "refusing to serve the plaintext Coordinator API on a non-loopback address; \
+             pass --allow-plaintext-bind only on a trusted network"
+                .into(),
+        );
+    }
     let coordinator = Coordinator::open(&db)?;
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let state = Arc::new(ApiState {
