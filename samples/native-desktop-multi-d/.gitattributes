@@ -1,0 +1,3 @@
+# Keep fixture bytes identical on every checkout: the Contract body digest is
+# over the exact bytes served, so CRLF conversion would change K.
+* -text

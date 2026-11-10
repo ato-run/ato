@@ -20,7 +20,9 @@ pub mod capability;
 pub mod docker;
 pub mod reason;
 
-pub use capability::{ConnectorChoice, ExecutionRequirements, HostFacts, execution_status};
+pub use capability::{
+    ConnectorChoice, ExecutionRequirements, HostFacts, NativeFacts, execution_status,
+};
 pub use docker::{
     DockerFacts, DockerProbeInput, EndpointKind, PlatformSupport, WorkspaceSharing, facts_from,
     parse_platform, probe,
