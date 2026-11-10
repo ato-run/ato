@@ -450,8 +450,8 @@ fn protocol_list_prints_the_registry_view() {
 
 #[test]
 fn resource_export_writes_the_document_with_its_digest() {
-    let snapshot = r#"{"resource_id":"dres_1","protocol":"todo.board@1","revision":2,"generation":0,"content_digest":"sha256:abc123","byte_size":17,"document":{"tasks":{"t1":{"id":"t1"}}}}"#;
-    let (port, handle) = stub(vec![(200, snapshot)]);
+    let envelope = r#"{"schema":"ato.data.export/v1","resource_id":"dres_1","protocol":"todo.board@1","revision":2,"generation":0,"content_digest":"sha256:abc123","byte_size":17,"document":{"tasks":{"t1":{"id":"t1"}}}}"#;
+    let (port, requests, handle) = capturing_stub(vec![(200, envelope)]);
     let directory = tempfile::tempdir().unwrap();
     let out = directory.path().join("export.json");
     let output = ato()
@@ -478,6 +478,8 @@ fn resource_export_writes_the_document_with_its_digest() {
     assert_eq!(export["revision"], 2);
     assert_eq!(export["content_digest"], "sha256:abc123");
     assert_eq!(export["document"]["tasks"]["t1"]["id"], "t1");
+    let request = requests.lock().unwrap()[0].clone();
+    assert!(request.contains("/export"), "{request}");
 }
 
 #[test]

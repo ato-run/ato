@@ -495,40 +495,29 @@ fn inspect(coordinator: &CoordinatorArgs, resource_id: &str) -> Result<()> {
 const EXPORT_SCHEMA: &str = "ato.data.export/v1";
 
 fn resource_export(coordinator: &CoordinatorArgs, resource_id: &str, out: &PathBuf) -> Result<()> {
-    let snapshot = request(
+    // The authority owns the envelope: it writes the digest next to the
+    // document it hashed, so the CLI never reconstructs it from parts.
+    let export = request(
         coordinator,
         reqwest::Method::GET,
-        &format!("/v1/data-resources/{resource_id}/document"),
+        &format!("/v1/data-resources/{resource_id}/export"),
         None,
     )?;
-    let resource_id = snapshot
+    if export.get("schema").and_then(Value::as_str) != Some(EXPORT_SCHEMA) {
+        bail!("Coordinator returned an unexpected export schema");
+    }
+    let resource_id = export
         .get("resource_id")
         .and_then(Value::as_str)
         .context("Coordinator response has no resource_id")?;
-    let protocol = snapshot
-        .get("protocol")
-        .and_then(Value::as_str)
-        .context("Coordinator response has no protocol")?;
-    let revision = snapshot
+    let revision = export
         .get("revision")
         .and_then(Value::as_i64)
         .unwrap_or_default();
-    let digest = snapshot
+    let digest = export
         .get("content_digest")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let document = snapshot
-        .get("document")
-        .cloned()
-        .context("Coordinator response has no document")?;
-    let export = json!({
-        "schema": EXPORT_SCHEMA,
-        "resource_id": resource_id,
-        "protocol": protocol,
-        "revision": revision,
-        "content_digest": digest,
-        "document": document,
-    });
     std::fs::write(out, serde_json::to_vec_pretty(&export)?)
         .with_context(|| format!("write export {}", out.display()))?;
     println!(
