@@ -204,3 +204,19 @@ PASS
 So the distributable is not macOS-specific and the written steps work on a
 second OS. (The builder also learned to run outside a git checkout, which is how
 release CI may invoke it.)
+
+## Capsule bytes are identical across macOS and Linux builds
+
+Building the quick-start bundle on macOS arm64 and on Linux x86_64 from the same
+sample sources produced **byte-identical capsules**:
+
+| capsule | SHA-256 (both hosts) |
+|---|---|
+| `todo.capsule` | `d658283878f54096d0e9297927d4e1e331cb6f2c458e9371992224c658d3ed5e` |
+| `calendar.capsule` | `6e8ba3d5d7387fc198f2e2da6cccb14e5067d5c5307a875c22e65422f4b30bd6` |
+| `excalidraw.capsule` | `c42477d4e4bcbc252e00794e8fac77f1e5a36ca2c3e4181e596d56280557eb30` |
+
+The tar wrapper differs (owner names carry the build host), but the capsule
+payloads — the digests `workspace.toml` pins — are stable. That matters for
+cross-host continuation: a bundle built on CI can be resumed on another host
+without re-pinning.
