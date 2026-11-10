@@ -1068,6 +1068,21 @@ impl Coordinator {
         Ok(tools)
     }
 
+    /// Every binding (any status) for the admin/CLI view, newest first.
+    pub fn list_bindings(&self) -> Result<Vec<Binding>, CoordinatorError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT id FROM bindings ORDER BY created_at DESC, id")?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut bindings = Vec::new();
+        for id in ids {
+            bindings.push(self.read_binding(&id)?);
+        }
+        Ok(bindings)
+    }
+
     /// Active bindings serving one app instance, for the bridge's requirements.
     pub fn bindings_for_instance(
         &self,
@@ -1728,5 +1743,40 @@ export function createTask({ arguments: args, state }) {
             .unwrap();
         let used = coordinator.read_binding(&binding.binding_id).unwrap();
         assert!(used.last_used_at.is_some());
+    }
+
+    #[test]
+    fn lists_every_binding() {
+        let mut coordinator = Coordinator::open_in_memory().unwrap();
+        let created = coordinator
+            .create_resource(
+                "local",
+                "todo.board@1",
+                None,
+                serde_json::json!({"tasks": {}}),
+            )
+            .unwrap();
+        coordinator
+            .bind_resource(
+                &created.resource_id,
+                "tasks",
+                "todo.board@1",
+                "read",
+                Vec::new(),
+            )
+            .unwrap();
+        coordinator
+            .bind_resource_for_instance(
+                &created.resource_id,
+                "tasks",
+                "todo.board@1",
+                "read",
+                Vec::new(),
+                "app-1",
+            )
+            .unwrap();
+        let bindings = coordinator.list_bindings().unwrap();
+        assert_eq!(bindings.len(), 2);
+        assert!(bindings.iter().any(|binding| binding.instance_id.is_some()));
     }
 }
