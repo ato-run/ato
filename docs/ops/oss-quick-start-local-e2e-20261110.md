@@ -220,3 +220,19 @@ The tar wrapper differs (owner names carry the build host), but the capsule
 payloads — the digests `workspace.toml` pins — are stable. That matters for
 cross-host continuation: a bundle built on CI can be resumed on another host
 without re-pinning.
+
+## Cross-host with independently built bundles (Linux → macOS)
+
+The Linux-built quick-start bundle was opened on `ubuntu-sugamo`, a task was
+created (`from linux bundle`, due 2027-03-03), and the workspace stopped,
+writing `workspace.checkpoint.toml`. The whole directory (workspace.toml, the
+three capsules, the checkpoint and its `.state/` objects) was copied to macOS
+arm64 and resumed there:
+
+- calendar bridge returned the Linux-created task;
+- the shell had three panes and the saved split (`0.4`);
+- no re-pinning was needed — the capsules are byte-identical across the two
+  builds.
+
+This is the "pick up your work on another computer" path with artifacts that
+came from different hosts, not a copied build.
