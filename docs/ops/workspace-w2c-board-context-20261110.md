@@ -25,10 +25,19 @@ PASS: one Task Board instance switched from the personal to the team Resource
 
 Screenshot: `.tmp/board-team-context.png`.
 
+## All view (ato-samples #15)
+
+The Board selector also offers **All**: it loads both observations and composes
+one display. Every edit is refused while All is selected, so there is no third
+document and no ambiguous write target.
+
+```
+all view -> both visible: true | read-only: true
+page errors: none
+```
+
 ## Not done
 
-- The **All** view (merged display of personal + team) — must be read-only over
-  the two observations and must not create a third document.
 - Hosted runtime needs the team Port's operation set in the manifest
   (e.g. `todo_team_*`); the selfhost bridge addressed the Port directly, which
   is not the hosted contract yet.
