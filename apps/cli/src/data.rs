@@ -1597,15 +1597,19 @@ pub(crate) fn create_resource_with_document(
 ) -> Result<String> {
     // A shared Coordinator already holds the authoritative Resource; creating a
     // second one would split the workspace's data. Reuse the matching one.
-    let listed = request(coordinator, reqwest::Method::GET, "/v1/data-resources", None)?;
+    let listed = request(
+        coordinator,
+        reqwest::Method::GET,
+        "/v1/data-resources",
+        None,
+    )?;
     if let Some(existing) = listed
         .get("resources")
         .and_then(Value::as_array)
         .and_then(|resources| {
             resources.iter().find(|resource| {
                 resource.get("protocol").and_then(Value::as_str) == Some(protocol)
-                    && resource.get("display_name").and_then(Value::as_str)
-                        == Some(display_name)
+                    && resource.get("display_name").and_then(Value::as_str) == Some(display_name)
             })
         })
         .and_then(|resource| resource.get("resource_id").and_then(Value::as_str))

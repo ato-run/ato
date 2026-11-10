@@ -14,6 +14,7 @@ mod model_cache;
 mod object_transport;
 mod portable_dependency;
 pub mod workspace;
+mod workspace_control;
 pub mod zip_store;
 
 pub mod activity_client;

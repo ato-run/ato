@@ -697,27 +697,28 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
-fn wait_for_shutdown() -> Result<()> {
+fn install_signal_flag() -> Result<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    let flag = Arc::new(AtomicBool::new(false));
     #[cfg(unix)]
     {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
-        let flag = Arc::new(AtomicBool::new(false));
         signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&flag))?;
         signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&flag))?;
-        while !flag.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        Ok(())
     }
     #[cfg(not(unix))]
     {
-        // v0: a line on stdin is the stop signal on platforms where the
-        // signal flag cannot be registered yet.
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line)?;
-        Ok(())
+        // v0: a line on stdin is the stop signal where the signal flag cannot
+        // be registered yet.
+        let thread_flag = Arc::clone(&flag);
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line).is_ok() {
+                thread_flag.store(true, std::sync::atomic::Ordering::Release);
+            }
+        });
     }
+    Ok(flag)
 }
 
 /// Read and validate a checkpoint file.
@@ -911,11 +912,13 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
             let pane_base = args
                 .local_data
                 .then(|| format!("http://127.0.0.1:{}", args.local_data_port));
+            let control = crate::workspace_control::ControlHandle::start().ok();
             let running = start(
                 &args.file,
                 checkpoint.as_ref(),
                 coordinator.as_ref(),
                 pane_base.as_deref(),
+                control.as_ref(),
             )?;
             let _local_data = if args.local_data {
                 let database = tempfile::tempdir()
@@ -1005,11 +1008,18 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
                 crate::open_browser(&running.shell_url)?;
             }
             if args.checkpoint_out.is_some() {
-                println!("edit the panes, then press Ctrl-C to checkpoint and stop");
+                println!("edit the panes, then press Ctrl-C or the shell's "Stop and save" button");
             } else {
                 println!("press Ctrl-C to stop (no --checkpoint-out was given)");
             }
-            wait_for_shutdown()?;
+            let signal = install_signal_flag()?;
+            while !signal.load(std::sync::atomic::Ordering::Relaxed)
+                && !control
+                    .as_ref()
+                    .is_some_and(|control| control.stop_requested())
+            {
+                std::thread::sleep(Duration::from_millis(100));
+            }
             if let Some(path) = args.checkpoint_out.as_deref() {
                 let data = if let (Some((_, _, token, _)), Some(base)) =
                     (_local_data.as_ref(), pane_base.as_ref())
@@ -1287,6 +1297,7 @@ fn shell_html(
     manifest: &WorkspaceManifestV1,
     pane_urls: &BTreeMap<String, String>,
     view: &ShellViewState,
+    control: Option<(&str, &str)>,
 ) -> Result<String> {
     let direction = match view.direction {
         Direction::Horizontal => "row",
@@ -1331,6 +1342,26 @@ fn shell_html(
             body.push_str(divider);
         }
     }
+    let control_button = match control {
+        Some(_) => r#" <button type="button" id="stop-button">Stop and save</button>"#.to_owned(),
+        None => String::new(),
+    };
+    let control_js = match control {
+        Some((url, token)) => format!(
+            r#"
+  var stop = document.getElementById("stop-button");
+  if (stop) {{
+    stop.addEventListener("click", function () {{
+      stop.disabled = true;
+      stop.textContent = "Saving…";
+      fetch("{url}/stop?token={token}", {{ method: "POST", mode: "no-cors" }}).catch(function () {{}});
+    }});
+  }}"#,
+            url = url,
+            token = token,
+        ),
+        None => String::new(),
+    };
     let view_json = serde_json::to_string(view).context("failed to encode the shell view state")?;
     let weights_json = serde_json::to_string(&view.split).context("failed to encode the split")?;
     Ok(format!(
@@ -1353,7 +1384,7 @@ divider, .divider {{ flex: 0 0 6px; cursor: {cursor}; background: #dfe3e7; }}
 </style>
 </head>
 <body>
-<header class="bar">ato workspace — drag a divider to change the split; press Ctrl-C to stop</header>
+<header class="bar">ato workspace — drag a divider to change the split; press Ctrl-C or the button to stop{control_button}</header>
 <main id="split" data-direction="{direction}">{body}</main>
 <script>
 (function () {{
@@ -1423,6 +1454,7 @@ divider, .divider {{ flex: 0 0 6px; cursor: {cursor}; background: #dfe3e7; }}
       event.preventDefault();
     }});
   }});
+{control_js}
 }})();
 </script>
 </body>
@@ -1554,6 +1586,7 @@ pub fn start(
     checkpoint: Option<&LoadedWorkspaceCheckpoint>,
     coordinator: Option<&crate::data::CoordinatorArgs>,
     pane_base: Option<&str>,
+    control: Option<&crate::workspace_control::ControlHandle>,
 ) -> Result<RunningWorkspace> {
     let text = std::fs::read_to_string(file)
         .with_context(|| format!("failed to read workspace {}", file.display()))?;
@@ -1625,8 +1658,16 @@ pub fn start(
     std::fs::create_dir_all(&shell_directory)
         .context("failed to create the workspace shell directory")?;
     let shell_path = shell_directory.join("index.html");
-    std::fs::write(&shell_path, shell_html(&manifest, &pane_urls, &view)?)
-        .context("failed to write the workspace shell")?;
+    std::fs::write(
+        &shell_path,
+        shell_html(
+            &manifest,
+            &pane_urls,
+            &view,
+            control.map(|control| (control.url(), control.token())),
+        )?,
+    )
+    .context("failed to write the workspace shell")?;
     let shell_view_storage = BTreeMap::from([(
         VIEW_STATE_KEY.to_owned(),
         serde_json::to_string(&view).context("failed to encode the shell view state")?,
