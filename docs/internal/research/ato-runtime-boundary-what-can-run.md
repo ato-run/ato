@@ -72,9 +72,9 @@ ato 側の判断軸は、アプリ種別そのものではなく session contrac
 
 この workspace には少なくとも次の adapter サンプルがある。
 
-- Tauri guest: [samples/desky-mock-tauri/capsule.toml](../samples/desky-mock-tauri/capsule.toml)
-- Wails guest: [samples/desky-mock-wails/capsule.toml](../samples/desky-mock-wails/capsule.toml)
-- Electron guest: [samples/desky-mock-electron/capsule.toml](../samples/desky-mock-electron/capsule.toml)
+- Tauri guest: [samples/desky-mock-tauri/capsule.toml](https://github.com/ato-run/ato-archive-2026-11/tree/45f5ed4274336c9ffa94208874c052c39f9bcdac/samples/desky-mock-tauri/capsule.toml)
+- Wails guest: [samples/desky-mock-wails/capsule.toml](https://github.com/ato-run/ato-archive-2026-11/tree/45f5ed4274336c9ffa94208874c052c39f9bcdac/samples/desky-mock-wails/capsule.toml)
+- Electron guest: [samples/desky-mock-electron/capsule.toml](https://github.com/ato-run/ato-archive-2026-11/tree/45f5ed4274336c9ffa94208874c052c39f9bcdac/samples/desky-mock-electron/capsule.toml)
 
 Tauri 互換 API の preload 実装も repo 内に存在する。
 
@@ -119,8 +119,8 @@ guest contract 上で現在明示されている互換面は次の通り。
 
 これは誤り。少なくともこの repo は Electron guest adapter を想定している。
 
-- [samples/desky-mock-electron/capsule.toml](../samples/desky-mock-electron/capsule.toml)
-- [samples/desky-mock-electron/backend/server.py](../samples/desky-mock-electron/backend/server.py)
+- [samples/desky-mock-electron/capsule.toml](https://github.com/ato-run/ato-archive-2026-11/tree/45f5ed4274336c9ffa94208874c052c39f9bcdac/samples/desky-mock-electron/capsule.toml)
+- [samples/desky-mock-electron/backend/server.py](https://github.com/ato-run/ato-archive-2026-11/tree/45f5ed4274336c9ffa94208874c052c39f9bcdac/samples/desky-mock-electron/backend/server.py)
 
 正確には、「Electron 本体をそのまま起動する経路」と「Electron 互換 frontend 契約を host 側 Wry で再現する経路」を区別する必要がある。
 
