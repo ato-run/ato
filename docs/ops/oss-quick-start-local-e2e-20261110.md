@@ -236,3 +236,22 @@ arm64 and resumed there:
 
 This is the "pick up your work on another computer" path with artifacts that
 came from different hosts, not a copied build.
+
+## Linux: latest branch re-check (2026-11-10, round 78)
+
+After the last UI/port changes, the branch was synced to `ubuntu-sugamo`,
+rebuilt, and re-run against the Linux bundle:
+
+```text
+acceptance-median --runs 2:
+PASS
+  open median:   4213ms (4229 4197)
+  resume median: 4163ms (4190 4136)
+
+failure-paths: PASS
+  ok: still running, status: error: failed to create the checkpoint state directory …
+  ok: error: port 18991 is already in use; pass --local-data-port <port>
+```
+
+The latest workspace code therefore still meets the acceptance and failure-path
+behaviour on Linux x86_64.
