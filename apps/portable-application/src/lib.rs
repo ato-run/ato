@@ -1573,6 +1573,8 @@ fn authored_bundle_spec_v2(
         title: draft.title,
         surface_path: draft.surface_path,
         routes,
+        // The v2 grammar allows at most one filesystem state slot, so the save
+        // declaration it carries is unambiguous.
         filesystem_state: draft
             .state
             .into_iter()
@@ -1581,7 +1583,7 @@ fn authored_bundle_spec_v2(
                 id: state.id,
                 mount: state.mount,
                 mount_required: state.mount_required,
-                save: None,
+                save: state.save,
             }),
         bindings: draft
             .bindings
@@ -3893,6 +3895,26 @@ env = { SHARED = "web" }
 [effects]
 default = "pure"
 "#;
+
+    #[test]
+    fn a_v2_state_save_declaration_reaches_the_bound_route() {
+        let with_save = SERVICE_GROUP_TOML.replace(
+            "access = \"read-write\"\n",
+            "access = \"read-write\"\n\n[state.save]\nformat = \"app.notes.save\"\nversion = 2\ncompatible_versions = [1]\n",
+        );
+        let routes = build_group(&with_save).unwrap();
+        let save = routes[0].derivation.state[0]
+            .save
+            .clone()
+            .expect("the v2 [state.save] declaration reaches BoundState");
+        assert_eq!(save.format, "app.notes.save");
+        assert_eq!(save.version, 2);
+        assert_eq!(save.compatible_versions, vec![1]);
+
+        // Omitting the table keeps the bound route declaration-free.
+        let omitted = build_group(SERVICE_GROUP_TOML).unwrap();
+        assert_eq!(omitted[0].derivation.state[0].save, None);
+    }
 
     fn authored_root(toml: &str) -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
