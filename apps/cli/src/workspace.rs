@@ -841,10 +841,10 @@ fn shell_html(
     let pane_list: Vec<&str> = panes.split_inclusive("</section>").collect();
     for (index, pane) in pane_list.iter().enumerate() {
         body.push_str(pane);
-        if index + 1 < pane_list.len() {
-            if let Some(divider) = divider_iter.next() {
-                body.push_str(divider);
-            }
+        if index + 1 < pane_list.len()
+            && let Some(divider) = divider_iter.next()
+        {
+            body.push_str(divider);
         }
     }
     let view_json = serde_json::to_string(view).context("failed to encode the shell view state")?;
