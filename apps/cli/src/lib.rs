@@ -8,6 +8,7 @@ mod formation_exploration;
 mod formation_input;
 mod formation_session;
 mod formation_verify;
+mod hub;
 mod mcp_stdio;
 mod model_cache;
 mod object_transport;
@@ -37,7 +38,6 @@ use ato_adapter_browser::{
 use ato_adapter_process::terminate_process_tree;
 use ato_adapter_workspace::restore_workspace;
 use ato_computation::{ComputationRef, ContentRef};
-use ato_formation::authoring::STATE_FILESYSTEM_PROTOCOL;
 use ato_formation::verify::{ContractVerificationReceipt, VerificationTargetKind};
 use ato_materializer_api::{
     ContractContext, MaterializerContext, MaterializerRegistry, accept_candidate,
@@ -59,6 +59,7 @@ use ato_portable_application::local_instance::{
 };
 use ato_portable_application::portability_export::repack_portable_dependencies_with_archives;
 use ato_portable_application::portability_plan::{PortableExportProfile, plan_portable_export};
+use ato_portable_application::state_continuity::StateMigrationApproval;
 use ato_portable_application::{
     PortableRealizationKind, StaticApplicationAsset, StaticApplicationState,
     ValidatedPortableApplication, build_authored_bundle_v2, bundle_sha256,
@@ -146,6 +147,15 @@ enum Commands {
     Login(LoginArgs),
     /// Upload a content-addressed Capsule object graph.
     Upload(UploadArgs),
+    /// Distribute a formed `.capsule` through a capsulehub coordinator, or
+    /// retrieve one from a shared link.
+    ///
+    /// The coordinator is a blind ciphertext store: it never sees the capsule
+    /// contents or the link key. Validation happens here, on the client.
+    Hub {
+        #[command(subcommand)]
+        command: hub::HubCommands,
+    },
     /// Form a local directory into a Capsule: build each candidate, observe it
     /// satisfying its Contract, and keep the verified artifact.
     Form(Box<FormArgs>),
@@ -318,6 +328,11 @@ struct RunArgs {
     /// Write the shared Contract verification receipt as canonical JSON.
     #[arg(long)]
     verification_receipt: Option<PathBuf>,
+    /// Run an unsigned/ad-hoc native desktop artifact through the explicit
+    /// local override the route must declare. Recorded in the receipt; never
+    /// relaxes filesystem, state, egress or lifecycle policy.
+    #[arg(long)]
+    allow_unsigned_native: bool,
 }
 
 #[derive(Debug, Args)]
@@ -342,6 +357,12 @@ struct AppImportArgs {
     /// Select one declared DerivationRef. Required when the bundle has more than one route.
     #[arg(long)]
     derivation: Option<String>,
+    /// Approve the saved-data migration the import named in its refusal.
+    ///
+    /// Never implied: without this flag an import whose saved data needs a
+    /// migration is refused with `state-migration-approval-required`.
+    #[arg(long)]
+    approve_state_migration: bool,
 }
 
 #[derive(Debug, Args)]
@@ -729,6 +750,7 @@ pub fn run() -> Result<()> {
         Commands::Export(args) => export_portable(args),
         Commands::Login(args) => login(args),
         Commands::Upload(args) => upload(args),
+        Commands::Hub { command } => hub::run(command),
         Commands::Form(args) if args.runtime_network => form_on_runtime_network(*args),
         Commands::Form(args) => form(*args),
         Commands::Data { command } => data::run(data::DataArgs { command }),
@@ -1804,7 +1826,16 @@ fn import_local_application(args: AppImportArgs) -> Result<()> {
     }
     let bytes =
         fs::read(&args.capsule).with_context(|| format!("read {}", args.capsule.display()))?;
-    let instance = local_application_store()?.import(&bytes, args.derivation.as_deref())?;
+    let approval = if args.approve_state_migration {
+        StateMigrationApproval::granted()
+    } else {
+        StateMigrationApproval::not_granted()
+    };
+    let instance = local_application_store()?.import_with_state_migration(
+        &bytes,
+        args.derivation.as_deref(),
+        approval,
+    )?;
     println!("{}", serde_json::to_string_pretty(&instance)?);
     Ok(())
 }
@@ -1817,6 +1848,11 @@ fn start_local_instance(args: AppStartArgs) -> Result<()> {
     let bundle = portable_export_bundle(&bundle_bytes)?;
     let selected = validate_bundle_for_derivation(&bundle, &instance.selected_derivation_ref)?;
     resolve_application_bindings(&selected.application, &bindings)?;
+    // The state this Run will actually receive is observed before a Run exists.
+    // A snapshot reference in the Instance metadata is never evidence by itself:
+    // if the live state no longer observes the saved digests, start fails with
+    // `instance_state_unverified` and no Run is claimed, so no receipt exists.
+    store.observe_run_state(&instance.instance_id, &instance.selected_derivation_ref)?;
     let binding_payload = serde_json::to_vec(&bindings)?;
     let starting = store.claim_run(&instance.instance_id)?;
     let run_root = store.run_root(&instance.instance_id, &starting.run_id)?;
@@ -2193,25 +2229,13 @@ fn portable_instance_worker_claimed(
     let bundle_bytes = store.bundle_bytes(&instance)?;
     let bundle = portable_export_bundle(&bundle_bytes)?;
     let selected = validate_bundle_for_derivation(&bundle, &instance.selected_derivation_ref)?;
-    let restored_snapshot = store.restored_snapshot(&claimed.instance_id)?;
-    if selected.realization != PortableRealizationKind::StaticWeb
-        && restored_snapshot.as_ref().is_some_and(|snapshot| {
-            !snapshot.assets.is_empty()
-                || snapshot.resources.iter().any(|resource| {
-                    resource.protocol != STATE_FILESYSTEM_PROTOCOL
-                        || !selected
-                            .derivation
-                            .state
-                            .iter()
-                            .any(|state| state.id == resource.slot)
-                })
-        })
-    {
-        bail!(
-            "local dynamic Instance snapshot restore supports only its declared filesystem state"
-        );
-    }
-    let restored_snapshot_ref = instance.data_snapshot_ref.clone();
+    // Authoritative Run gate, immediately before the attempt is built: the state
+    // the runtime is about to receive must observe the saved digests. Only then
+    // does the attempt cite the saved snapshot, so the common verifier can only
+    // mark that requirement Satisfied from state this Run actually gets.
+    let observed =
+        store.observe_run_state(&claimed.instance_id, &instance.selected_derivation_ref)?;
+    let restored_snapshot_ref = observed.snapshot_ref;
     let static_state = if selected.realization == PortableRealizationKind::StaticWeb {
         store
             .local_surface_snapshot(&claimed.instance_id)?
@@ -2251,6 +2275,9 @@ fn portable_instance_worker_claimed(
             bindings: Some(bindings),
             run_id: Some(&claimed.run_id),
         },
+        // A durable local Instance start has no unsigned-native override yet;
+        // an unsigned native D is refused there rather than run silently.
+        false,
     )?;
     let result = (|| -> Result<_> {
         if started.receipt.bundle_sha256.as_deref() != Some(instance.bundle_sha256.as_str())
@@ -2743,6 +2770,9 @@ fn run_portable_application(
             bindings: Some(&bindings),
             ..PortableRuntimeState::default()
         },
+        // The person running this bundle explicitly allowed an unsigned/ad-hoc
+        // native artifact; the receipt records the decision.
+        args.allow_unsigned_native,
     );
     // A Run that fails verification publishes nothing, exactly as it did
     // before the Formation Generalization line was integrated: the attempt
@@ -3009,6 +3039,9 @@ fn run_reform(args: ReformArgs) -> Result<()> {
             bindings: Some(&bindings),
             ..PortableRuntimeState::default()
         },
+        // Transformation verifies a candidate; it never applies a local
+        // override to an unsigned native artifact.
+        false,
     );
 
     // The candidate directory survives the reform runtime; keep the transcript
@@ -3124,6 +3157,7 @@ struct StartedPortableApplication {
 /// admission, the start record, the HTTP observation, K's verdicts and the
 /// receipt are the Runtime's; this only supplies what to run and keeps the
 /// verified candidate that is handed off.
+#[allow(clippy::too_many_arguments)]
 fn start_portable_attempt(
     bundle_bytes: &[u8],
     bundle: &ato_objects::PortableApplicationBundle,
@@ -3132,6 +3166,7 @@ fn start_portable_attempt(
     shutdown: Option<&AtomicBool>,
     runtime_state: PortableRuntimeState<'_>,
     binding_environment: &BTreeMap<String, String>,
+    native_local_override: bool,
 ) -> Result<StartedPortableApplication> {
     use ato_runtime_attempt::admission::EffectAuthorization;
     use ato_runtime_attempt::attempt::{AttemptRequest, Continuation, ReceiptContext, run_attempt};
@@ -3155,6 +3190,7 @@ fn start_portable_attempt(
         // requirements; `ato run` refuses before realization on the same
         // decision `ato pack` reported.
         host: None,
+        native_local_override,
     };
     let spec = validated.attempt_spec(runtime_state.restored_snapshot_ref);
     // A local Instance's Run is the attempt; `ato run` starts a new one.
@@ -3297,6 +3333,7 @@ fn start_portable_attempt(
         PortableRealizationKind::OciContainer => "OCI container",
         PortableRealizationKind::OciServiceGroup => "OCI service group",
         PortableRealizationKind::ProcessServiceGroup => "native process group",
+        PortableRealizationKind::NativeDesktop => "native desktop",
     };
     let base_url = live
         .endpoint()
@@ -3335,6 +3372,7 @@ fn start_and_verify_portable_application(
     runtime_root: &Path,
     shutdown: Option<&AtomicBool>,
     runtime_state: PortableRuntimeState<'_>,
+    native_local_override: bool,
 ) -> Result<StartedPortableApplication> {
     let validated = validate_bundle_for_derivation(&bundle, selected_derivation)?;
     let empty_bindings = BTreeMap::new();
@@ -3350,6 +3388,7 @@ fn start_and_verify_portable_application(
         shutdown,
         runtime_state,
         &binding_environment,
+        native_local_override,
     )
 }
 
@@ -3957,6 +3996,7 @@ mod tests {
             bindings: Vec::new(),
             no_open: false,
             verification_receipt: None,
+            allow_unsigned_native: false,
         };
         assert!(
             run_capsule(args)

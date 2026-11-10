@@ -179,19 +179,34 @@ pub(crate) fn generate_sbpl_profile(policy: &SandboxPolicy) -> String {
     profile.push_str("(deny mach-lookup (global-name \"com.apple.security.agent\"))\n");
     profile.push_str("(deny mach-lookup (global-name \"com.apple.authorizationd\"))\n");
 
+    // Port 0 is not a port; Seatbelt refuses the whole profile with
+    // `invalid port in network address` if it is rendered. A route that
+    // declares no port gets no inbound rule at all.
+    let bind_ports = policy
+        .allowed_bind_tcp_ports
+        .iter()
+        .copied()
+        .filter(|port| *port != 0)
+        .collect::<Vec<_>>();
+    let connect_ports = policy
+        .allowed_connect_tcp_ports
+        .iter()
+        .copied()
+        .filter(|port| *port != 0)
+        .collect::<Vec<_>>();
     if policy.allow_network {
         profile.push_str("\n; Network access\n");
         profile.push_str("(allow network-outbound)\n");
         profile.push_str("(allow network-inbound)\n");
         profile.push_str("(allow system-socket)\n");
-    } else if !policy.allowed_bind_tcp_ports.is_empty()
-        || !policy.allowed_connect_tcp_ports.is_empty()
-    {
+    } else if !bind_ports.is_empty() || !connect_ports.is_empty() {
         profile.push_str("\n; Port-scoped network access\n");
         profile.push_str("(allow system-socket)\n");
-        for port in &policy.allowed_bind_tcp_ports {
+        // Inbound is scoped to the loopback host: the declared Port is the
+        // endpoint this Run exposes to the verifier, not a wildcard address.
+        for port in &bind_ports {
             profile.push_str(&format!(
-                "(allow network-inbound (local tcp \"*:{port}\"))\n"
+                "(allow network-inbound (local tcp \"localhost:{port}\"))\n"
             ));
         }
         // Outbound is scoped to the loopback host, not to the port alone.
@@ -199,7 +214,7 @@ pub(crate) fn generate_sbpl_profile(policy: &SandboxPolicy) -> String {
         // is a different grant: a workload is allowed to reach the peer this
         // Run bound (a loopback shim or a forwarded port), never an arbitrary
         // remote service that happens to listen on the same number.
-        for port in &policy.allowed_connect_tcp_ports {
+        for port in &connect_ports {
             profile.push_str(&format!(
                 "(allow network-outbound (remote tcp \"localhost:{port}\"))\n"
             ));
@@ -428,7 +443,7 @@ mod tests {
             .allow_tcp_bind([43123]);
         let profile = generate_sbpl_profile(&policy);
 
-        assert!(profile.contains("(allow network-inbound (local tcp \"*:43123\"))"));
+        assert!(profile.contains("(allow network-inbound (local tcp \"localhost:43123\"))"));
         assert!(!profile.contains("(allow network-outbound)"));
     }
 
@@ -464,7 +479,7 @@ mod tests {
             }
         }
         // Bind is a different grant and stays as it was.
-        assert!(profile.contains("(allow network-inbound (local tcp \"*:43123\"))"));
+        assert!(profile.contains("(allow network-inbound (local tcp \"localhost:43123\"))"));
     }
 
     #[test]

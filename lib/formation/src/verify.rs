@@ -54,6 +54,11 @@ pub const CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V3: &str = "ato.contract-verifica
 /// /4 adds the connector evidence a relayed Run produces: which connector
 /// reached the Ports, the relay image digest and the relay container id.
 pub const CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V4: &str = "ato.contract-verification-receipt/4";
+/// /5 adds the native desktop execution evidence: the materialized artifact
+/// digest, the separate codesign and Gatekeeper verdicts, the explicit local
+/// override decision, and exactly which filesystem/egress/lifecycle rules the
+/// host enforced. Evidence only; it never changes a Contract verdict.
+pub const CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V5: &str = "ato.contract-verification-receipt/5";
 /// The trust anchor label a certificate observation must carry to satisfy K:
 /// the public root set, never a private or test anchor.
 pub const TLS_TRUST_ANCHOR_PUBLIC_ROOTS: &str = "public-roots";
@@ -380,6 +385,67 @@ pub struct VerificationExecutionEvidence {
     /// every other realization, and then absent from the receipt.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<VerificationServiceEvidence>,
+    /// The selected native desktop Derivation's execution evidence. Present
+    /// only for a native route, which makes the receipt schema /5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<VerificationNativeEvidence>,
+}
+
+/// What a native desktop Run verified and what the host enforced.
+///
+/// Every field is a measured observation. `local_override` records that an
+/// unsigned/ad-hoc artifact was run through the explicit local decision; it is
+/// never evidence that the signature policy was satisfied, and the mandatory
+/// filesystem/state/egress/lifecycle rules listed here are enforced
+/// independently of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationNativeEvidence {
+    /// The artifact blob reference the bundle pinned and the Run materialized.
+    pub artifact_ref: String,
+    /// Digest of the materialized tree (path, mode, size and content digest of
+    /// every placed file), computed after extraction from the placed files.
+    pub materialized_tree_digest: String,
+    /// The executable path inside the artifact the Run launched.
+    pub entry: String,
+    /// The declared signature policy (`require-valid` or
+    /// `require-valid-or-local-override`).
+    pub signature_policy: String,
+    /// What the verdict was about: `executable` (the entry file) or `bundle`
+    /// (the `.app` directory that contains it).
+    pub signature_target: String,
+    /// The artifact-relative path the signature verdict was taken on: the
+    /// entry for `executable`, the `.app` root for `bundle`.
+    pub verified_target: String,
+    /// `valid` or `invalid`: the exit verdict of
+    /// `codesign --verify --deep --strict`.
+    pub codesign_verify: String,
+    /// What the signature is: `developer_id`, `other`, `adhoc`, `unsigned`
+    /// or `unknown`.
+    pub signature_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codesign_detail: Option<String>,
+    /// `accepted`, `rejected` or `unavailable`: the verdict of
+    /// `spctl --assess --type execute`, recorded separately from codesign and
+    /// never assumed.
+    pub gatekeeper: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gatekeeper_detail: Option<String>,
+    /// Whether the Run proceeded on an explicit local override.
+    pub local_override: bool,
+    /// The containment actually applied (`seatbelt`).
+    pub sandbox: String,
+    /// What the sandbox rules were, for a reader who needs to know what the
+    /// receipt means by "contained".
+    pub enforced_read_only: Vec<String>,
+    pub enforced_read_write: Vec<String>,
+    pub enforced_inbound_ports: Vec<u16>,
+    /// The process group the Run owned and stopped. Evidence only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_group: Option<u32>,
+    /// Window/display containment is not in this increment's mandatory set;
+    /// the receipt says so rather than implying it.
+    pub window_containment: String,
 }
 
 /// One container of an OCI service group. Evidence only.
