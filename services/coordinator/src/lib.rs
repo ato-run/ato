@@ -19,6 +19,7 @@ pub mod apps;
 pub mod handlers;
 pub mod http;
 pub mod relay;
+pub mod serve;
 pub mod service;
 
 use std::path::Path;
