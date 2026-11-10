@@ -12,8 +12,8 @@ use serde::Deserialize;
 
 use crate::authoring::{
     ClientAddressTransport, EffectClass, PROCESS_PROTOCOL, SCENARIO_CONTRACT_VERIFIER,
-    STATE_FILESYSTEM_PROTOCOL, TCP_EGRESS_PROTOCOL, TLS_CONTRACT_VERIFIER, TlsStart,
-    WORKSPACE_PROTOCOL, validate_tls_server_name,
+    STATE_FILESYSTEM_PROTOCOL, StateSaveDeclaration, TCP_EGRESS_PROTOCOL, TLS_CONTRACT_VERIFIER,
+    TlsStart, WORKSPACE_PROTOCOL, validate_tls_server_name,
 };
 use crate::model_set::MODEL_SET_PROTOCOL;
 use crate::requirements::HostRequirement;
@@ -101,6 +101,9 @@ pub struct PortableStateDraftV2 {
     /// `Some(false)` when the author says the slot does not need a fixed
     /// mount. `None` is the pre-existing fixed-mount declaration.
     pub mount_required: Option<bool>,
+    /// The save format this slot is written in. `None` declares nothing and
+    /// binds exactly as it did before `[state.save]` existed.
+    pub save: Option<StateSaveDeclaration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,6 +281,24 @@ struct State {
     /// existing capsule's canonical bytes exactly as they were.
     #[serde(default)]
     mount_required: Option<bool>,
+    /// `[state.save]`: the format and version this state slot is written in.
+    /// Omitted, and never written when omitted, keeps every existing capsule's
+    /// canonical bytes exactly as they were.
+    #[serde(default)]
+    save: Option<StateSave>,
+}
+
+/// `[state.save]` inside a `[[state]]` entry. The same declaration the v1
+/// frontend carries: a format identifier, the version this route writes, and
+/// the versions it reads unchanged. A route that omits the table declares
+/// nothing — it does not claim a common format.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StateSave {
+    format: String,
+    version: u32,
+    #[serde(default)]
+    compatible_versions: Vec<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -597,10 +618,25 @@ fn parse_capsule_toml_v2_impl(
                     "must be false when present; omit it when the slot needs a fixed mount",
                 ));
             }
+            let save = match state.save {
+                None => None,
+                Some(save) => {
+                    let declaration = StateSaveDeclaration {
+                        format: save.format,
+                        version: save.version,
+                        compatible_versions: save.compatible_versions,
+                    };
+                    declaration
+                        .validate()
+                        .map_err(|message| invalid("state.save", message))?;
+                    Some(declaration)
+                }
+            };
             Ok(PortableStateDraftV2 {
                 id: state.id,
                 mount: state.mount,
                 mount_required: state.mount_required,
+                save,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -1676,6 +1712,152 @@ default = "pure"
         assert_eq!(
             omitted.state[0].mount_required, None,
             "omission is the pre-existing fixed-mount declaration"
+        );
+    }
+
+    fn valid_state_save() -> toml::Value {
+        let mut save = toml::map::Map::new();
+        save.insert(
+            "format".into(),
+            toml::Value::String("app.notes.save".into()),
+        );
+        save.insert("version".into(), toml::Value::Integer(2));
+        save.insert(
+            "compatible_versions".into(),
+            toml::Value::Array(vec![toml::Value::Integer(1)]),
+        );
+        toml::Value::Table(save)
+    }
+
+    fn state_save_document(save: toml::Value) -> String {
+        let mut document: toml::Value = SERVICE_GROUP.parse().unwrap();
+        document["state"][0]
+            .as_table_mut()
+            .unwrap()
+            .insert("save".into(), save);
+        toml::to_string(&document).unwrap()
+    }
+
+    #[test]
+    fn a_state_save_declaration_is_carried_and_round_trips() {
+        let text = state_save_document(valid_state_save());
+        let draft = parse_capsule_toml_v2(&text).unwrap();
+        let save = draft.state[0]
+            .save
+            .clone()
+            .expect("the [state.save] declaration is carried");
+        assert_eq!(save.format, "app.notes.save");
+        assert_eq!(save.version, 2);
+        assert_eq!(save.compatible_versions, vec![1]);
+
+        // The v2 frontend has no renderer; re-serialising the parsed TOML and
+        // parsing again must produce the same declaration.
+        let round_tripped =
+            parse_capsule_toml_v2(&toml::to_string(&text.parse::<toml::Value>().unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(round_tripped.state[0].save, draft.state[0].save);
+    }
+
+    #[test]
+    fn an_absent_state_save_declaration_stays_none() {
+        let draft = parse_capsule_toml_v2(SERVICE_GROUP).unwrap();
+        assert_eq!(
+            draft.state[0].save, None,
+            "omission declares nothing; it does not claim a common format"
+        );
+    }
+
+    #[test]
+    fn an_invalid_state_save_declaration_is_refused() {
+        let mut empty_format = toml::map::Map::new();
+        empty_format.insert("format".into(), toml::Value::String(String::new()));
+        empty_format.insert("version".into(), toml::Value::Integer(1));
+
+        let mut bad_identifier = valid_state_save();
+        bad_identifier
+            .as_table_mut()
+            .unwrap()
+            .insert("format".into(), toml::Value::String("app notes!".into()));
+
+        let mut zero_version = valid_state_save();
+        zero_version
+            .as_table_mut()
+            .unwrap()
+            .insert("version".into(), toml::Value::Integer(0));
+
+        let mut unsorted = valid_state_save();
+        unsorted.as_table_mut().unwrap().insert(
+            "compatible_versions".into(),
+            toml::Value::Array(vec![toml::Value::Integer(2), toml::Value::Integer(1)]),
+        );
+
+        let mut duplicate = valid_state_save();
+        duplicate.as_table_mut().unwrap().insert(
+            "compatible_versions".into(),
+            toml::Value::Array(vec![toml::Value::Integer(1), toml::Value::Integer(1)]),
+        );
+
+        let mut names_itself = valid_state_save();
+        names_itself.as_table_mut().unwrap().insert(
+            "compatible_versions".into(),
+            toml::Value::Array(vec![toml::Value::Integer(2)]),
+        );
+
+        let mut zero_compatible = valid_state_save();
+        zero_compatible.as_table_mut().unwrap().insert(
+            "compatible_versions".into(),
+            toml::Value::Array(vec![toml::Value::Integer(0)]),
+        );
+
+        for (what, save) in [
+            ("empty format", toml::Value::Table(empty_format)),
+            ("bad format identifier", bad_identifier),
+            ("zero version", zero_version),
+            ("unsorted compatible versions", unsorted),
+            ("duplicate compatible versions", duplicate),
+            ("compatible version names itself", names_itself),
+            ("zero compatible version", zero_compatible),
+        ] {
+            let error = parse_capsule_toml_v2(&state_save_document(save)).unwrap_err();
+            assert!(error.to_string().contains("state.save"), "{what}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_malformed_state_save_table_is_refused_not_defaulted() {
+        // Missing required fields are a syntax error, not defaults.
+        for save in [
+            toml::Value::Table(toml::map::Map::new()),
+            toml::Value::Table(toml::map::Map::from_iter([(
+                "format".to_owned(),
+                toml::Value::String("app.notes.save".into()),
+            )])),
+        ] {
+            assert!(parse_capsule_toml_v2(&state_save_document(save)).is_err());
+        }
+
+        // An unknown field inside [state.save] is refused like everywhere else.
+        let mut unknown = valid_state_save();
+        unknown
+            .as_table_mut()
+            .unwrap()
+            .insert("extra".into(), toml::Value::Boolean(true));
+        assert!(parse_capsule_toml_v2(&state_save_document(unknown)).is_err());
+    }
+
+    #[test]
+    fn a_state_save_on_a_non_filesystem_slot_is_refused() {
+        let mut document: toml::Value = state_save_document(valid_state_save()).parse().unwrap();
+        document["state"][0].as_table_mut().unwrap().insert(
+            "use".into(),
+            toml::Value::String("ato.state.other@1".into()),
+        );
+
+        let error = parse_capsule_toml_v2(&toml::to_string(&document).unwrap()).unwrap_err();
+
+        assert!(
+            error.to_string().contains("ato.state.filesystem@1"),
+            "a save declaration cannot ride a non-filesystem slot: {error}"
         );
     }
 
