@@ -48,3 +48,28 @@ carry that text.
 - Is the shim archived (read-only) or deleted after `ato-run/ato-desktop` takes
   over the launcher path?
 - Keep `lib/ipc` in `ato` (the Tauri shell uses it), or also move it?
+
+## Proposed edit checklist (for the approved change)
+
+1. `git rm -r apps/desktop` after copying `src/`, `xtask/`, `assets/system/`
+   into the destination repository; keep `apps/desktop/README.md` text in the
+   destination README (it explains the shim).
+2. Root `Cargo.toml`: remove the `apps/desktop` workspace member (and the
+   exclusion comment that names it).
+3. `desktop-release.yml`: delete the `bundle-macos` / `bundle-windows` /
+   `bundle-linux` jobs and the `ato-desktop-v*` trigger, or move the whole
+   workflow to `ato-run/ato-desktop` with its `xtask`.
+4. `desktop-tauri-ci.yml`: drop the `legacy apps/desktop shim compiles` job;
+   keep the Tauri jobs and their `lib/ipc` dependency.
+5. `release-dry-run.yml`: remove the
+   `cargo test --manifest-path apps/desktop/xtask/Cargo.toml` step.
+6. `AGENTS.md`, `CLAUDE.md`, `.github/copilot-instructions.md`, `docs/desktop.md`,
+   `docs/guides/README.md`, `docs/internal/testing-isolation.md`: repoint to
+   `ato-run/ato-desktop`; historical `docs/archive` references stay.
+7. `apps/desktop-tauri/Cargo.toml`: remove the shim dependency, keep `lib/ipc`.
+8. Validate: `cargo check --workspace`, `cargo run -p arch-check`,
+   `python3 scripts/docs-audit.py …` (`unexpected_failures: 0`), and grep that
+   no live reference to `apps/desktop` remains outside `docs/archive` and the
+   destination-repository note.
+9. Record the destination repository and the moved tree's commit SHA in a
+   `docs/ops` note, next to the archive manifest's `origin_commit`.
