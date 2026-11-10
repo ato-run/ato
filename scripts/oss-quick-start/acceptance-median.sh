@@ -6,6 +6,9 @@
 #   acceptance-median.sh --runs 3 --ato <ato> --capsules <dir> [--install-cmd <cmd>]
 set -euo pipefail
 
+PYTHON=python
+if python3 -c "import sys" >/dev/null 2>&1; then PYTHON=python3; fi
+
 runs=3
 base_port=18840
 args=()
@@ -36,7 +39,7 @@ for run in $(seq 1 "$runs"); do
 done
 
 median() {
-  python3 - "$@" <<'PY'
+  "$PYTHON" - "$@" <<'PY'
 import statistics
 import sys
 values = sorted(int(value) for value in sys.argv[1:])

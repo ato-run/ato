@@ -6,6 +6,9 @@
 # Usage: failure-paths.sh --ato <ato> --capsules <dir> --port <port>
 set -euo pipefail
 
+PYTHON=python
+if python3 -c "import sys" >/dev/null 2>&1; then PYTHON=python3; fi
+
 ato=ato
 capsules=
 port=18860
@@ -81,7 +84,7 @@ echo "ok: still running, status: $body"
 kill -9 "$pid" 2>/dev/null || true
 
 echo "== busy local-data port names the fix =="
-python3 - "$port" <<'PY' &
+"$PYTHON" - "$port" <<'PY' &
 import socket, sys, time
 s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(("127.0.0.1", int(sys.argv[1]))); s.listen(1); time.sleep(10)

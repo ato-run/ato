@@ -35,7 +35,9 @@ for capsule in todo calendar excalidraw; do
   [ -f "$capsules/$capsule.capsule" ] || { echo "missing $capsules/$capsule.capsule" >&2; exit 2; }
 done
 
-now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
+PYTHON=python
+if python3 -c "import sys" >/dev/null 2>&1; then PYTHON=python3; fi
+now_ms() { "$PYTHON" -c 'import time; print(int(time.time()*1000))'; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 digest() { shasum -a 256 "$1" | awk '{print "sha256:"$1}'; }
 
