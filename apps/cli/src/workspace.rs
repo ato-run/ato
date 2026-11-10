@@ -1008,7 +1008,7 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
                 crate::open_browser(&running.shell_url)?;
             }
             if args.checkpoint_out.is_some() {
-                println!("edit the panes, then press Ctrl-C or the shell's "Stop and save" button");
+                println!("edit the panes, then press Ctrl-C or the shell's Stop button");
             } else {
                 println!("press Ctrl-C to stop (no --checkpoint-out was given)");
             }
