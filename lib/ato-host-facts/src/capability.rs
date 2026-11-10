@@ -657,44 +657,76 @@ mod tests {
 
     #[test]
     fn security_boundary_tools_resolve_only_from_absolute_paths() {
+        // The platform-independent invariant: given one absolute path that
+        // exists, a same-named fake in a directory earlier on PATH is never
+        // selected. This uses only host-created files, so it holds on every
+        // target without depending on any OS-specific tool location.
         let scratch = tempfile::tempdir().unwrap();
-        for name in ["sandbox-exec", "codesign", "spctl"] {
-            let fake = scratch.path().join(name);
-            std::fs::write(&fake, b"#!/bin/sh\nexit 0\n").unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
+        let tools = scratch.path().join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        let name = if cfg!(windows) { "tool.exe" } else { "tool" };
+        let real = tools.join(name);
+        std::fs::write(&real, b"real").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        // A PATH that starts with the fake directory must not change anything:
-        // the caller named one absolute OS path.
-        let fake_path = std::ffi::OsString::from(format!(
-            "{}:{}",
-            scratch.path().display(),
-            std::env::var("PATH").unwrap_or_default()
-        ));
-        for (name, absolute) in [
+
+        let fake_dir = tempfile::tempdir().unwrap();
+        let fake = fake_dir.path().join(name);
+        std::fs::write(&fake, b"fake").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // PATH whose first element is the directory holding the fake. The path
+        // separator differs per platform, so it is built with join_paths.
+        let mut entries = vec![fake_dir.path().to_path_buf()];
+        if let Some(current) = std::env::var_os("PATH") {
+            entries.extend(std::env::split_paths(&current));
+        }
+        let fake_path = std::env::join_paths(entries).unwrap();
+
+        let absolute = real.to_string_lossy().into_owned();
+        let resolved = trusted_tool_with_path(&[absolute.as_str()], Some(fake_path.as_os_str()))
+            .expect("the absolute path that exists is resolved");
+        assert_eq!(resolved, real);
+        assert!(
+            !resolved.starts_with(fake_dir.path()),
+            "the PATH entry was selected instead of the absolute path"
+        );
+
+        // A missing absolute path is a missing capability, not a reason to
+        // search PATH: the fake earlier on PATH must not be accepted.
+        let missing = tools.join("missing").join(name);
+        assert!(
+            trusted_tool_with_path(
+                &[missing.to_string_lossy().as_ref()],
+                Some(fake_path.as_os_str())
+            )
+            .is_none()
+        );
+        // Relative paths are refused rather than resolved from the cwd.
+        assert!(trusted_tool_with_path(&[name], Some(fake_path.as_os_str())).is_none());
+
+        // The macOS security boundary itself: these five are the only absolute
+        // paths the adapter may run for sandbox/signature/ownership decisions.
+        // They exist only on macOS; the assertion is that they are the paths
+        // this build hands to `trusted_tool`, not a PATH lookup.
+        #[cfg(target_os = "macos")]
+        for (label, absolute) in [
             ("sandbox-exec", SEATBELT_LAUNCHER_PATH),
             ("codesign", CODESIGN_PATH),
             ("spctl", SPCTL_PATH),
             ("lsof", LSOF_PATH),
             ("ps", PS_PATH),
         ] {
-            let resolved =
-                trusted_tool_with_path(&[absolute], Some(fake_path.as_os_str())).unwrap();
-            assert_eq!(resolved, std::path::PathBuf::from(absolute), "{name}");
-            assert!(!resolved.starts_with(scratch.path()));
+            let resolved = trusted_tool_with_path(&[absolute], Some(fake_path.as_os_str()))
+                .unwrap_or_else(|| panic!("{label}: {absolute} is missing on this macOS host"));
+            assert_eq!(resolved, std::path::PathBuf::from(absolute), "{label}");
+            assert!(!resolved.starts_with(fake_dir.path()));
         }
-
-        // A missing absolute path is a missing capability, not a reason to
-        // search PATH: the fake earlier on PATH must not be accepted.
-        let missing = scratch.path().join("not-the-os-path").join("codesign");
-        assert!(
-            trusted_tool_with_path(&[missing.to_str().unwrap()], Some(fake_path.as_os_str()))
-                .is_none()
-        );
-        // Relative paths are refused rather than resolved from the cwd.
-        assert!(trusted_tool_with_path(&["codesign"], Some(fake_path.as_os_str())).is_none());
     }
 }
