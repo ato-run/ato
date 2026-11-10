@@ -39,8 +39,23 @@ database, and keeps the data across a process restart.
 
 Not proven / not done:
 
-- No Formation or Ato Run wraps Memos yet; it is not launched from the Workspace.
-- No Workspace reference or pin for Memos yet (the "Knowledge" card still says not set up).
+- No Formation or Ato Run wraps Memos yet; the Workspace opens it as an external URL only.
+
+## Workspace entry (ato-pwa #794)
+
+The Knowledge card is driven by `VITE_WORKSPACE_KNOWLEDGE_URL`. With the local Memos
+instance configured:
+
+```
+knowledge card present: true
+not set up count: 3        (Back Office cards still say so)
+knowledge has open: 1
+popup url: http://127.0.0.1:5230/auth?redirect=%2F
+page errors: none
+```
+
+Without the variable the card says "Not set up yet", so a deployment cannot claim a
+Knowledge app it does not have. Screenshot: `.tmp/workspace-knowledge.png`.
 - No Ato authentication or single sign-on; the instance has its own account.
 - No backup/export rehearsal, and no data migration between Mems and a DataResource (not planned:
   the OSS database stays authoritative).
