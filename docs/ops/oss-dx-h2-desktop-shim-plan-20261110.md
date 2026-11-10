@@ -115,3 +115,30 @@ reference updates and the desktop-shim checklist below.
 After the move, the docs audit should report zero *unexpected* failures with the
 copied allowlist; links into the archive become external URLs and are no longer
 checked as local paths.
+
+## What the removal dry run actually taught (2026-11-10)
+
+Removing `docs/archive` in a scratch worktree and running the docs audit showed
+that a literal `git grep "docs/archive"` under-counts the references: relative
+links such as `archive/…` from `docs/` and `../../../docs/archive/…` from
+`apps/desktop` are also targets, and the audit reports hundreds of "missing
+target" failures after the tree leaves. The audit — not the grep — is the
+authoritative detector.
+
+Procedure for the real move therefore becomes:
+
+1. copy the historical allowlist to `docs/ops/archive-link-audit.json` and point
+   the docs-ci workflow at it;
+2. remove the tree and run `scripts/docs-audit.py`; the failure list is the
+   worklist for reference updates (expected: relative links from `docs/*`,
+   `docs/MIGRATION_MATRIX.md`, `docs/README.md`, `README*`, `CONTRIBUTING.md`,
+   `AGENTS.md`, `apps/desktop/docs/*`);
+3. rewrite each to the archive repository URL and re-run until the audit reports
+   no *unexpected* failures (pre-existing failures on the current `dev` must be
+   separated first; the scratch run also surfaced unrelated desktop-spec
+   failures that exist on `dev` itself);
+4. add the manifest + README to the archive repository and record its commit
+   SHA in `docs/ops`.
+
+The 11 literal references listed above remain correct as a starting point, but
+the audit worklist governs completion.
