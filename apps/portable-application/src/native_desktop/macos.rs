@@ -30,16 +30,27 @@ use crate::process_group::{ProcessServiceGroup, ServiceSpec};
 const PORT_READY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Where a signature tool is, if this host has it.
+///
+/// Security-boundary tools resolve from their one absolute OS path, never
+/// `PATH`: a fake earlier on `PATH` could fake a sandbox or a signature.
 fn codesign_tool() -> Option<PathBuf> {
-    ato_host_facts::find_tool("codesign", &["/usr/bin/codesign"])
+    ato_host_facts::trusted_tool(&[ato_host_facts::CODESIGN_PATH])
 }
 
 fn spctl_tool() -> Option<PathBuf> {
-    ato_host_facts::find_tool("spctl", &["/usr/sbin/spctl"])
+    ato_host_facts::trusted_tool(&[ato_host_facts::SPCTL_PATH])
 }
 
 fn seatbelt_launcher() -> Option<PathBuf> {
-    ato_host_facts::find_tool("sandbox-exec", &["/usr/bin/sandbox-exec"])
+    ato_host_facts::trusted_tool(&[ato_host_facts::SEATBELT_LAUNCHER_PATH])
+}
+
+fn lsof_tool() -> Option<PathBuf> {
+    ato_host_facts::trusted_tool(&[ato_host_facts::LSOF_PATH])
+}
+
+fn ps_tool() -> Option<PathBuf> {
+    ato_host_facts::trusted_tool(&[ato_host_facts::PS_PATH])
 }
 
 /// Whether this process can actually apply a Seatbelt profile.
@@ -194,6 +205,89 @@ fn authorize_signature(
     Ok(true)
 }
 
+/// What the signature step established, including which object it verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SignaturePreparation {
+    pub report: SignatureReport,
+    /// Whether the Run proceeded on an explicit local override.
+    pub override_used: bool,
+    /// `executable` or `bundle`.
+    pub target_kind: ato_formation::native_desktop::NativeSignatureTarget,
+    /// The artifact-relative path the verdict was taken on.
+    pub target: String,
+}
+
+/// Resolve the declared signature target, observe its verdicts and authorize.
+///
+/// `executable` verifies the entry file; `bundle` verifies the `.app` root that
+/// contains it, because a bundle's signature covers its contents and "the
+/// entry is signed" is not "the application the Run launches is signed".
+pub(crate) fn prepare_signature(
+    descriptor: &ato_formation::native_desktop::NativeDescriptor,
+    artifact_root: &Path,
+    entry: &Path,
+    local_override: bool,
+) -> Result<SignaturePreparation, NativeRefusal> {
+    use ato_formation::native_desktop::{NativeSignatureTarget, native_bundle_root};
+
+    if codesign_tool().is_none() || spctl_tool().is_none() {
+        return Err(NativeRefusal {
+            code: "native_signature_verification_unavailable",
+            detail: "codesign or spctl is not available, so no signature verdict could be \
+                     recorded before launch"
+                .to_owned(),
+        });
+    }
+    let (target_path, target) = match descriptor.signature_target {
+        NativeSignatureTarget::Executable => (entry.to_path_buf(), descriptor.entry.clone()),
+        NativeSignatureTarget::Bundle => {
+            let relative = native_bundle_root(&descriptor.entry).ok_or_else(|| NativeRefusal {
+                code: "native_signature_target_not_a_bundle",
+                detail: format!(
+                    "`bundle` requires the entry `{}` to be inside an `.app` directory",
+                    descriptor.entry
+                ),
+            })?;
+            let candidate = artifact_root.join(relative);
+            let root = artifact_root
+                .canonicalize()
+                .map_err(|error| NativeRefusal {
+                    code: "native_artifact_invalid",
+                    detail: format!("the artifact root is not readable: {error}"),
+                })?;
+            let resolved = candidate.canonicalize().map_err(|error| NativeRefusal {
+                code: "native_signature_target_missing",
+                detail: format!(
+                    "the declared bundle `{relative}` is not in the extracted artifact: {error}"
+                ),
+            })?;
+            if !resolved.starts_with(&root) {
+                return Err(NativeRefusal {
+                    code: "native_signature_target_escapes_artifact",
+                    detail: format!(
+                        "the declared bundle `{relative}` resolves outside the artifact"
+                    ),
+                });
+            }
+            if !resolved.is_dir() {
+                return Err(NativeRefusal {
+                    code: "native_signature_target_not_a_bundle",
+                    detail: format!("the declared bundle `{relative}` is not a directory"),
+                });
+            }
+            (resolved, relative.to_owned())
+        }
+    };
+    let report = probe_signature(&target_path);
+    let override_used = authorize_signature(&report, descriptor.signature, local_override)?;
+    Ok(SignaturePreparation {
+        report,
+        override_used,
+        target_kind: descriptor.signature_target,
+        target,
+    })
+}
+
 /// The mandatory filesystem, state and egress policy for this Run.
 ///
 /// Read-only: the artifact and the materialized workspace. Read-write: only
@@ -279,8 +373,7 @@ pub(crate) fn sandbox_plan(
 pub(crate) struct PreparedNative {
     pub extracted: ExtractedArtifact,
     pub entry: PathBuf,
-    pub signature: SignatureReport,
-    pub override_used: bool,
+    pub signature: SignaturePreparation,
     pub sandbox: SandboxPlan,
     pub profile: String,
 }
@@ -312,18 +405,10 @@ pub(crate) fn prepare(
             detail: format!("{error:#}"),
         })?;
     let entry = resolve_entry(&extracted.root, &request.descriptor.entry)?;
-    if codesign_tool().is_none() || spctl_tool().is_none() {
-        return Err(NativeRefusal {
-            code: "native_signature_verification_unavailable",
-            detail: "codesign or spctl is not available, so no signature verdict could be \
-                     recorded before launch"
-                .to_owned(),
-        });
-    }
-    let signature = probe_signature(&entry);
-    let override_used = authorize_signature(
-        &signature,
-        request.descriptor.signature,
+    let signature = prepare_signature(
+        request.descriptor,
+        &extracted.root,
+        &entry,
         request.local_override,
     )?;
     let scratch_root = native_root.join("runtime");
@@ -340,6 +425,9 @@ pub(crate) fn prepare(
         .iter()
         .map(|port| port.guest_port)
         .collect::<Vec<_>>();
+    // Admission: a declared Port that already answers cannot become this Run's
+    // endpoint, and a native Run never attaches to a listener it did not start.
+    ensure_ports_free(request.ports)?;
     let sandbox = sandbox_plan(
         &extracted.root,
         &request.workspace,
@@ -356,7 +444,6 @@ pub(crate) fn prepare(
         extracted,
         entry,
         signature,
-        override_used,
         sandbox,
         profile,
     })
@@ -434,12 +521,172 @@ fn wait_for_ports_with_timeout(
     Ok(())
 }
 
+/// Refuse before launch when a declared Port already has a listener.
+///
+/// A native app is launched with the exact Port its descriptor declares, so a
+/// port that is already bound cannot become this Run's endpoint. Binding it
+/// ourselves first is the check; the listener is released immediately and the
+/// post-readiness ownership proof closes the remaining window.
+fn ensure_ports_free(ports: &[crate::ValidatedNativePort]) -> Result<(), NativeRefusal> {
+    for port in ports {
+        match std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port.guest_port)) {
+            Ok(listener) => drop(listener),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                return Err(NativeRefusal {
+                    code: "native_port_in_use",
+                    detail: format!(
+                        "the declared Port `{}` (127.0.0.1:{}) is already in use; a native Run \
+                         never attaches to a listener it did not start",
+                        port.id, port.guest_port
+                    ),
+                });
+            }
+            Err(error) => {
+                return Err(NativeRefusal {
+                    code: "native_port_unavailable",
+                    detail: format!(
+                        "the declared Port `{}` (127.0.0.1:{}) cannot be bound: {error}",
+                        port.id, port.guest_port
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The process group `pid` belongs to, from `/bin/ps`.
+fn process_group_of(pid: u32) -> Result<i32, String> {
+    let ps = ps_tool().ok_or_else(|| format!("{} is not present", ato_host_facts::PS_PATH))?;
+    let output = std::process::Command::new(ps)
+        .args(["-o", "pgid=", "-p", &pid.to_string()])
+        .output()
+        .map_err(|error| format!("could not run ps for pid {pid}: {error}"))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.trim()
+        .parse::<i32>()
+        .map_err(|_| format!("ps reported no process group for pid {pid}: {text:?}"))
+}
+
+/// pids listening on one TCP Port, from `/usr/sbin/lsof`.
+fn listening_pids(port: u16) -> Result<Vec<u32>, String> {
+    let lsof =
+        lsof_tool().ok_or_else(|| format!("{} is not present", ato_host_facts::LSOF_PATH))?;
+    let output = std::process::Command::new(lsof)
+        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
+        .output()
+        .map_err(|error| format!("could not run lsof for port {port}: {error}"))?;
+    // lsof exits 1 with no output when nothing listens; any other failure is an
+    // error this Run must not read as "no owner".
+    if !output.status.success() && output.stdout.is_empty() {
+        return Ok(Vec::new());
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| {
+            line.trim()
+                .parse::<u32>()
+                .map_err(|_| format!("lsof reported an unparsable pid: {line:?}"))
+        })
+        .collect()
+}
+
+/// Prove every declared Port's listener is inside the Run's process group.
+///
+/// Readiness alone only proves *something* accepts on the Port. A listener
+/// started by another process would make K look satisfied without the Run
+/// having served it, so the owner is resolved by the OS and compared with the
+/// group this Run started.
+fn verify_port_ownership(
+    ports: &[crate::ValidatedNativePort],
+    owned_process_group: i32,
+) -> Result<(), String> {
+    for port in ports {
+        let pids = listening_pids(port.guest_port)
+            .map_err(|detail| format!("port ownership could not be proven: {detail}"))?;
+        if pids.is_empty() {
+            return Err(format!(
+                "no listener on 127.0.0.1:{} belongs to a process",
+                port.guest_port
+            ));
+        }
+        let mut owned = false;
+        let mut observed = Vec::new();
+        for pid in pids {
+            let group = process_group_of(pid)
+                .map_err(|detail| format!("port ownership could not be proven: {detail}"))?;
+            observed.push((pid, group));
+            if group == owned_process_group {
+                owned = true;
+                break;
+            }
+        }
+        if !owned {
+            return Err(format!(
+                "the listener on 127.0.0.1:{} is not in the Run's process group {owned_process_group} \
+                 (observed pid/process-group pairs: {observed:?})",
+                port.guest_port
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// A running native desktop application: its process group and the scratch
 /// this Run owns.
 struct NativeDesktopCandidate {
     group: Option<ProcessServiceGroup>,
     endpoints: BTreeMap<String, String>,
     owned: Vec<PathBuf>,
+    /// The pids this Run started, in start order. Reported when a stop cannot
+    /// be confirmed so an operator or recovery can find them.
+    pids: Vec<(String, u32)>,
+    /// The Run area that must be kept while the stop is unconfirmed.
+    retained: PathBuf,
+    /// Set only once the group is confirmed stopped; Drop removes the Run area
+    /// only then.
+    stopped: bool,
+}
+
+/// A stop whose cessation could not be confirmed. The Run area is kept and the
+/// pids are named: deleting a directory a live process may still be writing to
+/// would destroy the only evidence of what was left.
+#[derive(Debug, thiserror::Error)]
+#[error("{code}: {detail} (pids: {pids:?}; retained: {retained:?})")]
+pub(crate) struct NativeStopUnconfirmed {
+    pub code: &'static str,
+    pub pids: Vec<(String, u32)>,
+    pub retained: PathBuf,
+    pub detail: String,
+}
+
+/// The one decision a stop makes about the Run area.
+///
+/// Factored out of the candidate so both branches are testable without an
+/// unkillable process: a confirmed stop removes the area; an unconfirmed one
+/// keeps it and reports the pids and the retained path.
+fn apply_stop_outcome(
+    stop: Result<(), String>,
+    owned: &[PathBuf],
+    pids: &[(String, u32)],
+    retained: &Path,
+) -> Result<(), NativeStopUnconfirmed> {
+    match stop {
+        Ok(()) => remove_owned(owned).map_err(|error| NativeStopUnconfirmed {
+            code: "native_process_stop_unconfirmed",
+            pids: pids.to_vec(),
+            retained: retained.to_path_buf(),
+            detail: format!(
+                "the process group stopped, but the Run area was not removed: {error:#}"
+            ),
+        }),
+        Err(detail) => Err(NativeStopUnconfirmed {
+            code: "native_process_stop_unconfirmed",
+            pids: pids.to_vec(),
+            retained: retained.to_path_buf(),
+            detail: format!("the process group could not be confirmed stopped: {detail}"),
+        }),
+    }
 }
 
 impl RunningCandidate for NativeDesktopCandidate {
@@ -457,10 +704,13 @@ impl RunningCandidate for NativeDesktopCandidate {
     fn stop(mut self: Box<Self>) -> Result<()> {
         // Stop the whole group, not the leader: a native app that forked a
         // helper is still running when only its main process exits.
-        if let Some(group) = self.group.take() {
-            group.stop()?;
-        }
-        remove_owned(&self.owned)
+        let outcome = match self.group.take() {
+            Some(group) => group.stop().map_err(|error| format!("{error:#}")),
+            None => Ok(()),
+        };
+        let result = apply_stop_outcome(outcome, &self.owned, &self.pids, &self.retained);
+        self.stopped = result.is_ok();
+        result.map_err(anyhow::Error::new)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -470,9 +720,20 @@ impl RunningCandidate for NativeDesktopCandidate {
 
 impl Drop for NativeDesktopCandidate {
     fn drop(&mut self) {
+        // The handle's own Drop terminates the group as a last defence, but a
+        // termination that was never confirmed is not permission to delete the
+        // Run area.
         drop(self.group.take());
-        if let Err(error) = remove_owned(&self.owned) {
-            eprintln!("[ato run] {error:#}");
+        if self.stopped {
+            if let Err(error) = remove_owned(&self.owned) {
+                eprintln!("[ato run] {error:#}");
+            }
+        } else if !self.owned.is_empty() {
+            eprintln!(
+                "[ato run] native_process_stop_unconfirmed: retaining {} and pids {:?}",
+                self.retained.display(),
+                self.pids
+            );
         }
     }
 }
@@ -484,6 +745,37 @@ fn launch_failure(error: anyhow::Error, owned: &[PathBuf]) -> RealizeFailure {
     RealizeFailure::Launch {
         error,
         evidence: None,
+    }
+}
+
+/// Fail a start whose candidate is already running.
+///
+/// A confirmed stop removes the Run area and reports a launch failure. A stop
+/// that could not be confirmed keeps the area and its pids and reports
+/// `Abandoned`, because "nothing is running" is not something this path can
+/// claim.
+fn fail_started(
+    error: anyhow::Error,
+    group: ProcessServiceGroup,
+    owned: &[PathBuf],
+    pids: &[(String, u32)],
+    retained: &Path,
+) -> RealizeFailure {
+    let outcome = group.stop().map_err(|stop| format!("{stop:#}"));
+    match apply_stop_outcome(outcome, owned, pids, retained) {
+        Ok(()) => RealizeFailure::Launch {
+            error,
+            evidence: None,
+        },
+        Err(stop) => RealizeFailure::Abandoned {
+            error,
+            cleanup: stop.to_string(),
+            resources: pids
+                .iter()
+                .map(|(name, pid)| format!("process:{name}:{pid}"))
+                .chain(std::iter::once(format!("scratch:{}", retained.display())))
+                .collect(),
+        },
     }
 }
 
@@ -540,19 +832,37 @@ pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure
     };
     let group = ProcessServiceGroup::start(prepared.extracted.root.as_path(), vec![spec])
         .map_err(|error| launch_failure(error, &owned))?;
+    let started_pids = group.pids();
     if let Err(detail) = wait_for_ports(request.ports) {
-        let stop = group.stop();
-        let error = match stop {
-            Ok(()) => anyhow!(detail),
-            Err(stop) => {
-                anyhow!("{detail}; additionally the process group was not fully stopped: {stop:#}")
-            }
-        };
-        return Err(launch_failure(error, &owned));
+        return Err(fail_started(
+            anyhow!(detail),
+            group,
+            &owned,
+            &started_pids,
+            &native_root,
+        ));
     }
     let pids = group.pids();
     let pid = pids.first().map(|(_, pid)| *pid);
-    let process_group = pid;
+    // Readiness only proves something accepts. Prove it is this Run's own
+    // process group before any observation can be taken.
+    let owned_process_group = match pid {
+        Some(pid) => process_group_of(pid).unwrap_or(pid as i32),
+        None => 0,
+    };
+    if let Err(detail) = verify_port_ownership(request.ports, owned_process_group) {
+        return Err(fail_started(
+            anyhow::Error::new(NativeRefusal {
+                code: "native_port_owner_mismatch",
+                detail,
+            }),
+            group,
+            &owned,
+            &pids,
+            &native_root,
+        ));
+    }
+    let process_group = u32::try_from(owned_process_group).ok();
     let endpoints = request
         .ports
         .iter()
@@ -576,12 +886,14 @@ pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure
             materialized_tree_digest: prepared.extracted.tree_digest.clone(),
             entry: request.descriptor.entry.clone(),
             signature_policy: request.descriptor.signature.as_str().to_owned(),
-            codesign_verify: prepared.signature.codesign_verify.to_owned(),
-            signature_kind: prepared.signature.signature_kind.to_owned(),
-            codesign_detail: prepared.signature.codesign_detail.clone(),
-            gatekeeper: prepared.signature.gatekeeper.to_owned(),
-            gatekeeper_detail: prepared.signature.gatekeeper_detail.clone(),
-            local_override: prepared.override_used,
+            signature_target: prepared.signature.target_kind.as_str().to_owned(),
+            verified_target: prepared.signature.target.clone(),
+            codesign_verify: prepared.signature.report.codesign_verify.to_owned(),
+            signature_kind: prepared.signature.report.signature_kind.to_owned(),
+            codesign_detail: prepared.signature.report.codesign_detail.clone(),
+            gatekeeper: prepared.signature.report.gatekeeper.to_owned(),
+            gatekeeper_detail: prepared.signature.report.gatekeeper_detail.clone(),
+            local_override: prepared.signature.override_used,
             sandbox: "seatbelt".to_owned(),
             enforced_read_only: prepared.sandbox.read_only.clone(),
             enforced_read_write: prepared.sandbox.read_write.clone(),
@@ -608,6 +920,9 @@ pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure
             group: Some(group),
             endpoints,
             owned,
+            pids: pids.clone(),
+            retained: native_root.clone(),
+            stopped: false,
         }),
         evidence: Some(evidence),
         execution,
@@ -961,6 +1276,7 @@ time.sleep(0.3)
         assert!(pid_alive(child));
         let owned = vec![workspace.path().join("owned")];
         fs::create_dir_all(&owned[0]).unwrap();
+        let pids = group.pids();
         let mut candidate = Box::new(NativeDesktopCandidate {
             group: Some(group),
             endpoints: BTreeMap::from([(
@@ -968,6 +1284,9 @@ time.sleep(0.3)
                 format!("http://127.0.0.1:{port}"),
             )]),
             owned: owned.clone(),
+            pids,
+            retained: owned[0].clone(),
+            stopped: false,
         });
         // The leader exits on its own; the child keeps the group alive.
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -1006,19 +1325,30 @@ time.sleep(0.3)
         assert!(wait_for_ports_with_timeout(&ports, Duration::from_secs(2)).is_ok());
         drop(listener);
         drop(second_listener);
-        // A port nobody listens on: bind once to learn a number, then release
-        // it immediately before asking the readiness probe to wait on it.
-        let silent = {
-            let guard = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-            let port = guard.local_addr().unwrap().port();
-            drop(guard);
-            port
-        };
-        let ports = vec![crate::ValidatedNativePort {
-            id: "app.http".to_owned(),
-            guest_port: silent,
-        }];
-        let error = wait_for_ports_with_timeout(&ports, Duration::from_millis(150)).unwrap_err();
+        // A port nobody listens on. Selecting one means binding and releasing
+        // it, so another concurrent test could take it in between: retry with a
+        // fresh port instead of treating that as the behaviour under test.
+        let mut refusal = None;
+        for _ in 0..16 {
+            let silent = {
+                let guard = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+                let port = guard.local_addr().unwrap().port();
+                drop(guard);
+                port
+            };
+            let ports = vec![crate::ValidatedNativePort {
+                id: "app.http".to_owned(),
+                guest_port: silent,
+            }];
+            match wait_for_ports_with_timeout(&ports, Duration::from_millis(60)) {
+                Ok(()) => continue,
+                Err(error) => {
+                    refusal = Some(error);
+                    break;
+                }
+            }
+        }
+        let error = refusal.expect("a silent port must not become ready");
         assert!(error.contains("did not accept TCP"), "{error}");
     }
 
@@ -1080,6 +1410,27 @@ time.sleep(0.3)
         assert!(plan.inbound_ports.is_empty());
     }
 
+    /// A tar.gz artifact with one executable entry and optional data files.
+    fn tiny_artifact(entry: &str, entry_bytes: &[u8], extra: &[(&str, &[u8])]) -> Vec<u8> {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+        let mut append = |path: &str, bytes: &[u8], mode: u32| {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(mode);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, path, std::io::Cursor::new(bytes.to_vec()))
+                .unwrap();
+        };
+        append(entry, entry_bytes, 0o755);
+        for (path, bytes) in extra {
+            append(path, bytes, 0o644);
+        }
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
     /// The whole adapter path: extract → signature verdict → Seatbelt →
     /// launch → readiness → stop/reap. It runs only where a profile can
     /// actually be applied; elsewhere the same measured fact must refuse
@@ -1098,6 +1449,7 @@ time.sleep(0.3)
                 entry: "app/run.sh".to_owned(),
                 format: ato_formation::native_desktop::NativeArtifactFormat::TarGz,
                 signature: NativeSignaturePolicy::RequireValidOrLocalOverride,
+                signature_target: ato_formation::native_desktop::NativeSignatureTarget::Executable,
             };
             let ports = vec![crate::ValidatedNativePort {
                 id: "app.http".to_owned(),
@@ -1130,23 +1482,11 @@ time.sleep(0.3)
         // A tiny artifact: a wrapper that serves its own proof document on the
         // declared Port, exactly the shape the fixture uses.
         let wrapper = b"#!/bin/sh\nexec python3 -m http.server \"$ATO_NATIVE_PORT\" --bind 127.0.0.1 --directory \"$(dirname \"$0\")\"\n";
-        let proof = b"native-desktop-proof\n";
-        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-        let mut builder = tar::Builder::new(encoder);
-        for (path, bytes, mode) in [
-            ("app/run.sh", wrapper.as_slice(), 0o755u32),
-            ("app/proof.txt", proof.as_slice(), 0o644u32),
-        ] {
-            let mut header = tar::Header::new_gnu();
-            header.set_size(bytes.len() as u64);
-            header.set_mode(mode);
-            header.set_entry_type(tar::EntryType::Regular);
-            header.set_cksum();
-            builder
-                .append_data(&mut header, path, std::io::Cursor::new(bytes))
-                .unwrap();
-        }
-        let artifact = builder.into_inner().unwrap().finish().unwrap();
+        let artifact = tiny_artifact(
+            "app/run.sh",
+            wrapper,
+            &[("app/proof.txt", b"native-desktop-proof\n")],
+        );
 
         let scratch = tempfile::tempdir().unwrap();
         let runtime_root = scratch.path().join("run");
@@ -1170,6 +1510,7 @@ time.sleep(0.3)
                 entry: "app/run.sh".to_owned(),
                 format: ato_formation::native_desktop::NativeArtifactFormat::TarGz,
                 signature: NativeSignaturePolicy::RequireValidOrLocalOverride,
+                signature_target: ato_formation::native_desktop::NativeSignatureTarget::Executable,
             };
             // The interpreter has to be inside the read-only set; use the
             // system python rather than whatever PATH this test inherited.
@@ -1253,5 +1594,423 @@ time.sleep(0.3)
         stream.read_to_string(&mut response).ok()?;
         let (_, body) = response.split_once("\r\n\r\n")?;
         Some(body.to_owned())
+    }
+
+    #[test]
+    fn a_declared_port_that_is_already_bound_is_refused_before_launch() {
+        // A listener that would happily serve the expected bytes: the Run must
+        // not attach to it, and must not let it stand in for its own app.
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_thread = stop.clone();
+        let serving = std::thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            while !stop_thread.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        use std::io::Write;
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\nnative-desktop-proof\n"
+                        );
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let ports = vec![crate::ValidatedNativePort {
+            id: "app.http".to_owned(),
+            guest_port: port,
+        }];
+        let refusal = ensure_ports_free(&ports).unwrap_err();
+        assert_eq!(refusal.code, "native_port_in_use");
+
+        // The real admission path refuses too. `prepare` runs before any
+        // realization, so a refused Run produces no receipt and nothing is
+        // handed to the verifier.
+        let scratch = tempfile::tempdir().unwrap();
+        let runtime_root = scratch.path().join("run");
+        fs::create_dir_all(&runtime_root).unwrap();
+        let workspace = scratch.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let artifact = tiny_artifact("app/run.sh", b"#!/bin/sh\nexit 0\n", &[]);
+        let descriptor = ato_formation::native_desktop::NativeDescriptor {
+            os: ato_formation::native_desktop::NativeOs::Macos,
+            arch: ato_formation::native_desktop::NativeArch::Aarch64,
+            artifact: format!("sha256:{}", "a".repeat(64)),
+            entry: "app/run.sh".to_owned(),
+            format: ato_formation::native_desktop::NativeArtifactFormat::TarGz,
+            signature: NativeSignaturePolicy::RequireValidOrLocalOverride,
+            signature_target: ato_formation::native_desktop::NativeSignatureTarget::Executable,
+        };
+        let environment = BTreeMap::new();
+        let request = NativeStart {
+            artifact_bytes: artifact,
+            descriptor: &descriptor,
+            ports: &ports,
+            workspace: workspace.clone(),
+            runtime_root: &runtime_root,
+            state_paths: Vec::new(),
+            environment: &environment,
+            local_override: true,
+            declares_egress: false,
+        };
+        let facts = ato_host_facts::NativeFacts::probe();
+        let refusal = prepare(&request, &runtime_root.join("native")).unwrap_err();
+        if facts.sandbox_tool {
+            assert_eq!(refusal.code, "native_port_in_use");
+        } else {
+            // The host cannot apply the mandatory sandbox, which is refused
+            // first; either way nothing launches.
+            assert_eq!(refusal.code, "native_sandbox_unavailable");
+        }
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        serving.join().unwrap();
+        // The refusal happened before a candidate existed, so no receipt can be
+        // produced for this Run.
+        assert!(matches!(
+            refusal.code,
+            "native_port_in_use" | "native_sandbox_unavailable"
+        ));
+    }
+
+    fn ownership_tools_usable() -> bool {
+        let Some(ps) = ps_tool() else {
+            return false;
+        };
+        let Some(lsof) = lsof_tool() else {
+            return false;
+        };
+        let ps_ok = std::process::Command::new(ps)
+            .args(["-o", "pgid=", "-p", &std::process::id().to_string()])
+            .output()
+            .is_ok_and(|output| output.status.success());
+        let lsof_ok = std::process::Command::new(lsof).arg("-h").output().is_ok();
+        ps_ok && lsof_ok
+    }
+
+    #[test]
+    fn a_listener_must_belong_to_the_runs_own_process_group() {
+        let workspace = tempfile::tempdir().unwrap();
+        let pid_file = workspace.path().join("child.pid");
+        let (group, port, leader) = start_tiny_child(workspace.path(), &pid_file);
+        let ports = vec![crate::ValidatedNativePort {
+            id: "app.http".to_owned(),
+            guest_port: port,
+        }];
+        if !ownership_tools_usable() {
+            // The OS tools that prove ownership cannot run here (a harness may
+            // forbid ps/lsof). Ownership is then unprovable, and the Adapter
+            // must fail closed rather than accept any listener.
+            let error = verify_port_ownership(&ports, 1).unwrap_err();
+            assert!(error.contains("could not be proven"), "{error}");
+            group.stop().expect("the tiny group stops");
+            return;
+        }
+        let owned = process_group_of(leader).expect("the leader has a process group");
+        verify_port_ownership(&ports, owned).expect("the Run's own listener is proven");
+
+        let error = verify_port_ownership(&ports, owned + 1).unwrap_err();
+        assert!(error.contains("not in the Run's process group"), "{error}");
+
+        // A Port with no listener at all is not an owned endpoint either.
+        let silent = {
+            let guard = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let port = guard.local_addr().unwrap().port();
+            drop(guard);
+            port
+        };
+        let error = verify_port_ownership(
+            &[crate::ValidatedNativePort {
+                id: "admin.http".to_owned(),
+                guest_port: silent,
+            }],
+            owned,
+        )
+        .unwrap_err();
+        assert!(error.contains("no listener"), "{error}");
+
+        group.stop().expect("the tiny group stops");
+    }
+
+    #[test]
+    fn a_confirmed_stop_removes_the_run_area_and_an_unconfirmed_one_keeps_it() {
+        let scratch = tempfile::tempdir().unwrap();
+        let owned = vec![scratch.path().join("area")];
+        fs::create_dir_all(&owned[0]).unwrap();
+        let pids = vec![("native".to_owned(), 4242u32)];
+
+        apply_stop_outcome(Ok(()), &owned, &pids, &owned[0])
+            .expect("a confirmed stop removes the Run area");
+        assert!(!owned[0].exists());
+
+        // Simulate a group stop that could not be confirmed.
+        fs::create_dir_all(&owned[0]).unwrap();
+        let error = apply_stop_outcome(
+            Err("SIGKILL did not empty the process group".to_owned()),
+            &owned,
+            &pids,
+            &owned[0],
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "native_process_stop_unconfirmed");
+        assert_eq!(error.pids, pids);
+        assert_eq!(error.retained, owned[0]);
+        assert!(
+            error
+                .to_string()
+                .contains("native_process_stop_unconfirmed")
+                && error.to_string().contains("4242"),
+            "{error}"
+        );
+        assert!(
+            owned[0].exists(),
+            "an unconfirmed stop must keep the Run area"
+        );
+    }
+
+    #[test]
+    fn dropping_an_unconfirmed_candidate_keeps_the_run_area() {
+        let scratch = tempfile::tempdir().unwrap();
+        let area = scratch.path().join("area");
+        fs::create_dir_all(&area).unwrap();
+        let candidate = NativeDesktopCandidate {
+            group: None,
+            endpoints: BTreeMap::new(),
+            owned: vec![area.clone()],
+            pids: vec![("native".to_owned(), 7)],
+            retained: area.clone(),
+            stopped: false,
+        };
+        drop(candidate);
+        assert!(
+            area.exists(),
+            "Drop must not delete a Run area whose stop was never confirmed"
+        );
+
+        // A confirmed candidate's Drop removes what it still owns (the stop
+        // path already removed it; Drop is idempotent).
+        let area = scratch.path().join("confirmed");
+        fs::create_dir_all(&area).unwrap();
+        let candidate = NativeDesktopCandidate {
+            group: None,
+            endpoints: BTreeMap::new(),
+            owned: vec![area.clone()],
+            pids: Vec::new(),
+            retained: area.clone(),
+            stopped: true,
+        };
+        drop(candidate);
+        assert!(!area.exists());
+    }
+
+    fn bundle_artifact_fixture() -> (tempfile::TempDir, PathBuf) {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().join("artifact");
+        let app = root.join("MyApp.app/Contents/MacOS");
+        fs::create_dir_all(&app).unwrap();
+        let entry = app.join("MyApp");
+        fs::write(&entry, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&entry, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::write(app.join("proof.txt"), b"native-desktop-proof\n").unwrap();
+        (scratch, root)
+    }
+
+    fn bundle_descriptor(
+        policy: NativeSignaturePolicy,
+    ) -> ato_formation::native_desktop::NativeDescriptor {
+        ato_formation::native_desktop::NativeDescriptor {
+            os: ato_formation::native_desktop::NativeOs::Macos,
+            arch: ato_formation::native_desktop::NativeArch::Aarch64,
+            artifact: format!("sha256:{}", "a".repeat(64)),
+            entry: "MyApp.app/Contents/MacOS/MyApp".to_owned(),
+            format: ato_formation::native_desktop::NativeArtifactFormat::TarGz,
+            signature: policy,
+            signature_target: ato_formation::native_desktop::NativeSignatureTarget::Bundle,
+        }
+    }
+
+    #[test]
+    fn a_bundle_signature_target_verifies_the_app_root_not_the_entry() {
+        if !codesign_available() {
+            panic!("codesign and spctl are required to observe the signature verdict");
+        }
+        let (_scratch, root) = bundle_artifact_fixture();
+        let entry = root.join("MyApp.app/Contents/MacOS/MyApp");
+        let descriptor = bundle_descriptor(NativeSignaturePolicy::RequireValidOrLocalOverride);
+        let refusals = prepare_signature(&descriptor, &root, &entry, false).unwrap_err();
+        assert_eq!(
+            refusals.code, "native_signature_local_override_required",
+            "an unsigned bundle needs the explicit local override"
+        );
+        let prepared =
+            prepare_signature(&descriptor, &root, &entry, true).expect("the override runs");
+        assert_eq!(
+            prepared.target_kind,
+            ato_formation::native_desktop::NativeSignatureTarget::Bundle
+        );
+        assert_eq!(prepared.target, "MyApp.app");
+        assert!(prepared.override_used);
+        assert_eq!(prepared.report.codesign_verify, "invalid");
+        assert_eq!(prepared.report.signature_kind, "unsigned");
+
+        // `require-valid` fails closed even with the override flag: the
+        // override is only available where the route declares it.
+        let refusal = prepare_signature(
+            &bundle_descriptor(NativeSignaturePolicy::RequireValid),
+            &root,
+            &entry,
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(refusal.code, "native_signature_policy_unsatisfied");
+
+        // The executable target still verifies the entry itself.
+        let mut executable = bundle_descriptor(NativeSignaturePolicy::RequireValidOrLocalOverride);
+        executable.signature_target =
+            ato_formation::native_desktop::NativeSignatureTarget::Executable;
+        let prepared = prepare_signature(&executable, &root, &entry, true).unwrap();
+        assert_eq!(
+            prepared.target_kind,
+            ato_formation::native_desktop::NativeSignatureTarget::Executable
+        );
+        assert_eq!(prepared.target, "MyApp.app/Contents/MacOS/MyApp");
+    }
+
+    #[test]
+    fn a_bundle_target_whose_app_directory_is_missing_is_refused() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().join("artifact");
+        fs::create_dir_all(root.join("MyApp.app/Contents/MacOS")).unwrap();
+        let entry = root.join("MyApp.app/Contents/MacOS/MyApp");
+        fs::write(&entry, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&entry, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let reached_root = root.clone();
+        let descriptor = bundle_descriptor(NativeSignaturePolicy::RequireValidOrLocalOverride);
+        // Replace the artifact root with one that has the entry but no bundle
+        // directory: the declared target is then missing.
+        let entry_only = scratch.path().join("entry-only");
+        fs::create_dir_all(&entry_only).unwrap();
+        let resolved_entry = entry_only.join("MyApp.app/Contents/MacOS/MyApp");
+        fs::create_dir_all(resolved_entry.parent().unwrap()).unwrap();
+        fs::write(&resolved_entry, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&resolved_entry, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // Remove the `.app` directory itself so the target path does not exist.
+        fs::remove_dir_all(entry_only.join("MyApp.app")).unwrap();
+        let refusal =
+            prepare_signature(&descriptor, &entry_only, &resolved_entry, true).unwrap_err();
+        assert_eq!(refusal.code, "native_signature_target_missing");
+        drop(reached_root);
+    }
+
+    /// The real adapter records which object was verified. Runs where a
+    /// profile can be applied; elsewhere the same measured fact refuses first.
+    #[test]
+    fn a_bundle_target_is_recorded_in_the_native_evidence() {
+        let wrapper = b"#!/bin/sh\nexec python3 -m http.server \"$ATO_NATIVE_PORT\" --bind 127.0.0.1 --directory \"$(dirname \"$0\")\"\n";
+        let artifact = tiny_artifact(
+            "MyApp.app/Contents/MacOS/MyApp",
+            wrapper,
+            &[(
+                "MyApp.app/Contents/MacOS/proof.txt",
+                b"native-desktop-proof\n",
+            )],
+        );
+        let scratch = tempfile::tempdir().unwrap();
+        let runtime_root = scratch.path().join("run");
+        fs::create_dir_all(&runtime_root).unwrap();
+        let workspace = scratch.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let descriptor = bundle_descriptor(NativeSignaturePolicy::RequireValidOrLocalOverride);
+        let environment = BTreeMap::from([(
+            "PATH".to_owned(),
+            "/usr/bin:/bin:/usr/sbin:/sbin".to_owned(),
+        )]);
+        let facts = ato_host_facts::NativeFacts::probe();
+        let mut last_error = None;
+        for _ in 0..8 {
+            let guard = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let port = guard.local_addr().unwrap().port();
+            drop(guard);
+            let ports = vec![crate::ValidatedNativePort {
+                id: "app.http".to_owned(),
+                guest_port: port,
+            }];
+            let request = NativeStart {
+                artifact_bytes: artifact.clone(),
+                descriptor: &descriptor,
+                ports: &ports,
+                workspace: workspace.clone(),
+                runtime_root: &runtime_root,
+                state_paths: Vec::new(),
+                environment: &environment,
+                local_override: true,
+                declares_egress: false,
+            };
+            match start(request) {
+                Ok(realized) => {
+                    let native = realized
+                        .execution
+                        .native
+                        .clone()
+                        .expect("the receipt carries native evidence");
+                    assert_eq!(native.signature_target, "bundle");
+                    assert_eq!(native.verified_target, "MyApp.app");
+                    let endpoint = realized
+                        .candidate
+                        .endpoints()
+                        .get("app.http")
+                        .cloned()
+                        .unwrap();
+                    assert_eq!(
+                        http_get(&format!("{endpoint}/proof.txt")).as_deref(),
+                        Some("native-desktop-proof\n")
+                    );
+                    RunningCandidate::stop(realized.candidate).expect("the Run stops");
+                    return;
+                }
+                Err(error) => last_error = Some(describe_failure(&error)),
+            }
+        }
+        if facts.sandbox_tool {
+            panic!("the bundle-target adapter never launched: {last_error:#?}");
+        }
+        // The host cannot apply the mandatory sandbox: prove the refusal, which
+        // also means no evidence/receipt is produced.
+        let ports = vec![crate::ValidatedNativePort {
+            id: "app.http".to_owned(),
+            guest_port: 18080,
+        }];
+        let request = NativeStart {
+            artifact_bytes: artifact,
+            descriptor: &descriptor,
+            ports: &ports,
+            workspace,
+            runtime_root: &runtime_root,
+            state_paths: Vec::new(),
+            environment: &environment,
+            local_override: true,
+            declares_egress: false,
+        };
+        let refusal = prepare(&request, &runtime_root.join("native")).unwrap_err();
+        assert_eq!(refusal.code, "native_sandbox_unavailable");
     }
 }
