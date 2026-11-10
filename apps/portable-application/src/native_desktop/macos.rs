@@ -205,6 +205,89 @@ fn authorize_signature(
     Ok(true)
 }
 
+/// What the signature step established, including which object it verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SignaturePreparation {
+    pub report: SignatureReport,
+    /// Whether the Run proceeded on an explicit local override.
+    pub override_used: bool,
+    /// `executable` or `bundle`.
+    pub target_kind: ato_formation::native_desktop::NativeSignatureTarget,
+    /// The artifact-relative path the verdict was taken on.
+    pub target: String,
+}
+
+/// Resolve the declared signature target, observe its verdicts and authorize.
+///
+/// `executable` verifies the entry file; `bundle` verifies the `.app` root that
+/// contains it, because a bundle's signature covers its contents and "the
+/// entry is signed" is not "the application the Run launches is signed".
+pub(crate) fn prepare_signature(
+    descriptor: &ato_formation::native_desktop::NativeDescriptor,
+    artifact_root: &Path,
+    entry: &Path,
+    local_override: bool,
+) -> Result<SignaturePreparation, NativeRefusal> {
+    use ato_formation::native_desktop::{NativeSignatureTarget, native_bundle_root};
+
+    if codesign_tool().is_none() || spctl_tool().is_none() {
+        return Err(NativeRefusal {
+            code: "native_signature_verification_unavailable",
+            detail: "codesign or spctl is not available, so no signature verdict could be \
+                     recorded before launch"
+                .to_owned(),
+        });
+    }
+    let (target_path, target) = match descriptor.signature_target {
+        NativeSignatureTarget::Executable => (entry.to_path_buf(), descriptor.entry.clone()),
+        NativeSignatureTarget::Bundle => {
+            let relative = native_bundle_root(&descriptor.entry).ok_or_else(|| NativeRefusal {
+                code: "native_signature_target_not_a_bundle",
+                detail: format!(
+                    "`bundle` requires the entry `{}` to be inside an `.app` directory",
+                    descriptor.entry
+                ),
+            })?;
+            let candidate = artifact_root.join(relative);
+            let root = artifact_root
+                .canonicalize()
+                .map_err(|error| NativeRefusal {
+                    code: "native_artifact_invalid",
+                    detail: format!("the artifact root is not readable: {error}"),
+                })?;
+            let resolved = candidate.canonicalize().map_err(|error| NativeRefusal {
+                code: "native_signature_target_missing",
+                detail: format!(
+                    "the declared bundle `{relative}` is not in the extracted artifact: {error}"
+                ),
+            })?;
+            if !resolved.starts_with(&root) {
+                return Err(NativeRefusal {
+                    code: "native_signature_target_escapes_artifact",
+                    detail: format!(
+                        "the declared bundle `{relative}` resolves outside the artifact"
+                    ),
+                });
+            }
+            if !resolved.is_dir() {
+                return Err(NativeRefusal {
+                    code: "native_signature_target_not_a_bundle",
+                    detail: format!("the declared bundle `{relative}` is not a directory"),
+                });
+            }
+            (resolved, relative.to_owned())
+        }
+    };
+    let report = probe_signature(&target_path);
+    let override_used = authorize_signature(&report, descriptor.signature, local_override)?;
+    Ok(SignaturePreparation {
+        report,
+        override_used,
+        target_kind: descriptor.signature_target,
+        target,
+    })
+}
+
 /// The mandatory filesystem, state and egress policy for this Run.
 ///
 /// Read-only: the artifact and the materialized workspace. Read-write: only
@@ -290,8 +373,7 @@ pub(crate) fn sandbox_plan(
 pub(crate) struct PreparedNative {
     pub extracted: ExtractedArtifact,
     pub entry: PathBuf,
-    pub signature: SignatureReport,
-    pub override_used: bool,
+    pub signature: SignaturePreparation,
     pub sandbox: SandboxPlan,
     pub profile: String,
 }
@@ -323,18 +405,10 @@ pub(crate) fn prepare(
             detail: format!("{error:#}"),
         })?;
     let entry = resolve_entry(&extracted.root, &request.descriptor.entry)?;
-    if codesign_tool().is_none() || spctl_tool().is_none() {
-        return Err(NativeRefusal {
-            code: "native_signature_verification_unavailable",
-            detail: "codesign or spctl is not available, so no signature verdict could be \
-                     recorded before launch"
-                .to_owned(),
-        });
-    }
-    let signature = probe_signature(&entry);
-    let override_used = authorize_signature(
-        &signature,
-        request.descriptor.signature,
+    let signature = prepare_signature(
+        request.descriptor,
+        &extracted.root,
+        &entry,
         request.local_override,
     )?;
     let scratch_root = native_root.join("runtime");
@@ -370,7 +444,6 @@ pub(crate) fn prepare(
         extracted,
         entry,
         signature,
-        override_used,
         sandbox,
         profile,
     })
@@ -813,12 +886,14 @@ pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure
             materialized_tree_digest: prepared.extracted.tree_digest.clone(),
             entry: request.descriptor.entry.clone(),
             signature_policy: request.descriptor.signature.as_str().to_owned(),
-            codesign_verify: prepared.signature.codesign_verify.to_owned(),
-            signature_kind: prepared.signature.signature_kind.to_owned(),
-            codesign_detail: prepared.signature.codesign_detail.clone(),
-            gatekeeper: prepared.signature.gatekeeper.to_owned(),
-            gatekeeper_detail: prepared.signature.gatekeeper_detail.clone(),
-            local_override: prepared.override_used,
+            signature_target: prepared.signature.target_kind.as_str().to_owned(),
+            verified_target: prepared.signature.target.clone(),
+            codesign_verify: prepared.signature.report.codesign_verify.to_owned(),
+            signature_kind: prepared.signature.report.signature_kind.to_owned(),
+            codesign_detail: prepared.signature.report.codesign_detail.clone(),
+            gatekeeper: prepared.signature.report.gatekeeper.to_owned(),
+            gatekeeper_detail: prepared.signature.report.gatekeeper_detail.clone(),
+            local_override: prepared.signature.override_used,
             sandbox: "seatbelt".to_owned(),
             enforced_read_only: prepared.sandbox.read_only.clone(),
             enforced_read_write: prepared.sandbox.read_write.clone(),
@@ -1733,5 +1808,209 @@ time.sleep(0.3)
         };
         drop(candidate);
         assert!(!area.exists());
+    }
+
+    fn bundle_artifact_fixture() -> (tempfile::TempDir, PathBuf) {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().join("artifact");
+        let app = root.join("MyApp.app/Contents/MacOS");
+        fs::create_dir_all(&app).unwrap();
+        let entry = app.join("MyApp");
+        fs::write(&entry, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&entry, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::write(app.join("proof.txt"), b"native-desktop-proof\n").unwrap();
+        (scratch, root)
+    }
+
+    fn bundle_descriptor(
+        policy: NativeSignaturePolicy,
+    ) -> ato_formation::native_desktop::NativeDescriptor {
+        ato_formation::native_desktop::NativeDescriptor {
+            os: ato_formation::native_desktop::NativeOs::Macos,
+            arch: ato_formation::native_desktop::NativeArch::Aarch64,
+            artifact: format!("sha256:{}", "a".repeat(64)),
+            entry: "MyApp.app/Contents/MacOS/MyApp".to_owned(),
+            format: ato_formation::native_desktop::NativeArtifactFormat::TarGz,
+            signature: policy,
+            signature_target: ato_formation::native_desktop::NativeSignatureTarget::Bundle,
+        }
+    }
+
+    #[test]
+    fn a_bundle_signature_target_verifies_the_app_root_not_the_entry() {
+        if !codesign_available() {
+            panic!("codesign and spctl are required to observe the signature verdict");
+        }
+        let (_scratch, root) = bundle_artifact_fixture();
+        let entry = root.join("MyApp.app/Contents/MacOS/MyApp");
+        let descriptor = bundle_descriptor(NativeSignaturePolicy::RequireValidOrLocalOverride);
+        let refusals = prepare_signature(&descriptor, &root, &entry, false).unwrap_err();
+        assert_eq!(
+            refusals.code, "native_signature_local_override_required",
+            "an unsigned bundle needs the explicit local override"
+        );
+        let prepared =
+            prepare_signature(&descriptor, &root, &entry, true).expect("the override runs");
+        assert_eq!(
+            prepared.target_kind,
+            ato_formation::native_desktop::NativeSignatureTarget::Bundle
+        );
+        assert_eq!(prepared.target, "MyApp.app");
+        assert!(prepared.override_used);
+        assert_eq!(prepared.report.codesign_verify, "invalid");
+        assert_eq!(prepared.report.signature_kind, "unsigned");
+
+        // `require-valid` fails closed even with the override flag: the
+        // override is only available where the route declares it.
+        let refusal = prepare_signature(
+            &bundle_descriptor(NativeSignaturePolicy::RequireValid),
+            &root,
+            &entry,
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(refusal.code, "native_signature_policy_unsatisfied");
+
+        // The executable target still verifies the entry itself.
+        let mut executable = bundle_descriptor(NativeSignaturePolicy::RequireValidOrLocalOverride);
+        executable.signature_target =
+            ato_formation::native_desktop::NativeSignatureTarget::Executable;
+        let prepared = prepare_signature(&executable, &root, &entry, true).unwrap();
+        assert_eq!(
+            prepared.target_kind,
+            ato_formation::native_desktop::NativeSignatureTarget::Executable
+        );
+        assert_eq!(prepared.target, "MyApp.app/Contents/MacOS/MyApp");
+    }
+
+    #[test]
+    fn a_bundle_target_whose_app_directory_is_missing_is_refused() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().join("artifact");
+        fs::create_dir_all(root.join("MyApp.app/Contents/MacOS")).unwrap();
+        let entry = root.join("MyApp.app/Contents/MacOS/MyApp");
+        fs::write(&entry, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&entry, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let reached_root = root.clone();
+        let descriptor = bundle_descriptor(NativeSignaturePolicy::RequireValidOrLocalOverride);
+        // Replace the artifact root with one that has the entry but no bundle
+        // directory: the declared target is then missing.
+        let entry_only = scratch.path().join("entry-only");
+        fs::create_dir_all(&entry_only).unwrap();
+        let resolved_entry = entry_only.join("MyApp.app/Contents/MacOS/MyApp");
+        fs::create_dir_all(resolved_entry.parent().unwrap()).unwrap();
+        fs::write(&resolved_entry, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&resolved_entry, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // Remove the `.app` directory itself so the target path does not exist.
+        fs::remove_dir_all(entry_only.join("MyApp.app")).unwrap();
+        let refusal =
+            prepare_signature(&descriptor, &entry_only, &resolved_entry, true).unwrap_err();
+        assert_eq!(refusal.code, "native_signature_target_missing");
+        drop(reached_root);
+    }
+
+    /// The real adapter records which object was verified. Runs where a
+    /// profile can be applied; elsewhere the same measured fact refuses first.
+    #[test]
+    fn a_bundle_target_is_recorded_in_the_native_evidence() {
+        let wrapper = b"#!/bin/sh\nexec python3 -m http.server \"$ATO_NATIVE_PORT\" --bind 127.0.0.1 --directory \"$(dirname \"$0\")\"\n";
+        let artifact = tiny_artifact(
+            "MyApp.app/Contents/MacOS/MyApp",
+            wrapper,
+            &[(
+                "MyApp.app/Contents/MacOS/proof.txt",
+                b"native-desktop-proof\n",
+            )],
+        );
+        let scratch = tempfile::tempdir().unwrap();
+        let runtime_root = scratch.path().join("run");
+        fs::create_dir_all(&runtime_root).unwrap();
+        let workspace = scratch.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let descriptor = bundle_descriptor(NativeSignaturePolicy::RequireValidOrLocalOverride);
+        let environment = BTreeMap::from([(
+            "PATH".to_owned(),
+            "/usr/bin:/bin:/usr/sbin:/sbin".to_owned(),
+        )]);
+        let facts = ato_host_facts::NativeFacts::probe();
+        let mut last_error = None;
+        for _ in 0..8 {
+            let guard = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let port = guard.local_addr().unwrap().port();
+            drop(guard);
+            let ports = vec![crate::ValidatedNativePort {
+                id: "app.http".to_owned(),
+                guest_port: port,
+            }];
+            let request = NativeStart {
+                artifact_bytes: artifact.clone(),
+                descriptor: &descriptor,
+                ports: &ports,
+                workspace: workspace.clone(),
+                runtime_root: &runtime_root,
+                state_paths: Vec::new(),
+                environment: &environment,
+                local_override: true,
+                declares_egress: false,
+            };
+            match start(request) {
+                Ok(realized) => {
+                    let native = realized
+                        .execution
+                        .native
+                        .clone()
+                        .expect("the receipt carries native evidence");
+                    assert_eq!(native.signature_target, "bundle");
+                    assert_eq!(native.verified_target, "MyApp.app");
+                    let endpoint = realized
+                        .candidate
+                        .endpoints()
+                        .get("app.http")
+                        .cloned()
+                        .unwrap();
+                    assert_eq!(
+                        http_get(&format!("{endpoint}/proof.txt")).as_deref(),
+                        Some("native-desktop-proof\n")
+                    );
+                    RunningCandidate::stop(realized.candidate).expect("the Run stops");
+                    return;
+                }
+                Err(error) => last_error = Some(describe_failure(&error)),
+            }
+        }
+        if facts.sandbox_tool {
+            panic!("the bundle-target adapter never launched: {last_error:#?}");
+        }
+        // The host cannot apply the mandatory sandbox: prove the refusal, which
+        // also means no evidence/receipt is produced.
+        let ports = vec![crate::ValidatedNativePort {
+            id: "app.http".to_owned(),
+            guest_port: 18080,
+        }];
+        let request = NativeStart {
+            artifact_bytes: artifact,
+            descriptor: &descriptor,
+            ports: &ports,
+            workspace,
+            runtime_root: &runtime_root,
+            state_paths: Vec::new(),
+            environment: &environment,
+            local_override: true,
+            declares_egress: false,
+        };
+        let refusal = prepare(&request, &runtime_root.join("native")).unwrap_err();
+        assert_eq!(refusal.code, "native_sandbox_unavailable");
     }
 }
