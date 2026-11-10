@@ -2561,6 +2561,7 @@ mod state_path_tests {
             protocol: ato_formation::authoring::STATE_FILESYSTEM_PROTOCOL.to_owned(),
             mount: "/data".to_owned(),
             access: StateAccess::ReadWrite,
+            save: None,
             mount_required,
         }
     }

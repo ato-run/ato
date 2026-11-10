@@ -651,6 +651,7 @@ fn snapshot_fixture() -> Fixture {
             slot: "main".to_owned(),
             protocol: DATA_JSON_PROTOCOL.to_owned(),
             content_ref: resource_ref.clone(),
+            save: None,
         }],
         assets: vec![InstanceSnapshotAssetV1 {
             alias: "asset-1".to_owned(),

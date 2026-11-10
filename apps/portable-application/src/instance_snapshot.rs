@@ -6,7 +6,7 @@ use std::path::{Component, Path, PathBuf};
 use ato_computation::ContentRef;
 use ato_formation::authoring::{
     BOUND_CONTRACT_SCHEMA, BoundContract, BoundRequirement, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER,
-    STATE_FILESYSTEM_PROTOCOL,
+    STATE_FILESYSTEM_PROTOCOL, StateSaveDeclaration,
 };
 use ato_objects::{
     PORTABLE_APPLICATION_BUNDLE_VERSION_V4, PortableApplicationBundle,
@@ -47,6 +47,22 @@ pub struct InstanceSnapshotResourceV1 {
     pub slot: String,
     pub protocol: String,
     pub content_ref: String,
+    /// The save format this resource is written in, declared by the Derivation
+    /// that wrote it. Omitted, and absent from the canonical snapshot bytes,
+    /// when the writer declared nothing — every snapshot formed before this
+    /// field existed keeps its exact bytes and restores exactly as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save: Option<InstanceSnapshotSaveV1>,
+}
+
+/// The save format + version one saved resource declares.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstanceSnapshotSaveV1 {
+    /// Stable identifier of the save format, e.g. `ato.state.filesystem@1`.
+    pub format: String,
+    /// The version of `format` the bytes were written as.
+    pub version: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +134,22 @@ pub(crate) fn validate_snapshot(
             ));
         }
         previous_slot = Some(resource.slot.as_str());
+        if let Some(save) = &resource.save {
+            // A save declaration describes the bytes of a filesystem state
+            // slot. Declaring one for another protocol would claim a format the
+            // protocol does not carry.
+            let declaration = StateSaveDeclaration {
+                format: save.format.clone(),
+                version: save.version,
+                compatible_versions: Vec::new(),
+            };
+            if resource.protocol != STATE_FILESYSTEM_PROTOCOL || declaration.validate().is_err() {
+                return Err(profile(
+                    "Instance snapshot save declaration is invalid or names a non-filesystem \
+                     state resource",
+                ));
+            }
+        }
         references.push(snapshot_ref(&resource.content_ref)?);
     }
     let mut previous_alias = None;
@@ -1238,6 +1270,26 @@ mod tests {
 
         let traversal = filesystem_archive("/escape", tar::EntryType::Regular);
         assert!(validate_snapshot_resource_bytes(STATE_FILESYSTEM_PROTOCOL, &traversal).is_err());
+    }
+
+    /// A restore is only evidence when the restored tree re-captures to the
+    /// saved archive: that digest is what a receiving Run observes.
+    #[test]
+    fn restored_filesystem_state_recaptures_to_the_same_archive() {
+        let source = tempfile::tempdir().unwrap();
+        fs::create_dir(source.path().join("nested")).unwrap();
+        fs::write(source.path().join("notes.sqlite"), b"database").unwrap();
+        fs::write(source.path().join("nested/value.txt"), b"saved").unwrap();
+
+        let captured = capture_filesystem_state(source.path()).unwrap();
+        let restored = tempfile::tempdir().unwrap();
+        restore_filesystem_state(&captured, restored.path()).unwrap();
+
+        assert_eq!(
+            capture_filesystem_state(restored.path()).unwrap(),
+            captured,
+            "the restored tree must observe the saved archive's digest"
+        );
     }
 
     #[test]

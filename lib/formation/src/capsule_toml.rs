@@ -39,9 +39,9 @@ use crate::authoring::{
     ContractIdentity, DerivationDraft, EffectClass, HTTP_PROTOCOL, HttpRequirement, InputDraft,
     InputIdentityRequirement, ObservationDraft, Observed, PROCESS_PROTOCOL, PlatformDraft,
     PortDraft, RequirementDraft, RuntimeDraft, SCENARIO_CONTRACT_VERIFIER,
-    STATE_FILESYSTEM_PROTOCOL, ScenarioRequirement, StateAccess, StateDraft, StepDraft,
-    StepNetwork, TLS_CONTRACT_VERIFIER, TlsRequirement, TlsStart, WORKSPACE_PROTOCOL, malformed,
-    validate_tls_server_name,
+    STATE_FILESYSTEM_PROTOCOL, ScenarioRequirement, StateAccess, StateDraft, StateSaveDeclaration,
+    StepDraft, StepNetwork, TLS_CONTRACT_VERIFIER, TlsRequirement, TlsStart, WORKSPACE_PROTOCOL,
+    malformed, validate_tls_server_name,
 };
 use crate::native_surface::{
     NativePresentation, NativeProbeOperation, NativeSurfaceAdapter, PIXEL_PORT_PROTOCOL,
@@ -317,7 +317,19 @@ pub fn render_capsule_toml(draft: &AuthoringDraft) -> Result<String, CapsuleToml
             value
         }).collect::<Vec<_>>()},
         "port":d.ports.iter().map(|p|json!({"id":p.id,"use":p.protocol,"from":p.from,"guest_port":p.guest_port})).collect::<Vec<_>>(),
-        "state":d.state.iter().map(|s|json!({"id":s.id,"use":s.protocol,"mount":s.mount,"access":s.access})).collect::<Vec<_>>(),
+        "state":d.state.iter().map(|s|{
+            let mut value=json!({"id":s.id,"use":s.protocol,"mount":s.mount,"access":s.access});
+            // A slot that declares no save format renders exactly as it did
+            // before this table existed.
+            if let Some(save) = &s.save {
+                let mut declaration = json!({"format":save.format,"version":save.version});
+                if !save.compatible_versions.is_empty() {
+                    declaration["compatible_versions"] = json!(save.compatible_versions);
+                }
+                value["save"] = declaration;
+            }
+            value
+        }).collect::<Vec<_>>(),
         "platform":d.platforms,"effects":{"default":d.effects},"requirements":d.requirements,"source_oci":d.source_oci,
         "contract":contract_doc});
     if !d.runtime_port_operations.is_empty() {
@@ -1044,7 +1056,7 @@ fn read_state(value: &Value) -> Result<Vec<StateDraft>, AuthoringError> {
     array_of_tables(value, "state")?
         .into_iter()
         .map(|table| {
-            only(table, "state", &["id", "use", "mount", "access"])?;
+            only(table, "state", &["id", "use", "mount", "access", "save"])?;
             let id = required_str(table, "id", "state")?;
             let protocol = required_str(table, "use", "state")?;
             if protocol != STATE_FILESYSTEM_PROTOCOL {
@@ -1068,9 +1080,73 @@ fn read_state(value: &Value) -> Result<Vec<StateDraft>, AuthoringError> {
                 protocol,
                 mount: required_str(table, "mount", "state")?,
                 access,
+                save: read_state_save(table)?,
             })
         })
         .collect()
+}
+
+/// `[state.save]` inside a `[[state]]` entry: the format this route writes for
+/// the slot. Omitted means the route declares nothing and saves exactly as it
+/// did before this table existed.
+fn read_state_save(
+    table: &toml::map::Map<String, Value>,
+) -> Result<Option<StateSaveDeclaration>, AuthoringError> {
+    let Some(save) = table.get("save") else {
+        return Ok(None);
+    };
+    let save = save
+        .as_table()
+        .ok_or_else(|| malformed("state.save", "expected a [state.save] table"))?;
+    only(
+        save,
+        "state.save",
+        &["format", "version", "compatible_versions"],
+    )?;
+    let version = save
+        .get("version")
+        .and_then(Value::as_integer)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value >= 1)
+        .ok_or_else(|| {
+            malformed(
+                "state.save.version",
+                "is required and must be a positive integer",
+            )
+        })?;
+    let compatible_versions = match save.get("compatible_versions") {
+        None => Vec::new(),
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_integer()
+                    .and_then(|value| u32::try_from(value).ok())
+                    .filter(|value| *value >= 1)
+                    .ok_or_else(|| {
+                        malformed(
+                            "state.save.compatible_versions",
+                            "each entry must be a positive integer",
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, AuthoringError>>()?,
+        Some(_) => {
+            return Err(malformed(
+                "state.save.compatible_versions",
+                "expected an array of integers",
+            ));
+        }
+    };
+    let declaration = StateSaveDeclaration {
+        format: required_str(save, "format", "state.save")?,
+        version,
+        compatible_versions,
+    };
+    declaration
+        .validate()
+        .map_err(|error| malformed("state.save", error))?;
+    Ok(Some(declaration))
 }
 
 fn read_contract(
@@ -1427,6 +1503,35 @@ mod tests {
                 .unwrap();
         assert_eq!(declared.derivation.effects, EffectClass::NonRepeatable);
         assert!(parse_capsule_toml(&format!("{base}[effects]\ndefault = \"safe\"\n")).is_err());
+    }
+
+    #[test]
+    fn a_state_save_declaration_is_parsed_and_renders_back() {
+        let text = "schema = \"ato.capsule/1\"\n[[state]]\nid=\"data\"\nuse=\"ato.state.filesystem@1\"\nmount=\"/data\"\n[state.save]\nformat=\"app.notes.save\"\nversion=2\ncompatible_versions=[1]\n";
+        let draft = parse_capsule_toml(text).unwrap();
+        let save = draft.derivation.state[0]
+            .save
+            .clone()
+            .expect("the save declaration is carried");
+        assert_eq!(save.format, "app.notes.save");
+        assert_eq!(save.version, 2);
+        assert_eq!(save.compatible_versions, vec![1]);
+
+        let rendered = render_capsule_toml(&draft).unwrap();
+        let reparsed = parse_capsule_toml(&rendered).unwrap();
+        assert_eq!(reparsed.derivation.state[0].save, Some(save));
+
+        // A slot that declares nothing binds and renders exactly as before.
+        let minimal = parse_capsule_toml(
+            "schema = \"ato.capsule/1\"\n[[state]]\nid=\"data\"\nuse=\"ato.state.filesystem@1\"\nmount=\"/data\"\n",
+        )
+        .unwrap();
+        assert_eq!(minimal.derivation.state[0].save, None);
+        assert!(
+            !render_capsule_toml(&minimal)
+                .unwrap()
+                .contains("[state.save]")
+        );
     }
 
     #[test]
