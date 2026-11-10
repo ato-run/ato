@@ -1,6 +1,6 @@
 # Formation: Codex-first shared reasoning prototype
 
-This page moved to [Formation: Codex-first shared reasoning prototype](../archive/2026/ops/formation-shared-reasoning.md).
+This page moved to [Formation: Codex-first shared reasoning prototype](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/ops/formation-shared-reasoning.md).
 
 Status: historical evidence; not current specification or deployment state.
 Language of the preserved document: Japanese / English.

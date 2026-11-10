@@ -1,6 +1,6 @@
 # Connected Runner native-inference smoke (#754 gate)
 
-This page moved to [Connected Runner native-inference smoke (#754 gate)](../archive/2026/ops/connected-runner-native-inference-smoke.md).
+This page moved to [Connected Runner native-inference smoke (#754 gate)](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/ops/connected-runner-native-inference-smoke.md).
 
 Status: historical evidence; not current specification or deployment state.
 Language of the preserved document: English.

@@ -1,6 +1,6 @@
 # OCI profile: `oci.working_dir`, state over an image VOLUME, no anonymous volumes
 
-This page moved to [OCI profile: `oci.working_dir`, state over an image VOLUME, no anonymous volumes](../archive/2026/ops/oci-profile-working-dir-state.md).
+This page moved to [OCI profile: `oci.working_dir`, state over an image VOLUME, no anonymous volumes](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/ops/oci-profile-working-dir-state.md).
 
 Status: historical evidence; not current specification or deployment state.
 Language of the preserved document: English.

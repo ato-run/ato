@@ -37,7 +37,7 @@ is in the [actual workflows](../../.github/workflows/) and governed by
 checklist unverified. Confirm that flow separately before a release.
 
 Historical incidents, staging measurements and retired host provisioning are
-in the [2026 archive](../archive/2026/README.md).
+in the [2026 archive](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/README.md).
 Raw [ops evidence](../ops/README.md) retains its original paths. The
-[retention assessment](../archive/2026/documentation-reorganization/EVIDENCE-RETENTION.md)
+[retention assessment](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/documentation-reorganization/EVIDENCE-RETENTION.md)
 explains how to externalize large logs without losing auditability.

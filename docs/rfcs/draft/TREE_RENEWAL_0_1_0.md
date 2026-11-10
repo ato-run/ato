@@ -36,7 +36,7 @@ Renewal PRs are split by kind, in this order:
 | `docs/aodd` | 86 | 2026-06-20 | 9 | remove or move to archive |
 | `docs/ops` | 505 | 2026-11-10 | — | keep (current evidence); prune pre-2026-10 entries in a later PR |
 | `docs/dev-notes`, `docs/evidence`, `docs/internal` | 35 | ≤2026-10-28 | — | review per file |
-| `docs/specs` vs `docs/specifications` | 3 | 2026-10-26 | — | merge into `docs/specifications` |
+| `docs/specs` vs `docs/specifications` | 3 | 2026-10-26 | — | keep (`docs/specs` holds compatibility redirects; schema `$id` is a public URL) |
 | `spikes/*` | 17 | ≤2026-08-14 | 3 (all archival) | remove |
 | `benchmarks/ready-state` | 57 | 2026-07-01 | 4 | decide (snapshot bench is opt-in only) |
 | `samples/desky-mock-*` | 12 | 2026-04-28 | 3 | remove |
@@ -70,4 +70,8 @@ noted in the 2026-10-28 audit are handled path by path; nothing is bulk-deleted.
 
 | Path | PR | Commit |
 |---|---|---|
-| — | — | — |
+| `apps/desktop`, `apps/desktop-tauri`, desktop workflows | #1754 | 51639ae61 |
+| `benchmarks/ready-state`, `tools/legacy-vm-inspector` | #1755 | 80450d58e |
+| `spikes/`, `samples/desky-mock-*` | #1757 | b0799a76a |
+| `docs/aodd` (copy in workspace `.archives/`) | #1756 | d82a37d2e |
+| `docs/archive` (audit baseline moved to `scripts/docs-audit-baseline/`) | this PR | — |

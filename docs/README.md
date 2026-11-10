@@ -32,7 +32,7 @@ directory decides.
 |---|---|---|
 | Current | Written against the repository today. It is not a guarantee of implementation, deployment or verification on any environment. | `docs/` root technical pages, `concepts/`, `guides/`, `operations/`, `architecture/`, `specifications/`, `rfcs/accepted/` |
 | Draft | Non-normative proposal or work in progress; not an implementation or deployment promise. | `rfcs/draft/` |
-| Archived | Historical evidence: past reports, plans, experiments or retired procedures. It does not certify current state. | `archive/`, plus the retained collections listed in [archive/2026/README.md](archive/2026/README.md) |
+| Archived | Historical evidence: past reports, plans, experiments or retired procedures. It does not certify current state. | `archive/`, plus the retained collections listed in [archive/2026/README.md](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/README.md) |
 
 `Current` means "written against the current tree". Deployment state, feature
 flags and measurements are separate claims, and accepted RFCs remain the
@@ -89,33 +89,33 @@ deployment and remote migrations stay with their owning service repositories.
 
 ## Archive and complete inventory
 
-[Archive](archive/README.md) maps past models, reports, experiments and plans.
-[2026](archive/2026/README.md) includes moved ops reports and retained evidence
+[Archive](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/README.md) maps past models, reports, experiments and plans.
+[2026](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/README.md) includes moved ops reports and retained evidence
 trees. Old Markdown paths and heading anchors remain compatibility entry points.
 
-The [2026 repository cleanup record](archive/2026/repository-cleanup-20261028/REPORT.md)
+The [2026 repository cleanup record](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/repository-cleanup-20261028/REPORT.md)
 documents the 2026-10-28 ownership and status pass. Compatibility redirect pages
 under `ops/`, `specs/` and the `docs/` root, and the historical collections in
-[archive/2026/README.md](archive/2026/README.md), are intentionally retained:
+[archive/2026/README.md](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/README.md), are intentionally retained:
 they keep external issue/PR references (including `docs/...` links quoted in
 old issues and PRs) resolving, and scripts and tests still read some of them.
 
 GitHub Pages hosting is retired: the repository-side workflow and site assets
 are removed, and the GitHub-side disable, 133-deployment purge and
 `github-pages` environment deletion were completed on 2026-10-28
-([result record](archive/2026/repository-cleanup-20261028/GITHUB-SETTINGS.md)).
+([result record](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/repository-cleanup-20261028/GITHUB-SETTINGS.md)).
 The former `ato-run.github.io/ato/` URLs now return 404; that external link
 loss is accepted and cannot be redirected from this repository. A few
 historical links remain unresolved by design, while in-repository links stay
 valid and are checked by docs CI.
 
-The [inventory](archive/2026/documentation-reorganization/inventory.tsv) covers
+The [inventory](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/documentation-reorganization/inventory.tsv) covers
 all baseline docs attachments and repository-wide prose. The
-[move list](archive/2026/documentation-reorganization/moves.tsv),
-[retention assessment](archive/2026/documentation-reorganization/EVIDENCE-RETENTION.md)
-and [audit report](archive/2026/documentation-reorganization/REPORT.md)
+[move list](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/documentation-reorganization/moves.tsv),
+[retention assessment](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/documentation-reorganization/EVIDENCE-RETENTION.md)
+and [audit report](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/documentation-reorganization/REPORT.md)
 record classifications, duplicates, link checks and unresolved limitations.
-The [acceptance review](archive/2026/documentation-reorganization/REVIEW-ACCEPTANCE.md)
+The [acceptance review](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/documentation-reorganization/REVIEW-ACCEPTANCE.md)
 checks the newcomer reading paths, actual first example, external references
 and code CI separately.
 

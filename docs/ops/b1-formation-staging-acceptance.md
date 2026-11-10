@@ -1,6 +1,6 @@
 # B1 Formation — staging acceptance record
 
-This page moved to [B1 Formation — staging acceptance record](../archive/2026/ops/b1-formation-staging-acceptance.md).
+This page moved to [B1 Formation — staging acceptance record](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/ops/b1-formation-staging-acceptance.md).
 
 Status: historical evidence; not current specification or deployment state.
 Language of the preserved document: English.

@@ -49,5 +49,5 @@ tracks the adoption/scope gaps without changing wire formats.
 `docs/specs/`, `docs/contracts/` and `docs/connectors/` contain older reference
 material retained for links and history. A filename containing “SPEC” or a JSON
 schema in those directories does not by itself establish current authority.
-Use the [inventory](../archive/2026/documentation-reorganization/inventory.tsv)
+Use the [inventory](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/documentation-reorganization/inventory.tsv)
 for their status and the [RFC index](../rfcs/README.md) for the full draft list.

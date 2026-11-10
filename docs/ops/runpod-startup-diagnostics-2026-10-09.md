@@ -1,6 +1,6 @@
 # RunPod初回503の調査と起動準備・診断の修正
 
-This page moved to [RunPod初回503の調査と起動準備・診断の修正](../archive/2026/ops/runpod-startup-diagnostics-2026-10-09.md).
+This page moved to [RunPod初回503の調査と起動準備・診断の修正](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/ops/runpod-startup-diagnostics-2026-10-09.md).
 
 Status: historical evidence; not current specification or deployment state.
 Language of the preserved document: Japanese / English.

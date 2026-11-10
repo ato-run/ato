@@ -1,8 +1,8 @@
 # Current RFCs
 
 Only documents under `accepted/` in this directory are current normative Ato
-architecture. Pre-computation RFCs were moved to `docs/archive/` and are
-historical evidence, not implementation authority.
+architecture. Pre-computation RFCs were moved to `docs/archive/`, which is now kept only in
+<https://github.com/ato-run/ato-archive-2026-11>; they are historical evidence, not implementation authority.
 
 - [Computation Architecture](accepted/COMPUTATION_ARCHITECTURE.md)
 - [Object Closure Bundle](accepted/OBJECT_BUNDLE.md)

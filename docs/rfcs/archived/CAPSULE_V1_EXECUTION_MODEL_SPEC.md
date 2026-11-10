@@ -70,7 +70,7 @@ The governing sentence is:
 
 This document is retained as an implementation-compatibility reference and is
 no longer the semantic design authority. It is superseded by
-[`CAPSULE_PROTOCOL_SEMANTIC_CORE.md`](../../archive/rfcs-legacy-accepted/protocol/CAPSULE_PROTOCOL_SEMANTIC_CORE.md).
+[`CAPSULE_PROTOCOL_SEMANTIC_CORE.md`](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/rfcs-legacy-accepted/protocol/CAPSULE_PROTOCOL_SEMANTIC_CORE.md).
 The accepted v0.3 Capsule specification remains authoritative for the
 currently shipped `capsule.toml` parser until the v1 authoring schema is wired
 into the CLI. Legacy Ready-State artifacts remain governed by their existing
@@ -1125,13 +1125,13 @@ Tests MUST prove that excluded mutations do not change `execution_id`:
 
 ## References
 
-- [Beyond Reproducible Builds](../../archive/rfcs-legacy-draft/beyond-reproducible-build.md) — launch-envelope
+- [Beyond Reproducible Builds](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/rfcs-legacy-draft/beyond-reproducible-build.md) — launch-envelope
   definition and separation of dependency derivation from output identity.
-- [Capsule Core Model](../../archive/rfcs-legacy-draft/CAPSULE_CORE_MODEL.md) — broader Capsule declaration,
+- [Capsule Core Model](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/rfcs-legacy-draft/CAPSULE_CORE_MODEL.md) — broader Capsule declaration,
   composition, placement, and install model under revision.
-- [Hash and Provenance Policy](../../archive/rfcs-legacy-draft/HASH_AND_PROVENANCE_POLICY.md) — project hash
+- [Hash and Provenance Policy](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/rfcs-legacy-draft/HASH_AND_PROVENANCE_POLICY.md) — project hash
   domains and provenance separation.
-- [ADR-002: Signature Format JCS](../../archive/rfcs-legacy-accepted/ADR-002-signature-format-jcs.md) —
+- [ADR-002: Signature Format JCS](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/rfcs-legacy-accepted/ADR-002-signature-format-jcs.md) —
   canonical JSON precedent.
 - [Execution Identity](../../execution-identity.md) — public identity guide.
 - [Snapshot](../../snapshot.md) — public Snapshot and lifecycle guide.

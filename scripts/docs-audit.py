@@ -60,7 +60,7 @@ def anchors(text):
         result.add(value + (f'-{n}' if n else ''))
     return result
 
-inventory = Path('docs/archive/2026/documentation-reorganization/inventory.tsv')
+inventory = Path('scripts/docs-audit-baseline/inventory.tsv')
 historical = set()
 if inventory.exists():
     for row in csv.DictReader(inventory.open(), delimiter='\t'):

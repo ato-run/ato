@@ -1,6 +1,6 @@
 # Stateful transformation v1 — E2E evidence
 
-This page moved to [Stateful transformation v1 — E2E evidence](../archive/2026/ops/stateful-transformation-v1.md).
+This page moved to [Stateful transformation v1 — E2E evidence](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/ops/stateful-transformation-v1.md).
 
 Status: historical evidence; not current specification or deployment state.
 Language of the preserved document: Japanese / English.

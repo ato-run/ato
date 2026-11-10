@@ -387,7 +387,7 @@ pnpm -C apps/ato-store-web exec astro check
 
 ## Phase 9: License Protocol 📅
 
-**仕様:** [LICENSE_SPEC.md](../../archive/rfcs-legacy-draft/LICENSE_SPEC.md)
+**仕様:** [LICENSE_SPEC.md](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/rfcs-legacy-draft/LICENSE_SPEC.md)
 **依存:** Phase 8 完了後
 
 ### 9.1 license.sync フォーマット
@@ -421,7 +421,7 @@ pnpm -C apps/ato-store-web exec astro check
 
 ## Phase 10: Dynamic Binding 📅
 
-**仕様:** [ASSOCIATION_SPEC.md](../../archive/rfcs-legacy-draft/ASSOCIATION_SPEC.md)
+**仕様:** [ASSOCIATION_SPEC.md](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/rfcs-legacy-draft/ASSOCIATION_SPEC.md)
 **依存:** Phase 8 完了後（Phase 9 と並行可）
 
 ### 10.1 Association Registry

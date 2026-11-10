@@ -1,6 +1,6 @@
 # Exploration D-conversion repair: actual OSS append
 
-This page moved to [Exploration D-conversion repair: actual OSS append](../archive/2026/ops/formation-exploration-repair.md).
+This page moved to [Exploration D-conversion repair: actual OSS append](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/ops/formation-exploration-repair.md).
 
 Status: historical evidence; not current specification or deployment state.
 Language of the preserved document: English.

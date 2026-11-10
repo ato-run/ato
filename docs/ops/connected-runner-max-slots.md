@@ -1,6 +1,6 @@
 # Connected Runner concurrency: `--max-slots` / `ATO_RUNNER_MAX_SLOTS`
 
-This page moved to [Connected Runner concurrency: `--max-slots` / `ATO_RUNNER_MAX_SLOTS`](../archive/2026/ops/connected-runner-max-slots.md).
+This page moved to [Connected Runner concurrency: `--max-slots` / `ATO_RUNNER_MAX_SLOTS`](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/ops/connected-runner-max-slots.md).
 
 Status: historical evidence; not current specification or deployment state.
 Language of the preserved document: English.

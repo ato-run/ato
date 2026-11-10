@@ -14,7 +14,7 @@ candidate, and merge permission does not imply deployment permission.
 
 Track work in [GitHub Issues](https://github.com/ato-run/ato/issues) (and GitHub
 Projects when a board is used). Do not add a Markdown roadmap: the archived
-[OPEN_ISSUES_ROADMAP](docs/archive/2026/legacy/OPEN_ISSUES_ROADMAP.md) is
+[OPEN_ISSUES_ROADMAP](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/legacy/OPEN_ISSUES_ROADMAP.md) is
 historical evidence, and Formation stage state lives in
 [FORMATION_ROADMAP](docs/rfcs/draft/FORMATION_ROADMAP.md).
 

@@ -1,6 +1,6 @@
 # Formation 6b-A — canonical Node build route and eight-app remeasurement
 
-This page moved to [Formation 6b-A — canonical Node build route and eight-app remeasurement](../archive/2026/ops/formation-node-build-8.md).
+This page moved to [Formation 6b-A — canonical Node build route and eight-app remeasurement](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/ops/formation-node-build-8.md).
 
 Status: historical evidence; not current specification or deployment state.
 Language of the preserved document: English.
