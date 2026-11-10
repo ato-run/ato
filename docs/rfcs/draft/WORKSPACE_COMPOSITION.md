@@ -178,3 +178,38 @@ Open questions this increment does **not** settle: how a workspace checkpoint
 migrates from captured browser state to `InstanceSnapshotV1`; how the shell
 learns each pane's DataResource bindings; and how a stop that cannot finish
 keeps the pane's state recoverable. Those are tracked by D3/D5.
+
+## Coordinator multi-app serving (design note for the next increment)
+
+The v0 shell serves pane trees with the loopback static server, which has the
+browser-state bridge but **not** the Data Ports bridge. To make TODO/Calendar
+share a Resource, panes must be served by the Coordinator, which owns the
+Resource database and the instance-scoped bindings.
+
+Proposed shape, keeping the existing single-app mode intact:
+
+- `ato-coordinator serve` accepts repeatable
+  `--workspace-app <prefix>=<dir>@<instance>[:<port>]` entries. One Coordinator,
+  one database, one origin; each app keeps its own prefix.
+- Requests are routed by prefix: `/apps/<prefix>/…` serves that app's files and
+  its bridges. The injected scripts are prefix-relative — the bridge derives its
+  base from its own `<script src>` — so `atoDataPorts` and
+  `atoInstanceOperations` keep their hosted shapes while resolving to
+  `/apps/<prefix>/__ato/data-ports`.
+- `/apps/<prefix>/__ato/data-ports` returns `bindings_for_instance(instance)`
+  and the invoke path uses the same instance. The prefix, not a global, is what
+  selects the app; no app-name branching is added.
+- The shell keeps its own origin? No: for Data Ports to work, panes must share
+  the Coordinator origin. The shell becomes a Coordinator-served page at
+  `/apps/<prefix>/` with iframes into the other prefixes; `localStorage` is then
+  shared per origin, so the shell namespaces its view state under
+  `ato.workspace.view` and panes continue to use their own keys (TODO and
+  Excalidraw already do). If two panes ever collide, the fallback is per-pane
+  iframe origins with a bridge origin, which needs a storage-partition rule.
+- Bootstrap then becomes: for each pane, register its `ato.operations.yaml`,
+  ensure one Resource for the owner Port (idempotent by protocol + display
+  name), bind every pane's Port to it with `instance_id = pane id`, then start
+  the Coordinator with all panes.
+
+Open question for review: whether the shell should be a Coordinator-served page
+or the CLI should keep a separate shell origin and inject each pane's base URL.
