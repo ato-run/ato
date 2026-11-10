@@ -395,3 +395,36 @@ fn inspect_reports_the_panes_declared_data_ports() {
     );
     assert_eq!(value["panes"][0]["operations_declared"], true);
 }
+
+#[test]
+fn resume_embeds_the_saved_view_state_in_the_shell() {
+    let directory = tempfile::tempdir().unwrap();
+    let (file, _) = two_pane_workspace(directory.path());
+    let mut checkpoint = browser_checkpoint("calendar", &["board", "calendar"]);
+    checkpoint.workspace_digest = sha256(std::fs::read_to_string(&file).unwrap().as_bytes());
+    checkpoint.view.split = vec![0.3, 0.7];
+    let loaded = ato_cli::workspace::LoadedWorkspaceCheckpoint {
+        checkpoint,
+        state: std::collections::BTreeMap::new(),
+    };
+    let running =
+        ato_cli::workspace::start(&file, Some(&loaded), None, None).expect("resume starts");
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let body = client
+        .get(&running.shell_url)
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(
+        body.contains("0.3") && body.contains("0.7"),
+        "the shell must carry the saved split"
+    );
+    assert!(
+        body.contains("calendar"),
+        "the shell must carry the saved active pane"
+    );
+}
