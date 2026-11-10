@@ -82,6 +82,12 @@ impl ControlHandle {
         self.stop.load(Ordering::Acquire)
     }
 
+    /// Consume one stop request; a failed checkpoint keeps the workspace open
+    /// so the request must not fire again on its own.
+    pub fn take_stop_requested(&self) -> bool {
+        self.stop.swap(false, Ordering::AcqRel)
+    }
+
     /// Consume one checkpoint request, so a held page button saves once.
     pub fn take_checkpoint_requested(&self) -> bool {
         self.checkpoint.swap(false, Ordering::AcqRel)

@@ -1067,12 +1067,46 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
                 .as_ref()
                 .map(|(_, _, token, _)| (pane_base.as_deref().unwrap_or(""), token.as_str()));
             loop {
-                if signal.load(std::sync::atomic::Ordering::Relaxed)
+                let stopping = signal.load(std::sync::atomic::Ordering::Relaxed)
                     || control
                         .as_ref()
-                        .is_some_and(|control| control.stop_requested())
-                {
-                    break;
+                        .is_some_and(|control| control.take_stop_requested());
+                if stopping {
+                    if let Some(path) = args.checkpoint_out.as_deref() {
+                        match save_workspace_now(
+                            path,
+                            &running,
+                            &args.file,
+                            local_credentials,
+                            lease.as_ref(),
+                        ) {
+                            Ok(checkpoint) => {
+                                if let Some(control) = control.as_ref() {
+                                    control.record_checkpoint_result(
+                                        true,
+                                        format!("{} panes", checkpoint.pane.len()),
+                                    );
+                                }
+                                println!(
+                                    "checkpoint: {} ({} panes)",
+                                    path.display(),
+                                    checkpoint.pane.len()
+                                );
+                                break;
+                            }
+                            Err(error) => {
+                                if let Some(control) = control.as_ref() {
+                                    control.record_checkpoint_result(false, error.to_string());
+                                }
+                                eprintln!(
+                                    "checkpoint failed: {error}; the workspace is still running (retry the Stop button or Ctrl-C)"
+                                );
+                                signal.store(false, std::sync::atomic::Ordering::Release);
+                            }
+                        }
+                    } else {
+                        break;
+                    }
                 }
                 if let Some(control) = control.as_ref()
                     && control.take_checkpoint_requested()
@@ -1106,20 +1140,6 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
                     }
                 }
                 std::thread::sleep(Duration::from_millis(100));
-            }
-            if let Some(path) = args.checkpoint_out.as_deref() {
-                let checkpoint = save_workspace_now(
-                    path,
-                    &running,
-                    &args.file,
-                    local_credentials,
-                    lease.as_ref(),
-                )?;
-                println!(
-                    "checkpoint: {} ({} panes)",
-                    path.display(),
-                    checkpoint.pane.len()
-                );
             }
             if let (Some(args), Some(lease)) = (&data_coordinator, &lease)
                 && let Err(error) = crate::data::release_workspace_lease(args, lease)
