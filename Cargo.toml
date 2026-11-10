@@ -49,6 +49,7 @@ members = [
     "lib/ipc",
     "lib/host-control",
     "services/netd",
+    "services/capsulehub",
     "services/coordinator",
 ]
 
