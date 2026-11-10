@@ -248,13 +248,15 @@ pub fn run(args: DataArgs) -> Result<()> {
                 coordinator,
             } => binding_invoke(
                 &coordinator,
-                &binding_id,
-                &operation,
-                &operation_id,
-                expected_revision,
-                expected_generation,
-                arguments.as_deref(),
-                &document,
+                BindingInvokeInput {
+                    binding_id: &binding_id,
+                    operation: &operation,
+                    operation_id: &operation_id,
+                    expected_revision,
+                    expected_generation,
+                    arguments: arguments.as_deref(),
+                    document: &document,
+                },
             ),
             BindingCommand::Revoke {
                 binding_id,
@@ -608,10 +610,8 @@ fn binding_list(coordinator: &CoordinatorArgs, instance: Option<&str>) -> Result
     let mut shown = 0;
     for binding in bindings {
         let binding_instance = binding.get("instance_id").and_then(Value::as_str);
-        if let Some(wanted) = instance {
-            if binding_instance != Some(wanted) {
-                continue;
-            }
+        if instance.is_some_and(|wanted| binding_instance != Some(wanted)) {
+            continue;
         }
         shown += 1;
         let operations = binding
@@ -717,36 +717,37 @@ fn binding_document(coordinator: &CoordinatorArgs, binding_id: &str) -> Result<(
     Ok(())
 }
 
-fn binding_invoke(
-    coordinator: &CoordinatorArgs,
-    binding_id: &str,
-    operation: &str,
-    operation_id: &str,
+struct BindingInvokeInput<'a> {
+    binding_id: &'a str,
+    operation: &'a str,
+    operation_id: &'a str,
     expected_revision: i64,
     expected_generation: i64,
-    arguments: Option<&str>,
-    document: &str,
-) -> Result<()> {
+    arguments: Option<&'a str>,
+    document: &'a str,
+}
+
+fn binding_invoke(coordinator: &CoordinatorArgs, input: BindingInvokeInput<'_>) -> Result<()> {
     let mut body = json!({
-        "operation": operation,
-        "operation_id": operation_id,
-        "expected_revision": expected_revision,
-        "expected_generation": expected_generation,
+        "operation": input.operation,
+        "operation_id": input.operation_id,
+        "expected_revision": input.expected_revision,
+        "expected_generation": input.expected_generation,
     });
-    match arguments {
+    match input.arguments {
         Some(arguments) => {
             body["arguments"] =
                 serde_json::from_str(arguments).context("parse --arguments as JSON")?;
         }
         None => {
             body["document"] =
-                serde_json::from_str(document).context("parse --document as JSON")?;
+                serde_json::from_str(input.document).context("parse --document as JSON")?;
         }
     }
     let value = request(
         coordinator,
         reqwest::Method::POST,
-        &format!("/v1/bindings/{binding_id}/operations"),
+        &format!("/v1/bindings/{}/operations", input.binding_id),
         Some(body),
     )?;
     if coordinator.json {
