@@ -63,4 +63,5 @@ The Coordinator owns a single-writer lease: a second live writer is refused
 - The shell has no Checkpoint button yet; Ctrl-C is the stop/checkpoint action.
 - Window/split layout is restored; in-pane scroll or selection is not (it needs
   an app-declared state).
-- Windows stop uses stdin today; the signal path is not wired there yet.
+- Windows Ctrl-C is handled through the console handler; the shell Stop button
+  works there as well.

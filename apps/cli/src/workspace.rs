@@ -706,10 +706,13 @@ fn install_signal_flag() -> Result<std::sync::Arc<std::sync::atomic::AtomicBool>
         signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&flag))?;
         signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&flag))?;
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        // v0: a line on stdin is the stop signal where the signal flag cannot
-        // be registered yet.
+        install_windows_console_handler(Arc::clone(&flag))?;
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        // No signal facility: a line on stdin is the stop signal.
         let thread_flag = Arc::clone(&flag);
         std::thread::spawn(move || {
             let mut line = String::new();
@@ -719,6 +722,29 @@ fn install_signal_flag() -> Result<std::sync::Arc<std::sync::atomic::AtomicBool>
         });
     }
     Ok(flag)
+}
+
+/// Make Ctrl-C set the same stop flag the shell's button uses.
+#[cfg(windows)]
+fn install_windows_console_handler(
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<()> {
+    use std::sync::OnceLock;
+    use windows::Win32::System::Console::SetConsoleCtrlHandler;
+    use windows::core::BOOL;
+
+    static FLAG: OnceLock<std::sync::Arc<std::sync::atomic::AtomicBool>> = OnceLock::new();
+    let _ = FLAG.set(flag);
+
+    unsafe extern "system" fn handler(_control: u32) -> BOOL {
+        if let Some(flag) = FLAG.get() {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
+        BOOL(1)
+    }
+
+    unsafe { SetConsoleCtrlHandler(Some(handler), true) }
+        .map_err(|error| anyhow::anyhow!("failed to install the console handler: {error}"))
 }
 
 /// Read and validate a checkpoint file.
