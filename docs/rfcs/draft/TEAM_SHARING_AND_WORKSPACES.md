@@ -191,6 +191,27 @@ Recommendation: A for the model, scheduled as its own migration with a staging
 rehearsal; C only if team sharing is needed before A lands. P2 (organization
 grants) needs no table rebuild and can proceed independently.
 
+### Decision (2026-11-10): C now, A later
+
+Team sharing is on the dogfooding critical path, so the additive option C was
+implemented first (ato-api #1168):
+
+- `data_resources.billing_organization_id` is added, and
+  `data_resource_organization_owners(resource_id, organization_id,
+  created_by_user_id)` records the organization owner.
+- The storage row keeps `owner_kind='user'` and `billing_user_id` as the
+  audit actor; authorization, listing and quota read the companion, and the
+  Resource lists as `owner_kind: "organization"`.
+- Creating an organization-owned Resource also issues an organization grant
+  (read/write/connect), so a member's binding is authorized through the
+  already-implemented mirror path (ato-api #1167).
+- Capacity is charged to the organization (`billing_organization_id`), excluded
+  from personal quota and from a personal export.
+
+Option A (a coordinated rebuild that makes `owner_kind='organization'` the
+storage truth) remains the target and this companion table is its migration
+source. Nothing in the API model depends on the storage `owner_kind` value.
+
 ## Detected mismatches
 
 - `data_resources` CHECK constraints cannot be altered in SQLite; P1 needs a
