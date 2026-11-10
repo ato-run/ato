@@ -67,5 +67,8 @@ The Coordinator owns a single-writer lease: a second live writer is refused
   selection is not (it needs an app-declared state).
 - The local Coordinator uses port `18788`; if it is busy, pass
   `--local-data-port <port>`.
+- If a checkpoint cannot be written, the workspace stays open and the button
+  shows **Failed**; fix the path/permissions and press it again. Nothing is
+  silently discarded.
 - Windows Ctrl-C is handled through the console handler; the shell buttons work
   there as well.
