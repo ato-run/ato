@@ -63,6 +63,11 @@ pub struct CoordinatorArgs {
     /// as the same identity.
     #[arg(long, env = "ATO_COORDINATOR_TOKEN")]
     pub token: Option<String>,
+    /// First-party Origin to present. The hosted API's DataResource routes are
+    /// fenced to first-party origins; Desktop's local Coordinator trusts
+    /// `tauri://localhost`, the hosted PWA its app origin.
+    #[arg(long, env = "ATO_COORDINATOR_ORIGIN")]
+    pub origin: Option<String>,
     /// Emit the raw JSON response instead of a human-readable summary.
     #[arg(long)]
     pub json: bool,
@@ -389,6 +394,9 @@ fn request(
     let mut request = client
         .request(method, format!("{}{path}", base(coordinator)))
         .header("authorization", format!("Bearer {}", bearer(coordinator)?));
+    if let Some(origin) = &coordinator.origin {
+        request = request.header("origin", origin);
+    }
     if let Some(body) = body {
         request = request.json(&body);
     }
