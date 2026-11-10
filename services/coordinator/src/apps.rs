@@ -12,7 +12,11 @@ use std::path::{Component, Path, PathBuf};
 pub const DATA_PORTS_BRIDGE_PATH: &str = "/__ato/data-ports/bridge-v1.js";
 pub const DATA_PORTS_BRIDGE_JS: &str = r#"(function(){
   if (window.atoDataPorts) return;
-  var base = '/__ato/data-ports';
+  var base = (function () {
+    var src = (document.currentScript && document.currentScript.src) || '/__ato/data-ports/bridge-v1.js';
+    try { src = new URL(src, location.href).pathname; } catch (_) {}
+    return src.replace(/\/bridge-v1\.js$/, '') || '/__ato/data-ports';
+  })();
   function failure(code, status) {
     var error = new Error(code);
     error.name = 'AtoDataPortError';
@@ -99,8 +103,14 @@ pub fn runtime_context_js(port: &str) -> String {
 
 /// Inject the bridge and the runtime context before the app's own scripts.
 pub fn inject_runtime(html: &str) -> String {
+    inject_runtime_with_prefix(html, "")
+}
+
+/// Inject the bridges under a path prefix, so one Coordinator can serve several
+/// apps without their bridge endpoints colliding.
+pub fn inject_runtime_with_prefix(html: &str, prefix: &str) -> String {
     let tags = format!(
-        r#"<script src="{}"></script><script src="{}"></script>"#,
+        r#"<script src="{prefix}{}"></script><script src="{prefix}{}"></script>"#,
         DATA_PORTS_BRIDGE_PATH, RUNTIME_CONTEXT_PATH
     );
     if let Some(index) = html.find("<script") {

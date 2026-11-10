@@ -181,6 +181,10 @@ pub enum BindingCommand {
         /// Operations an operation-only binding may invoke (comma separated).
         #[arg(long, value_delimiter = ',')]
         operations: Vec<String>,
+        /// App instance this binding answers for. Omit for an owner-level
+        /// binding; a served app's bridge only sees bindings for its instance.
+        #[arg(long)]
+        instance_id: Option<String>,
         #[command(flatten)]
         coordinator: CoordinatorArgs,
     },
@@ -316,6 +320,7 @@ pub fn run(args: DataArgs) -> Result<()> {
                 protocol,
                 access,
                 operations,
+                instance_id,
                 coordinator,
             } => binding_create(
                 &coordinator,
@@ -324,6 +329,7 @@ pub fn run(args: DataArgs) -> Result<()> {
                 &protocol,
                 &access,
                 operations,
+                instance_id.as_deref(),
             ),
             BindingCommand::Document {
                 binding_id,
@@ -1109,17 +1115,22 @@ fn binding_create(
     protocol: &str,
     access: &str,
     operations: Vec<String>,
+    instance_id: Option<&str>,
 ) -> Result<()> {
+    let mut body = json!({
+        "port": port,
+        "protocol": protocol,
+        "access": access,
+        "operations": operations,
+    });
+    if let Some(instance_id) = instance_id {
+        body["instance_id"] = Value::String(instance_id.to_owned());
+    }
     let value = request(
         coordinator,
         reqwest::Method::POST,
         &format!("/v1/data-resources/{resource_id}/bindings"),
-        Some(json!({
-            "port": port,
-            "protocol": protocol,
-            "access": access,
-            "operations": operations,
-        })),
+        Some(body),
     )?;
     if coordinator.json {
         return print_json(&value);
