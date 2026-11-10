@@ -1,5 +1,5 @@
 # Two native realizations of one Identity K that both declare the same
-# Run-scoped filesystem state slot.
+# Run-scoped filesystem state slot, in the same save format.
 #
 # This fixture exists for the cross-Derivation save-continuity acceptance
 # (PR8, DESIGN §9 state row): "a fixture where the two Ds declare the same
@@ -7,6 +7,14 @@
 # the native Adapter hands each Run `ATO_STATE_PATH_SAVE`; neither route needs
 # a mount namespace, and both really write the same host directory when they
 # run.
+#
+# `[state.save]` is the other half of the declaration: a slot name alone says
+# where the bytes live, not that another Derivation can read them. Both routes
+# share the document-level `[[state]]` entry, so both declare
+# `ato.state.filesystem.save` v1, and a switch between them needs no converter.
+# Omitting `[state.save]` is a different, honest declaration — "this route does
+# not claim a common format" — and a Derivation switch with saved data is then
+# refused by name (`state-save-format-undeclared`) rather than assumed.
 #
 # Why there is no static-web route here: in v0 a static-web route has no
 # filesystem-state delivery at all (the served tree is read-only and the web
@@ -35,6 +43,12 @@ use = "ato.state.filesystem@1"
 mount = "/state/save"
 access = "read-write"
 mount_required = false
+
+# The format both routes write and read for this slot. `compatible_versions`
+# is omitted: there is no earlier version of this fixture's format to migrate.
+[state.save]
+format = "ato.state.filesystem.save"
+version = 1
 
 [contract]
 mode = "all"
