@@ -48,16 +48,27 @@ in your browser.
 
 ### Try the CLI
 
-Install the Rust toolchain declared in [rust-toolchain.toml](rust-toolchain.toml),
-then clone the repository, build the CLI, and run the supplied static application
-bundle:
+Install the published CLI — no Rust toolchain or repository build is needed:
+
+```sh
+# macOS / Linux (Homebrew)
+brew install ato-run/ato/ato-cli
+# Windows: run ato-cli-x86_64-pc-windows-msvc.msi from the latest release
+# Linux / macOS without Homebrew:
+# curl --proto '=https' --tlsv1.2 -LsSf \
+#   https://github.com/ato-run/ato/releases/latest/download/ato-cli-installer.sh | sh
+ato version --json
+```
+
+The verified sample bundle ships with the repository, so the first run needs a
+checkout; install/build instructions for the CLI itself are in
+[Getting started](docs/guides/getting-started.md).
 
 ```sh
 git clone https://github.com/ato-run/ato.git
 cd ato
-cargo build -p ato-cli --bin ato --locked
 mkdir -p .tmp/getting-started
-target/debug/ato run samples/interop-static.capsule --no-open \
+ato run samples/interop-static.capsule --no-open \
   --verification-receipt .tmp/getting-started/receipt.json
 ```
 

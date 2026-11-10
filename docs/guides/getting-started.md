@@ -23,10 +23,16 @@ From a published release (Homebrew on macOS/Linux, MSI on Windows, and the
 shell installer attached to the release):
 
 ```sh
-brew install ato-run/ato/ato        # or: brew upgrade ato
-# Windows: run the .msi from the release page
-# Linux/macOS without Homebrew: sh ato-cli-installer.sh
+brew install ato-run/ato/ato-cli    # or: brew upgrade ato-cli
+# Windows: run ato-cli-x86_64-pc-windows-msvc.msi from the release page
+# Linux/macOS without Homebrew:
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/ato-run/ato/releases/latest/download/ato-cli-installer.sh | sh
 ```
+
+The Homebrew tap is `ato-run/homebrew-ato` and its formula is `ato-cli`; the
+installed command is `ato`. The release assets are named
+`ato-cli-<target>.tar.xz` and `ato-cli-x86_64-pc-windows-msvc.msi`.
 
 The version reported by `ato version` must match the release tag; cargo-dist
 refuses a tag whose crate version is behind an already-published one. There is
@@ -69,17 +75,6 @@ sign-in and the complete upload → private app path still need their own
 acceptance run, so treat this section as preview rather than a certified
 end-to-end path.
 
-Start in a checkout of this repository at a reviewed commit. Install the Rust
-toolchain declared in [rust-toolchain.toml](../../rust-toolchain.toml). These
-commands build and use that checkout's CLI; deployment of matching services is
-not implied.
-
-```sh
-cargo build -p ato-cli --bin ato --locked
-mkdir -p .tmp/getting-started
-target/debug/ato run samples/interop-static.capsule --no-open \
-  --verification-receipt .tmp/getting-started/receipt.json
-```
 
 The [supplied bundle](../../samples/interop-static.capsule) is the static
 interoperability fixture. `run` validates its object closure, realizes the
