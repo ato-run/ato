@@ -163,3 +163,23 @@ fix those 29 pre-existing broken links or re-baseline them explicitly in the
 new `docs/ops/archive-link-audit.json` (with a reviewed entry), instead of
 letting the allowlist silently mask them from `apps/desktop` onward. Record the
 baseline commit (`fd0691510`) with the counts in the move PR.
+
+### Appendix: the 25 distinct masked link failures (29 occurrences)
+
+- `apps/desktop/docs/DESKTOP_TAB_SPEC.md` → `apps/desktop/docs/DESKTOP_SPEC.md` (missing target)
+- `apps/desktop/docs/DESKTOP_TAB_SPEC.md` → `apps/desktop/docs/DRAFT_CAPSULE_IPC.md`
+- `apps/desktop/docs/DESKTOP_TAB_SPEC.md` → `apps/desktop/docs/DRAFT_LIFECYCLE.md`
+- `docs/internal/dashboards/v0.5-readiness-dashboard.md` → `docs/internal/dashboards/release-blockers/{beta-program,deployment-checklist,sandbox-network-decision}.md`
+- `docs/internal/plans/monorepo-consolidation-plan.md` → `docs/internal/plans/specs/CCP_SPEC.md`
+- `docs/internal/research/ato-runtime-boundary-what-can-run.md` → `docs/internal/crates/ato-desktop/assets/preload/tauri.js`, `docs/internal/samples/desky-mock-{electron,capsule.toml,tauri,wails}…`
+- `docs/internal/research/capsulize-vikunja-memos-libretranslate.md` → `docs/internal/crates/ato-cli/samples/…`, `docs/internal/crates/ato-desktop/docs/rfcs/draft`, `docs/internal/crates/capsule/src/…`
+- `docs/internal/research/research_phase13a_sandbox_best_practices_20260429.md` → `docs/internal/research/crates/nacelle/src/system/sandbox/linux.rs`
+- `docs/ready-state/backend-matrix.md` → `crates/cli/src/application/desktop_runner/matching.rs`
+- `docs/rfcs/archived/DESKY_SPEC.md` → `docs/rfcs/archived/DESKTOP_SPEC.md`
+- `docs/rfcs/archived/STORE_WEB_SPEC.md` → `docs/rfcs/ops/DOCK_ROUTING_RUNBOOK.md`
+- `extensions/providers/nacelle/samples/simple-todo/README.md` → `extensions/providers/nacelle/{ato-cli,ato-desktop,uarc}/…`
+
+These are references to paths that no longer exist (old repo layouts). For the
+move PR: either fix the target (preferred where the current path is obvious) or
+carry them as reviewed baseline entries in `docs/ops/archive-link-audit.json`,
+with the count recorded next to the baseline commit.
