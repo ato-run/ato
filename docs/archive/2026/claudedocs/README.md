@@ -28,7 +28,7 @@ here unchanged on 2026-10-28, preserving per-file rename history.
   `dock-wizard-e2e-20260516` receipts.
 - Receipts use the old canonical AODD YAML schema from
   `.claude/skills/aodd/SKILL.md` plus ad-hoc keys. They are not the current
-  Markdown receipt format; see the [AODD collection](../../../aodd/) for the
+  Markdown receipt format; see the [AODD collection](https://github.com/ato-run/ato-archive-2026-11/tree/45f5ed4274336c9ffa94208874c052c39f9bcdac/docs/aodd) for the
   retained Markdown generation.
 - The ten repository-relative `evidence:` paths in
   [aodd-143/receipt.yaml](aodd-143/receipt.yaml) (4) and
