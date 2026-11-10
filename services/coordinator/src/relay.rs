@@ -38,6 +38,10 @@ pub struct RelayRequest {
     pub body: String,
     /// Opaque to the relay; interpreted only by the origin.
     pub authorization: Option<String>,
+    /// Requested payload mode. This build executes "none" only; "e2ee" and
+    /// "recoverable" are refused rather than silently downgraded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -98,6 +102,11 @@ impl Origin {
         }
         if request.origin_epoch != self.epoch {
             return refuse(409, "origin_epoch_mismatch");
+        }
+        match request.encryption.as_deref().unwrap_or("none") {
+            "none" => {}
+            "e2ee" | "recoverable" => return refuse(422, "encryption_mode_unsupported"),
+            _ => return refuse(400, "invalid_encryption_mode"),
         }
         let method = match request.method.as_str() {
             "GET" => Method::GET,
@@ -395,6 +404,7 @@ mod tests {
             path: path.into(),
             body: body.into(),
             authorization: Some("Bearer test-token".into()),
+            encryption: None,
         }
     }
 
@@ -737,5 +747,29 @@ Connection: close
             "{}",
             replies[0].body
         );
+    }
+
+    #[tokio::test]
+    async fn refuses_an_encryption_mode_it_cannot_verify() {
+        let origin = origin();
+        let mut e2ee = request("GET", "/health", "");
+        e2ee.encryption = Some("e2ee".into());
+        let response = origin.handle(e2ee).await;
+        assert_eq!(response.status, 422);
+        assert!(response.body.contains("encryption_mode_unsupported"));
+
+        let mut recoverable = request("GET", "/health", "");
+        recoverable.encryption = Some("recoverable".into());
+        assert_eq!(origin.handle(recoverable).await.status, 422);
+
+        let mut unknown = request("GET", "/health", "");
+        unknown.encryption = Some("rot13".into());
+        let response = origin.handle(unknown).await;
+        assert_eq!(response.status, 400);
+        assert!(response.body.contains("invalid_encryption_mode"));
+
+        let mut plain = request("GET", "/health", "");
+        plain.encryption = Some("none".into());
+        assert_eq!(origin.handle(plain).await.status, 200);
     }
 }
