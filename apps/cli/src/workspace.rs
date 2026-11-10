@@ -1440,6 +1440,14 @@ fn shell_html(
       window.setTimeout(refresh, 200);
     }});
   }}
+  document.addEventListener("keydown", function (event) {{
+    if ((event.ctrlKey || event.metaKey) && String(event.key).toLowerCase() === "s") {{
+      if (checkpoint) {{
+        event.preventDefault();
+        checkpoint.click();
+      }}
+    }}
+  }});
   var stop = document.getElementById("stop-button");
   if (stop) {{
     stop.addEventListener("click", function () {{

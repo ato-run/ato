@@ -61,7 +61,8 @@ The Coordinator owns a single-writer lease: a second live writer is refused
 ## Current limitations
 
 - The shell has **Checkpoint** (save while it keeps running) and **Stop and
-  save** buttons; Ctrl-C is the same stop action from the terminal.
+  save** buttons; **Ctrl-S / Cmd-S** also requests a checkpoint, and Ctrl-C is
+  the same stop action from the terminal.
 - Window/split layout and the active pane are restored; in-pane scroll or
   selection is not (it needs an app-declared state).
 - The local Coordinator uses port `18788`; if it is busy, pass
