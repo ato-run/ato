@@ -574,6 +574,172 @@ pub async fn handle_request(
                 Err(error) => error_response(error),
             }
         }
+        (
+            &Method::POST,
+            [
+                "v1",
+                "protocols",
+                protocol,
+                "operations",
+                operation,
+                "expose",
+            ],
+        ) => {
+            let input: Value = match serde_json::from_slice(body) {
+                Ok(value) => value,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::BAD_REQUEST,
+                        json!({ "error": "invalid_json" }),
+                    );
+                }
+            };
+            let expose_mcp = input.get("mcp").and_then(Value::as_bool).unwrap_or(false);
+            let mut coordinator = match state.coordinator.lock() {
+                Ok(coordinator) => coordinator,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({ "error": "storage_error" }),
+                    );
+                }
+            };
+            match coordinator.set_operation_exposure(protocol, operation, expose_mcp) {
+                Ok(()) => json_response(
+                    StatusCode::OK,
+                    json!({ "status": "updated", "mcp": expose_mcp }),
+                ),
+                Err(error) => error_response(error),
+            }
+        }
+        (&Method::POST, ["mcp"]) => {
+            let request: Value = match serde_json::from_slice(body) {
+                Ok(value) => value,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::BAD_REQUEST,
+                        json!({ "error": "invalid_json" }),
+                    );
+                }
+            };
+            let id = request.get("id").cloned().unwrap_or(Value::Null);
+            let method = request
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let reply = |result: Value| json!({ "jsonrpc": "2.0", "id": id, "result": result });
+            let reply_error = |code: i64, message: &str| json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } });
+            let mut coordinator = match state.coordinator.lock() {
+                Ok(coordinator) => coordinator,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({ "error": "storage_error" }),
+                    );
+                }
+            };
+            match method {
+                "initialize" => json_response(
+                    StatusCode::OK,
+                    reply(json!({
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": { "tools": {} },
+                        "serverInfo": { "name": "ato-coordinator", "version": env!("CARGO_PKG_VERSION") }
+                    })),
+                ),
+                "tools/list" => match coordinator.mcp_tools() {
+                    Ok(tools) => json_response(
+                        StatusCode::OK,
+                        reply(json!({
+                            "tools": tools.into_iter().map(|tool| json!({
+                                "name": tool.operation,
+                                "description": format!("{} ({})", tool.protocol, tool.semantics),
+                                "inputSchema": { "type": "object" }
+                            })).collect::<Vec<_>>()
+                        })),
+                    ),
+                    Err(error) => {
+                        json_response(StatusCode::OK, reply_error(-32000, &error.to_string()))
+                    }
+                },
+                "tools/call" => {
+                    let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
+                    let name = params
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
+                    let arguments = params
+                        .get("arguments")
+                        .cloned()
+                        .unwrap_or_else(|| json!({}));
+                    let binding =
+                        coordinator
+                            .bindings_for_instance("mcp")
+                            .ok()
+                            .and_then(|bindings| {
+                                bindings.into_iter().find(|binding| {
+                                    binding
+                                        .operations
+                                        .iter()
+                                        .any(|operation| operation == &name)
+                                })
+                            });
+                    let Some(binding) = binding else {
+                        return json_response(
+                            StatusCode::OK,
+                            reply(json!({
+                                "content": [{ "type": "text", "text": "operation_not_granted" }],
+                                "isError": true
+                            })),
+                        );
+                    };
+                    match coordinator.read_resource("local", &binding.resource_id) {
+                        Err(error) => json_response(
+                            StatusCode::OK,
+                            reply(json!({
+                                "content": [{ "type": "text", "text": error.to_string() }],
+                                "isError": true
+                            })),
+                        ),
+                        Ok(resource) => {
+                            // JSON-RPC ids may be numbers or strings; the
+                            // operation id must distinguish them or two calls
+                            // with different ids would collide.
+                            let id_text = match &id {
+                                Value::String(text) => text.clone(),
+                                other => other.to_string(),
+                            };
+                            let operation_id = format!("mcp:{id_text}");
+                            match coordinator.invoke_binding_handler(
+                                &binding.binding_id,
+                                &name,
+                                &arguments,
+                                &operation_id,
+                                resource.revision,
+                                resource.generation,
+                            ) {
+                                Ok(outcome) => json_response(
+                                    StatusCode::OK,
+                                    reply(json!({
+                                        "content": [{ "type": "text", "text": json!(outcome).to_string() }],
+                                        "isError": false
+                                    })),
+                                ),
+                                Err(error) => json_response(
+                                    StatusCode::OK,
+                                    reply(json!({
+                                        "content": [{ "type": "text", "text": error.to_string() }],
+                                        "isError": true
+                                    })),
+                                ),
+                            }
+                        }
+                    }
+                }
+                _ => json_response(StatusCode::OK, reply_error(-32601, "method_not_found")),
+            }
+        }
         (&Method::POST, ["control", "gc"]) => {
             let mut coordinator = match state.coordinator.lock() {
                 Ok(coordinator) => coordinator,
@@ -1222,5 +1388,141 @@ export function createTask({ arguments: args, state }) {
         // Not served; the request falls through to the authenticated API and
         // is refused there.
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn serves_mcp_tools_with_grant_and_revocation() {
+        let state = state();
+        let module = r#"
+export function createTask({ arguments: args, state }) {
+  const board = state && state.document ? state.document : {};
+  const tasks = Object.assign({}, board.tasks || {});
+  tasks["mcp-1"] = { id: "mcp-1", title: String(args.title), dueAt: null, completed: false };
+  return { operations: [{ kind: "replace", value: { tasks } }], result: { task_id: "mcp-1" } };
+}
+"#;
+        let (status, _) = call(
+            &state,
+            Method::POST,
+            "/v1/protocols/todo.board@1/operations",
+            Some("Bearer test-token"),
+            json!({
+                "operation": "todo_create",
+                "semantics": "evolution",
+                "access": "read_write",
+                "module_source": module,
+                "module_export": "createTask",
+                "publisher": "alice/app"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, _) = call(
+            &state,
+            Method::POST,
+            "/v1/protocols/todo.board@1/operations/todo_create/expose",
+            Some("Bearer test-token"),
+            json!({"mcp": true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, created) = call(
+            &state,
+            Method::POST,
+            "/v1/data-resources",
+            Some("Bearer test-token"),
+            json!({"protocol": "todo.board@1", "document": {"tasks": {}}}),
+        )
+        .await;
+        let resource_id = created["resource_id"].as_str().unwrap().to_owned();
+        let (status, binding) = call(
+            &state,
+            Method::POST,
+            &format!("/v1/data-resources/{resource_id}/bindings"),
+            Some("Bearer test-token"),
+            json!({
+                "port": "tasks",
+                "protocol": "todo.board@1",
+                "access": "operations",
+                "operations": ["todo_create"],
+                "instance_id": "mcp"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let binding_id = binding["binding_id"].as_str().unwrap().to_owned();
+
+        // MCP requires the Coordinator token.
+        let (status, _, _) = call_raw(
+            &state,
+            Method::POST,
+            "/mcp",
+            None,
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, _, initialize) = call_raw(
+            &state,
+            Method::POST,
+            "/mcp",
+            Some("Bearer test-token"),
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let initialize: Value = serde_json::from_str(&initialize).unwrap();
+        assert_eq!(
+            initialize["result"]["serverInfo"]["name"],
+            "ato-coordinator"
+        );
+
+        let (_, _, listed) = call_raw(
+            &state,
+            Method::POST,
+            "/mcp",
+            Some("Bearer test-token"),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+        )
+        .await;
+        let listed: Value = serde_json::from_str(&listed).unwrap();
+        assert_eq!(listed["result"]["tools"][0]["name"], "todo_create");
+
+        let (_, _, called) = call_raw(
+            &state,
+            Method::POST,
+            "/mcp",
+            Some("Bearer test-token"),
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"todo_create","arguments":{"title":"via MCP"}}}),
+        )
+        .await;
+        let called: Value = serde_json::from_str(&called).unwrap();
+        assert_eq!(called["result"]["isError"], false, "{called}");
+        let payload: Value =
+            serde_json::from_str(called["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["revision"], 2);
+        assert_eq!(payload["result"]["task_id"], "mcp-1");
+
+        // Revocation closes the MCP path too.
+        let (status, _) = call(
+            &state,
+            Method::DELETE,
+            &format!("/v1/bindings/{binding_id}"),
+            Some("Bearer test-token"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, _, after) = call_raw(
+            &state,
+            Method::POST,
+            "/mcp",
+            Some("Bearer test-token"),
+            json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"todo_create","arguments":{"title":"nope"}}}),
+        )
+        .await;
+        let after: Value = serde_json::from_str(&after).unwrap();
+        assert_eq!(after["result"]["isError"], true, "{after}");
     }
 }
