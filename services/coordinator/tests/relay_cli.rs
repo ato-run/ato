@@ -173,3 +173,28 @@ fn a_one_shot_run_fails_when_the_relay_is_unreachable() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn serve_refuses_a_non_loopback_plaintext_bind() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("coordinator.sqlite");
+    let binary = env!("CARGO_BIN_EXE_ato-coordinator");
+    assert!(
+        Command::new(binary)
+            .args(["init", "--db"])
+            .arg(&database)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let output = Command::new(binary)
+        .arg("serve")
+        .arg("--db")
+        .arg(&database)
+        .args(["--addr", "0.0.0.0:0", "--token", "cli-token"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("non-loopback"), "stderr: {stderr}");
+}
