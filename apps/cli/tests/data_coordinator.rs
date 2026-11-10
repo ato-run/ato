@@ -136,3 +136,146 @@ fn surfaces_the_authority_error_code() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("operation_id_conflict"), "{stderr}");
 }
+#[test]
+fn protocol_register_prints_the_registered_operation() {
+    let (port, handle) = stub(vec![(201, r#"{"status":"registered"}"#)]);
+    let output = ato()
+        .args([
+            "data",
+            "protocol",
+            "register",
+            "todo.board@1",
+            "--operation",
+            "todo_list_due_dates",
+            "--semantics",
+            "observation",
+            "--access",
+            "read",
+            "--implementation-digest",
+            "sha256:due",
+            "--publisher",
+            "alice/app",
+            "--coordinator",
+            &format!("http://127.0.0.1:{port}"),
+            "--token",
+            "test-token",
+        ])
+        .output()
+        .expect("run ato data protocol register");
+    handle.join().expect("stub");
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("registered todo_list_due_dates on todo.board@1"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn binding_create_prints_the_operation_scope() {
+    let (port, handle) = stub(vec![(
+        201,
+        r#"{"binding_id":"dbind_1","resource_id":"dres_1","port_name":"tasks","protocol":"todo.board@1","access":"operations","operations":["todo_list_due_dates"],"status":"active","binding_epoch":0}"#,
+    )]);
+    let output = ato()
+        .args([
+            "data",
+            "binding",
+            "create",
+            "dres_1",
+            "--port",
+            "tasks",
+            "--protocol",
+            "todo.board@1",
+            "--access",
+            "operations",
+            "--operations",
+            "todo_list_due_dates",
+            "--coordinator",
+            &format!("http://127.0.0.1:{port}"),
+            "--token",
+            "test-token",
+        ])
+        .output()
+        .expect("run ato data binding create");
+    handle.join().expect("stub");
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("bound dbind_1 (access operations, operations: todo_list_due_dates)"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn binding_document_refusal_surfaces_the_code() {
+    let (port, handle) = stub(vec![(403, r#"{"error":"operation_only_binding"}"#)]);
+    let output = ato()
+        .args([
+            "data",
+            "binding",
+            "document",
+            "dbind_1",
+            "--coordinator",
+            &format!("http://127.0.0.1:{port}"),
+            "--token",
+            "test-token",
+        ])
+        .output()
+        .expect("run ato data binding document");
+    handle.join().expect("stub");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("operation_only_binding"), "{stderr}");
+}
+
+#[test]
+fn binding_invoke_and_revoke_print_the_authority_result() {
+    let (port, handle) = stub(vec![
+        (
+            200,
+            r#"{"resource_id":"dres_1","revision":3,"generation":0,"content_digest":"sha256:ghi","replayed":false,"receipt":{"revision":3}}"#,
+        ),
+        (200, r#"{"binding_id":"dbind_1","status":"revoked"}"#),
+    ]);
+    let invoke = ato()
+        .args([
+            "data",
+            "binding",
+            "invoke",
+            "dbind_1",
+            "--operation",
+            "todo_list_due_dates",
+            "--operation-id",
+            "op-due",
+            "--expected-revision",
+            "2",
+            "--coordinator",
+            &format!("http://127.0.0.1:{port}"),
+            "--token",
+            "test-token",
+        ])
+        .output()
+        .expect("run ato data binding invoke");
+    assert!(invoke.status.success(), "{invoke:?}");
+    let stdout = String::from_utf8_lossy(&invoke.stdout);
+    assert!(stdout.contains("committed revision 3"), "{stdout}");
+
+    let revoke = ato()
+        .args([
+            "data",
+            "binding",
+            "revoke",
+            "dbind_1",
+            "--coordinator",
+            &format!("http://127.0.0.1:{port}"),
+            "--token",
+            "test-token",
+        ])
+        .output()
+        .expect("run ato data binding revoke");
+    handle.join().expect("stub");
+    assert!(revoke.status.success(), "{revoke:?}");
+    let stdout = String::from_utf8_lossy(&revoke.stdout);
+    assert!(stdout.contains("binding dbind_1: revoked"), "{stdout}");
+}

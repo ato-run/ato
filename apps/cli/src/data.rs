@@ -31,6 +31,16 @@ pub enum DataCommand {
         #[command(subcommand)]
         command: OperationCommand,
     },
+    /// Bind a Resource to a Port and use the binding.
+    Binding {
+        #[command(subcommand)]
+        command: BindingCommand,
+    },
+    /// Register a Protocol operation with its publisher.
+    Protocol {
+        #[command(subcommand)]
+        command: ProtocolCommand,
+    },
 }
 
 #[derive(Debug, Args, Clone)]
@@ -94,6 +104,73 @@ pub enum OperationCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum BindingCommand {
+    /// Bind a Resource to a Port. `--access operations` is operation-only.
+    Create {
+        resource_id: String,
+        #[arg(long)]
+        port: String,
+        #[arg(long)]
+        protocol: String,
+        #[arg(long, default_value = "read")]
+        access: String,
+        /// Operations an operation-only binding may invoke (comma separated).
+        #[arg(long, value_delimiter = ',')]
+        operations: Vec<String>,
+        #[command(flatten)]
+        coordinator: CoordinatorArgs,
+    },
+    /// Read the document through a binding (refused for operation-only).
+    Document {
+        binding_id: String,
+        #[command(flatten)]
+        coordinator: CoordinatorArgs,
+    },
+    /// Invoke an operation through a binding.
+    Invoke {
+        binding_id: String,
+        #[arg(long)]
+        operation: String,
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long)]
+        expected_revision: i64,
+        #[arg(long, default_value_t = 0)]
+        expected_generation: i64,
+        #[arg(long, default_value = "{}")]
+        document: String,
+        #[command(flatten)]
+        coordinator: CoordinatorArgs,
+    },
+    /// Revoke a binding.
+    Revoke {
+        binding_id: String,
+        #[command(flatten)]
+        coordinator: CoordinatorArgs,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProtocolCommand {
+    /// Register one operation of a Protocol (publisher-owned).
+    Register {
+        protocol: String,
+        #[arg(long)]
+        operation: String,
+        #[arg(long)]
+        semantics: String,
+        #[arg(long)]
+        access: String,
+        #[arg(long)]
+        implementation_digest: String,
+        #[arg(long)]
+        publisher: String,
+        #[command(flatten)]
+        coordinator: CoordinatorArgs,
+    },
+}
+
 pub fn run(args: DataArgs) -> Result<()> {
     match args.command {
         DataCommand::Health(coordinator) => health(&coordinator),
@@ -109,6 +186,67 @@ pub fn run(args: DataArgs) -> Result<()> {
                 document,
                 coordinator,
             } => create(&coordinator, &protocol, display_name, &document),
+        },
+        DataCommand::Binding { command } => match command {
+            BindingCommand::Create {
+                resource_id,
+                port,
+                protocol,
+                access,
+                operations,
+                coordinator,
+            } => binding_create(
+                &coordinator,
+                &resource_id,
+                &port,
+                &protocol,
+                &access,
+                operations,
+            ),
+            BindingCommand::Document {
+                binding_id,
+                coordinator,
+            } => binding_document(&coordinator, &binding_id),
+            BindingCommand::Invoke {
+                binding_id,
+                operation,
+                operation_id,
+                expected_revision,
+                expected_generation,
+                document,
+                coordinator,
+            } => binding_invoke(
+                &coordinator,
+                &binding_id,
+                &operation,
+                &operation_id,
+                expected_revision,
+                expected_generation,
+                &document,
+            ),
+            BindingCommand::Revoke {
+                binding_id,
+                coordinator,
+            } => binding_revoke(&coordinator, &binding_id),
+        },
+        DataCommand::Protocol { command } => match command {
+            ProtocolCommand::Register {
+                protocol,
+                operation,
+                semantics,
+                access,
+                implementation_digest,
+                publisher,
+                coordinator,
+            } => protocol_register(
+                &coordinator,
+                &protocol,
+                &operation,
+                &semantics,
+                &access,
+                &implementation_digest,
+                &publisher,
+            ),
         },
         DataCommand::Operation { command } => match command {
             OperationCommand::Invoke {
@@ -365,5 +503,164 @@ fn invoke(
     if let Some(receipt) = value.get("receipt") {
         println!("receipt: {}", serde_json::to_string(receipt)?);
     }
+    Ok(())
+}
+
+fn binding_create(
+    coordinator: &CoordinatorArgs,
+    resource_id: &str,
+    port: &str,
+    protocol: &str,
+    access: &str,
+    operations: Vec<String>,
+) -> Result<()> {
+    let value = request(
+        coordinator,
+        reqwest::Method::POST,
+        &format!("/v1/data-resources/{resource_id}/bindings"),
+        Some(json!({
+            "port": port,
+            "protocol": protocol,
+            "access": access,
+            "operations": operations,
+        })),
+    )?;
+    if coordinator.json {
+        return print_json(&value);
+    }
+    println!(
+        "bound {} (access {}, operations: {})",
+        value
+            .get("binding_id")
+            .and_then(Value::as_str)
+            .unwrap_or("-"),
+        value.get("access").and_then(Value::as_str).unwrap_or("-"),
+        value
+            .get("operations")
+            .and_then(Value::as_array)
+            .map(|operations| operations
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", "))
+            .unwrap_or_default()
+    );
+    Ok(())
+}
+
+fn binding_document(coordinator: &CoordinatorArgs, binding_id: &str) -> Result<()> {
+    let value = request(
+        coordinator,
+        reqwest::Method::GET,
+        &format!("/v1/bindings/{binding_id}/document"),
+        None,
+    )?;
+    if coordinator.json {
+        return print_json(&value);
+    }
+    println!(
+        "revision: {}",
+        value
+            .get("revision")
+            .and_then(Value::as_i64)
+            .unwrap_or_default()
+    );
+    println!(
+        "document: {}",
+        serde_json::to_string_pretty(value.get("document").unwrap_or(&Value::Null))?
+    );
+    Ok(())
+}
+
+fn binding_invoke(
+    coordinator: &CoordinatorArgs,
+    binding_id: &str,
+    operation: &str,
+    operation_id: &str,
+    expected_revision: i64,
+    expected_generation: i64,
+    document: &str,
+) -> Result<()> {
+    let document: Value = serde_json::from_str(document).context("parse --document as JSON")?;
+    let value = request(
+        coordinator,
+        reqwest::Method::POST,
+        &format!("/v1/bindings/{binding_id}/operations"),
+        Some(json!({
+            "operation": operation,
+            "operation_id": operation_id,
+            "expected_revision": expected_revision,
+            "expected_generation": expected_generation,
+            "document": document,
+        })),
+    )?;
+    if coordinator.json {
+        return print_json(&value);
+    }
+    println!(
+        "committed revision {}{}",
+        value
+            .get("revision")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+        if value
+            .get("replayed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            " (replayed)"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
+fn binding_revoke(coordinator: &CoordinatorArgs, binding_id: &str) -> Result<()> {
+    let value = request(
+        coordinator,
+        reqwest::Method::DELETE,
+        &format!("/v1/bindings/{binding_id}"),
+        None,
+    )?;
+    if coordinator.json {
+        return print_json(&value);
+    }
+    println!(
+        "binding {}: {}",
+        binding_id,
+        value
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+    );
+    Ok(())
+}
+
+fn protocol_register(
+    coordinator: &CoordinatorArgs,
+    protocol: &str,
+    operation: &str,
+    semantics: &str,
+    access: &str,
+    implementation_digest: &str,
+    publisher: &str,
+) -> Result<()> {
+    let value = request(
+        coordinator,
+        reqwest::Method::POST,
+        &format!("/v1/protocols/{protocol}/operations"),
+        Some(json!({
+            "operation": operation,
+            "semantics": semantics,
+            "access": access,
+            "implementation_digest": implementation_digest,
+            "publisher": publisher,
+        })),
+    )?;
+    if coordinator.json {
+        return print_json(&value);
+    }
+    println!("registered {} on {}", operation, protocol);
     Ok(())
 }
