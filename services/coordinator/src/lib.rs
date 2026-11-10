@@ -1050,8 +1050,22 @@ impl Coordinator {
 
     /// Operations published to MCP clients, with their declared semantics.
     pub fn mcp_tools(&self) -> Result<Vec<McpTool>, CoordinatorError> {
+        // A tool is only useful when the mcp app instance holds a binding that
+        // grants it; advertising an ungranted tool invites calls that must be
+        // refused.
         let mut statement = self.conn.prepare(
-            "SELECT protocol_ref,operation,semantics,access FROM protocol_operations\n             WHERE expose_mcp=1 ORDER BY protocol_ref, operation",
+            "SELECT po.protocol_ref,po.operation,po.semantics,po.access
+             FROM protocol_operations po
+             WHERE po.expose_mcp=1 AND EXISTS (
+               SELECT 1 FROM bindings b
+               WHERE b.instance_id='mcp' AND b.status='active'
+                 AND b.access='operations'
+                 AND EXISTS (
+                   SELECT 1 FROM json_each(b.operations_json) granted
+                   WHERE granted.value=po.operation
+                 )
+             )
+             ORDER BY po.protocol_ref, po.operation",
         )?;
         let rows = statement.query_map([], |row| {
             Ok(McpTool {
@@ -1651,6 +1665,25 @@ export function createTask({ arguments: args, state }) {
             )
             .unwrap();
         assert!(coordinator.mcp_tools().unwrap().is_empty());
+        let created = coordinator
+            .create_resource(
+                "local",
+                "todo.board@1",
+                None,
+                serde_json::json!({"tasks": {}}),
+            )
+            .unwrap();
+        coordinator
+            .bind_resource_for_instance(
+                &created.resource_id,
+                "tasks",
+                "todo.board@1",
+                "operations",
+                vec!["todo_create".into()],
+                "mcp",
+            )
+            .unwrap();
+        // Exposed but not granted to the MCP instance: not advertised.
         coordinator
             .set_operation_exposure("todo.board@1", "todo_create", true)
             .unwrap();
@@ -1692,11 +1725,12 @@ export function createTask({ arguments: args, state }) {
             [],
         );
         assert!(swap_module.is_err(), "handler swap must be refused");
-        // Exposure is the one mutable column.
+        // Exposure is the one mutable column. Without an mcp binding the tool
+        // is published but not advertised.
         coordinator
             .set_operation_exposure("todo.board@1", "todo_create", true)
             .unwrap();
-        assert_eq!(coordinator.mcp_tools().unwrap().len(), 1);
+        assert!(coordinator.mcp_tools().unwrap().is_empty());
     }
 
     #[test]
