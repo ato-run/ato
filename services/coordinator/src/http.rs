@@ -193,20 +193,19 @@ pub async fn handle_request(
         }
     }
     // The served app's own files are public on this local origin.
-    if method == Method::GET {
-        if let Some(apps) = &state.apps {
-            if let Some(file) = apps::resolve(&apps.dir, path) {
-                return match std::fs::read(&file) {
-                    Ok(bytes) => Response::builder()
-                        .status(StatusCode::OK)
-                        .header("content-type", apps::content_type(&file))
-                        .header("cache-control", "no-store")
-                        .body(Full::new(Bytes::from(bytes)))
-                        .expect("static response"),
-                    Err(_) => json_response(StatusCode::NOT_FOUND, json!({ "error": "not_found" })),
-                };
-            }
-        }
+    if method == Method::GET
+        && let Some(apps) = &state.apps
+        && let Some(file) = apps::resolve(&apps.dir, path)
+    {
+        return match std::fs::read(&file) {
+            Ok(bytes) => Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", apps::content_type(&file))
+                .header("cache-control", "no-store")
+                .body(Full::new(Bytes::from(bytes)))
+                .expect("static response"),
+            Err(_) => json_response(StatusCode::NOT_FOUND, json!({ "error": "not_found" })),
+        };
     }
     if !authorized(authorization, &state.token) {
         return json_response(StatusCode::UNAUTHORIZED, json!({ "error": "unauthorized" }));
