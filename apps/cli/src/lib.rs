@@ -13,6 +13,7 @@ mod mcp_stdio;
 mod model_cache;
 mod object_transport;
 mod portable_dependency;
+mod workspace;
 pub mod zip_store;
 
 pub mod activity_client;
@@ -163,6 +164,11 @@ enum Commands {
     Data {
         #[command(subcommand)]
         command: data::DataCommand,
+    },
+    /// Inspect a local multi-app Workspace and validate every pane Capsule.
+    Workspace {
+        #[command(subcommand)]
+        command: workspace::WorkspaceCommand,
     },
     /// Inspect repository execution evidence without building or launching it.
     FormInspect {
@@ -754,6 +760,7 @@ pub fn run() -> Result<()> {
         Commands::Form(args) if args.runtime_network => form_on_runtime_network(*args),
         Commands::Form(args) => form(*args),
         Commands::Data { command } => data::run(data::DataArgs { command }),
+        Commands::Workspace { command } => workspace::run(workspace::WorkspaceArgs { command }),
         Commands::FormInspect {
             path,
             derivation,
