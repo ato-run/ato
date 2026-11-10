@@ -1701,6 +1701,15 @@ pub fn start(
     let mut provisions = Vec::with_capacity(manifest.pane.len());
     for pane in &manifest.pane {
         let loaded = load_pane_capsule(base, pane)?;
+        if loaded.selected.realization
+            != ato_portable_application::PortableRealizationKind::StaticWeb
+        {
+            bail!(
+                "pane `{}` is a {} route; the workspace shell serves Static Web panes only, and native/process panes need their own surface host",
+                pane.id,
+                realization_label(loaded.selected.realization)
+            );
+        }
         let destination = runtime_root.path().join(&pane.id);
         ato_portable_application::materialize_tree(&loaded.bundle, &loaded.selected, &destination)
             .with_context(|| format!("pane `{}` tree could not be materialized", pane.id))?;
