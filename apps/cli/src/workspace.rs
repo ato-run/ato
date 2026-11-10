@@ -180,6 +180,108 @@ pub struct WorkspaceCheckpointPaneV1 {
     pub snapshot: serde_json::Value,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DataPortDeclarationFile {
+    schema: String,
+    #[serde(default)]
+    port: Vec<DataPortDeclaration>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DataPortDeclaration {
+    name: String,
+    protocol: String,
+    #[serde(default)]
+    access: String,
+    #[serde(default)]
+    operations: Vec<String>,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    required: Option<bool>,
+}
+
+/// Read the pane's own Data Port declarations from its verified tree.
+///
+/// The declarations are part of the workspace tree the person saved, not of K:
+/// which Resource satisfies a Port stays a runtime consent decision. This only
+/// reports what the pane asks for, plus whether it also carries an operations
+/// declaration.
+fn declared_data_ports(
+    bundle: &ato_objects::PortableApplicationBundle,
+    selected: &ato_portable_application::ValidatedPortableApplication,
+) -> Result<(Vec<String>, bool)> {
+    let mut declaration = None;
+    let mut operations_declared = false;
+    for entry in &selected.tree.entries {
+        match entry.path.as_str() {
+            "ato.data.toml" => {
+                let reference = ato_computation::ContentRef::parse(entry.content_ref.clone())
+                    .context("pane data declaration content_ref is invalid")?;
+                declaration = Some(
+                    bundle
+                        .payload_bytes(&reference)
+                        .context("pane data declaration is not readable from the capsule")?,
+                );
+            }
+            "ato.operations.yaml" => operations_declared = true,
+            _ => {}
+        }
+    }
+    let Some(bytes) = declaration else {
+        return Ok((Vec::new(), operations_declared));
+    };
+    // A tree payload is the file's bytes; some packers store text files as a
+    // JSON string object, so accept that representation too.
+    let bytes = match serde_json::from_slice::<String>(&bytes) {
+        Ok(decoded) => decoded.into_bytes(),
+        Err(_) => bytes,
+    };
+    let text = String::from_utf8(bytes).context("pane ato.data.toml is not UTF-8")?;
+    let parsed: DataPortDeclarationFile =
+        toml::from_str(&text).context("pane ato.data.toml is not valid TOML")?;
+    if !matches!(
+        parsed.schema.as_str(),
+        "ato.data-ports/1" | "ato.data-ports/2"
+    ) {
+        bail!(
+            "pane ato.data.toml declares unsupported schema `{}`",
+            parsed.schema
+        );
+    }
+    let mut ports = Vec::with_capacity(parsed.port.len());
+    for port in parsed.port {
+        if port.name.is_empty() || port.protocol.is_empty() {
+            bail!("pane ato.data.toml has a Port without a name or protocol");
+        }
+        match (parsed.schema.as_str(), port.access.as_str()) {
+            ("ato.data-ports/2", "operations") => {
+                if port.operations.is_empty() {
+                    bail!(
+                        "pane Port `{}` is operation-only but declares no operations",
+                        port.name
+                    );
+                }
+            }
+            ("ato.data-ports/2", other) => bail!(
+                "pane Port `{}` declares `{}` access; a /2 Port must be `operations`",
+                port.name,
+                other
+            ),
+            (_, "read" | "read_write") => {}
+            (_, other) => bail!(
+                "pane Port `{}` declares unsupported access `{}`",
+                port.name,
+                other
+            ),
+        }
+        ports.push(format!("{}:{}:{}", port.name, port.protocol, port.access));
+    }
+    Ok((ports, operations_declared))
+}
+
 /// One validated pane of an inspected workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InspectedPane {
@@ -191,6 +293,10 @@ pub struct InspectedPane {
     pub derivation_ref: String,
     pub realization: String,
     pub tree_ref: String,
+    /// Declared DataResource Ports, e.g. `tasks:todo.board@1:operations`.
+    pub data_ports: Vec<String>,
+    /// True when the pane tree carries `ato.operations.yaml`.
+    pub operations_declared: bool,
 }
 
 /// Result of `ato workspace inspect`.
@@ -474,6 +580,8 @@ pub fn inspect(file: &Path) -> Result<InspectedWorkspace> {
     let mut panes = Vec::with_capacity(manifest.pane.len());
     for pane in &manifest.pane {
         let loaded = load_pane_capsule(base, pane)?;
+        let (data_ports, operations_declared) =
+            declared_data_ports(&loaded.bundle, &loaded.selected)?;
         panes.push(InspectedPane {
             pane_id: pane.id.clone(),
             app: pane.app.clone(),
@@ -483,6 +591,8 @@ pub fn inspect(file: &Path) -> Result<InspectedWorkspace> {
             derivation_ref: loaded.selected.derivation_ref.to_string(),
             realization: realization_label(loaded.selected.realization).to_owned(),
             tree_ref: loaded.selected.tree_ref.to_string(),
+            data_ports,
+            operations_declared,
         });
     }
     Ok(InspectedWorkspace {
@@ -673,6 +783,8 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
                             "derivation_ref": pane.derivation_ref,
                             "realization": pane.realization,
                             "tree_ref": pane.tree_ref,
+                            "data_ports": pane.data_ports,
+                            "operations_declared": pane.operations_declared,
                         })
                     })
                     .collect::<Vec<_>>();
