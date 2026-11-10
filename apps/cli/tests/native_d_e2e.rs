@@ -23,8 +23,10 @@
 //! * v0 has no shared save format between a static-web route (browser
 //!   `localStorage`, captured from a live browser) and a native route (a
 //!   filesystem slot). The cross-D state fixture therefore carries two native
-//!   routes that both declare the same slot, and the test states plainly that
-//!   the web -> native -> web runtime round trip is not met. See
+//!   routes that both declare the same slot **and** the same save format/
+//!   version, and the test states plainly that the web -> native -> web runtime
+//!   round trip is not met. A companion negative fixture omits `[state.save]`
+//!   and proves that a switch is then refused by name instead of assumed. See
 //!   `samples/native-desktop-stateful/capsule.toml`.
 //!
 //! The coordinator is the real self-hosted binary (`ato-capsulehub`) when it
@@ -95,7 +97,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command as AtoCommand;
+use ato_formation::authoring::StateSaveDeclaration;
 use ato_objects::capsulehub::{HubKey, SharedLink};
+use ato_portable_application::instance_snapshot::InstanceSnapshotSaveV1;
 use ato_portable_application::local_instance::LocalApplicationStore;
 use ato_portable_application::state_continuity::StateCompatibility;
 use ato_portable_application::{
@@ -108,6 +112,9 @@ use tempfile::TempDir;
 const PUT_TOKEN: &str = "pr8-e2e-put-token";
 const DELETE_TOKEN: &str = "pr8-e2e-delete-token";
 const MAX_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
+/// The save format the cross-D state fixture declares for its shared slot.
+const SHARED_SAVE_FORMAT: &str = "ato.state.filesystem.save";
+const SHARED_SAVE_VERSION: u32 = 1;
 /// The contract every route of the multi-D fixture declares: one observation.
 const CONTRACT_OBSERVATION_ID: &str = "proof";
 
@@ -1936,6 +1943,17 @@ fn instance_state_survives_a_derivation_switch_when_both_declare_the_slot() {
             Some(false),
             "the native Adapter delivers the slot by path"
         );
+        // A slot name says where the bytes live, not that another Derivation
+        // can read them: both routes declare the same format and version.
+        assert_eq!(
+            slots[0].save,
+            Some(StateSaveDeclaration {
+                format: SHARED_SAVE_FORMAT.to_owned(),
+                version: SHARED_SAVE_VERSION,
+                compatible_versions: Vec::new(),
+            }),
+            "both routes declare the same shared save format"
+        );
     }
 
     // Import selects a D explicitly; a native D is format-valid everywhere, so
@@ -2033,7 +2051,7 @@ fn instance_state_survives_a_derivation_switch_when_both_declare_the_slot() {
         .release_run(&instance_id, &run.token)
         .expect("release the Run");
 
-    // The saved data declares the slot and the format the route implies.
+    // The saved data declares the slot and the format the route writes.
     let restored = store
         .restored_snapshot(&instance_id)
         .expect("read the restored snapshot")
@@ -2042,8 +2060,12 @@ fn instance_state_survives_a_derivation_switch_when_both_declare_the_slot() {
     assert_eq!(restored.resources[0].slot, "save");
     assert_eq!(restored.resources[0].protocol, "ato.state.filesystem@1");
     assert_eq!(
-        restored.resources[0].save, None,
-        "a route that declares no save format keeps the legacy declaration"
+        restored.resources[0].save,
+        Some(InstanceSnapshotSaveV1 {
+            format: SHARED_SAVE_FORMAT.to_owned(),
+            version: SHARED_SAVE_VERSION,
+        }),
+        "the saved data declares the format and version the route writes"
     );
     // Restore is observed from the bytes the Run will import, not from an index.
     store
@@ -2165,6 +2187,115 @@ fn instance_state_survives_a_derivation_switch_when_both_declare_the_slot() {
          static-web route has no filesystem-state delivery or shared save \
          format, and no durable Instance start accepts an unsigned native \
          artifact, so a restored snapshot is not consumed by a native workload"
+    );
+}
+
+/// The companion negative: a slot name is not a shared save format.
+///
+/// The same fixture with `[state.save]` removed still saves — a route that
+/// declares nothing keeps the legacy pair — but a switch to the other
+/// Derivation must be refused by name. The bytes are never assumed readable,
+/// and the refusal gates both the pre-switch comparison and the import that
+/// would perform the restore.
+#[test]
+fn an_undeclared_save_format_refuses_a_derivation_switch() {
+    let scratch = tempfile::tempdir().unwrap();
+    let home = home(scratch.path());
+    let source = scratch.path().join("undeclared-source");
+    copy_tree(&stateful_root(), &source);
+    let manifest =
+        fs::read_to_string(source.join("capsule.toml")).expect("read the fixture manifest");
+    let expected_version = format!("version = {SHARED_SAVE_VERSION}");
+    let stripped = manifest
+        .lines()
+        .filter(|line| {
+            let line = line.trim();
+            line != "[state.save]"
+                && !line.starts_with("# The format both routes")
+                && !line.starts_with("# is omitted:")
+                && !line.starts_with(&format!("format = \"{SHARED_SAVE_FORMAT}\""))
+                && line != expected_version
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    assert_ne!(
+        stripped, manifest,
+        "the negative fixture must drop the [state.save] declaration"
+    );
+    fs::write(source.join("capsule.toml"), stripped).expect("write the negative manifest");
+
+    let capsule = scratch.path().join("undeclared.capsule");
+    let packed = pack(&home, &source, &capsule);
+    assert_success(&packed, "ato pack of the undeclared-format fixture");
+    let bytes = fs::read(&capsule).unwrap();
+    let (_, routes) = validate_bytes_all(&bytes).expect("the negative fixture is format-valid");
+    for route in &routes {
+        assert_eq!(
+            route.derivation.state[0].save, None,
+            "the negative fixture declares no save format"
+        );
+    }
+    let macos_ref = native_route(&routes, "macos")
+        .derivation_ref
+        .as_str()
+        .to_owned();
+    let windows_ref = native_route(&routes, "windows")
+        .derivation_ref
+        .as_str()
+        .to_owned();
+
+    let imported = ato(&home)
+        .args(["app", "import"])
+        .arg(&capsule)
+        .args(["--derivation", &macos_ref])
+        .output()
+        .expect("ato app import runs");
+    assert_success(&imported, "app import selecting the macOS Derivation");
+    let instance: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
+    let instance_id = instance["instance_id"].as_str().unwrap().to_owned();
+
+    let store = LocalApplicationStore::open(&home).expect("open the Instance store");
+    let state_dir = home
+        .join("instances")
+        .join(&instance_id)
+        .join("state")
+        .join("save");
+    fs::write(
+        state_dir.join("save.json"),
+        b"{\"progress\":\"chapter-1\"}\n",
+    )
+    .expect("write the Run-scoped state");
+    let run = store.claim_run(&instance_id).expect("claim a Run lease");
+    store
+        .save_filesystem_state_for_run(&instance_id, &run.token)
+        .expect("save the Run-scoped filesystem state")
+        .expect("the selected Derivation declares a slot");
+    store
+        .release_run(&instance_id, &run.token)
+        .expect("release the Run");
+
+    let refusal = store
+        .state_compatibility_for_derivation(&instance_id, &windows_ref)
+        .expect_err("an undeclared save format cannot be assumed readable");
+    assert_eq!(
+        refusal.state_continuity_code(),
+        Some("state-save-format-undeclared"),
+        "{refusal}"
+    );
+
+    // The refusal also gates the restore itself: importing the saved bundle
+    // under the other D refuses by name before any saved byte is written.
+    let exported = store
+        .export_instance(&instance_id)
+        .expect("export the Instance with its saved data");
+    let refusal = store
+        .import(&exported, Some(&windows_ref))
+        .expect_err("the cross-D import must be refused");
+    assert_eq!(
+        refusal.state_continuity_code(),
+        Some("state-save-format-undeclared"),
+        "{refusal}"
     );
 }
 
