@@ -256,6 +256,15 @@ fn declared_data_ports(
         if port.name.is_empty() || port.protocol.is_empty() {
             bail!("pane ato.data.toml has a Port without a name or protocol");
         }
+        if let Some(scope) = &port.scope
+            && !matches!(scope.as_str(), "user" | "instance")
+        {
+            bail!(
+                "pane Port `{}` declares unsupported scope `{scope}`",
+                port.name
+            );
+        }
+        let _is_required = port.required.unwrap_or(true);
         match (parsed.schema.as_str(), port.access.as_str()) {
             ("ato.data-ports/2", "operations") => {
                 if port.operations.is_empty() {
