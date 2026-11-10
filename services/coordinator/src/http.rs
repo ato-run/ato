@@ -36,6 +36,8 @@ pub type Body = Full<Bytes>;
 pub struct AppsConfig {
     pub dir: std::path::PathBuf,
     pub instance_id: String,
+    /// The Port the served app declares (the bridge's default target).
+    pub port: String,
 }
 
 pub struct ApiState {
@@ -98,6 +100,20 @@ pub async fn handle_request(
             StatusCode::OK,
             json!({ "status": "ok", "schema_version": crate::SCHEMA_VERSION, "resources": resources }),
         );
+    }
+    if method == Method::GET
+        && path == apps::RUNTIME_CONTEXT_PATH
+        && let Some(apps) = &state.apps
+    {
+        {
+            let script = apps::runtime_context_js(&apps.port);
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/javascript; charset=utf-8")
+                .header("cache-control", "no-store")
+                .body(Full::new(Bytes::from(script)))
+                .expect("static response");
+        }
     }
     if method == Method::GET && path == DATA_PORTS_BRIDGE_PATH {
         return Response::builder()
@@ -197,12 +213,19 @@ pub async fn handle_request(
         && let Some(apps) = &state.apps
         && let Some(file) = apps::resolve(&apps.dir, path)
     {
-        return match std::fs::read(&file) {
-            Ok(bytes) => Response::builder()
+        let content_type = apps::content_type(&file);
+        return match std::fs::read_to_string(&file) {
+            Ok(text) if content_type.starts_with("text/html") => Response::builder()
                 .status(StatusCode::OK)
-                .header("content-type", apps::content_type(&file))
+                .header("content-type", content_type)
                 .header("cache-control", "no-store")
-                .body(Full::new(Bytes::from(bytes)))
+                .body(Full::new(Bytes::from(apps::inject_runtime(&text))))
+                .expect("static response"),
+            Ok(text) => Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", content_type)
+                .header("cache-control", "no-store")
+                .body(Full::new(Bytes::from(text)))
                 .expect("static response"),
             Err(_) => json_response(StatusCode::NOT_FOUND, json!({ "error": "not_found" })),
         };
@@ -1124,6 +1147,7 @@ export function createTask({ arguments: args, state }) {
             apps: Some(crate::http::AppsConfig {
                 dir: directory.path().to_path_buf(),
                 instance_id: "app-1".to_owned(),
+                port: "tasks".to_owned(),
             }),
         };
         let module = r#"

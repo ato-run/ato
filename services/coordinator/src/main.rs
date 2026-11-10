@@ -54,6 +54,9 @@ enum Command {
         /// The app instance the bridge answers for.
         #[arg(long)]
         app_instance: Option<String>,
+        /// The Port the served app declares (defaults to tasks).
+        #[arg(long, default_value = "tasks")]
+        app_port: String,
     },
     /// Ask a running coordinator for its health.
     Health {
@@ -188,11 +191,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             token,
             apps_dir,
             app_instance,
+            app_port,
         } => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
-            runtime.block_on(serve(db, addr, token, apps_dir, app_instance))
+            runtime.block_on(serve(db, addr, token, apps_dir, app_instance, app_port))
         }
     }
 }
@@ -203,6 +207,7 @@ async fn serve(
     token: String,
     apps_dir: Option<PathBuf>,
     app_instance: Option<String>,
+    app_port: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let coordinator = Coordinator::open(&db)?;
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
@@ -213,6 +218,7 @@ async fn serve(
         apps: apps_dir.map(|dir| ato_coordinator::http::AppsConfig {
             dir,
             instance_id: app_instance.unwrap_or_default(),
+            port: app_port,
         }),
     });
     let listener = TcpListener::bind(&addr).await?;
