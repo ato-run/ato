@@ -33,6 +33,7 @@
 //!         "ato.native.entry": "app/run.sh",
 //!         "ato.native.format": "tar.gz",            // optional, default
 //!         "ato.native.signature": "require-valid",  // optional, default
+//!         "ato.native.signature_target": "bundle",  // optional, default executable
 //!     },
 //! }
 //! ```
@@ -50,6 +51,8 @@ pub const NATIVE_ARTIFACT_RUNTIME: &str = "ato.native.artifact";
 pub const NATIVE_ENTRY_RUNTIME: &str = "ato.native.entry";
 pub const NATIVE_FORMAT_RUNTIME: &str = "ato.native.format";
 pub const NATIVE_SIGNATURE_RUNTIME: &str = "ato.native.signature";
+/// Which filesystem object the signature policy is verified against.
+pub const NATIVE_SIGNATURE_TARGET_RUNTIME: &str = "ato.native.signature_target";
 
 /// The only artifact format this increment defines.
 pub const NATIVE_FORMAT_TAR_GZ: &str = "tar.gz";
@@ -168,6 +171,40 @@ impl NativeSignaturePolicy {
     }
 }
 
+/// What the signature policy is verified against.
+///
+/// `Executable` is the pre-existing behavior and the default, so a Derivation
+/// that says nothing keeps its exact bytes. `Bundle` verifies the `.app`
+/// directory that contains the entry: a bundle's signature covers its
+/// contents, so "the entry is signed" is not "the application the Run launches
+/// is signed".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeSignatureTarget {
+    Executable,
+    Bundle,
+}
+
+impl NativeSignatureTarget {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Executable => "executable",
+            Self::Bundle => "bundle",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "executable" => Some(Self::Executable),
+            "bundle" => Some(Self::Bundle),
+            _ => None,
+        }
+    }
+
+    pub fn is_bundle(self) -> bool {
+        self == Self::Bundle
+    }
+}
+
 /// The validated declaration of one native serving step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeDescriptor {
@@ -179,6 +216,8 @@ pub struct NativeDescriptor {
     pub entry: String,
     pub format: NativeArtifactFormat,
     pub signature: NativeSignaturePolicy,
+    /// What the signature verdict is about. `Executable` unless declared.
+    pub signature_target: NativeSignatureTarget,
 }
 
 fn is_sha256_ref(value: &str) -> bool {
@@ -206,6 +245,25 @@ pub fn valid_native_entry(value: &str) -> bool {
             .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
 }
 
+/// The `.app` directory that contains `entry`, when there is one.
+///
+/// This is the outermost path segment ending in `.app`; the entry itself must
+/// be a file inside it, so the segment cannot be the last one. `..`, absolute
+/// paths and the other unsafe forms are already refused by
+/// [`valid_native_entry`], which is what keeps the result inside the artifact
+/// root.
+pub fn native_bundle_root(entry: &str) -> Option<&str> {
+    let mut offset = 0;
+    for segment in entry.split('/') {
+        let segment_end = offset + segment.len();
+        if segment.len() > ".app".len() && segment.ends_with(".app") && segment_end < entry.len() {
+            return Some(&entry[..segment_end]);
+        }
+        offset = segment_end + 1;
+    }
+    None
+}
+
 impl NativeDescriptor {
     /// Read a native step's declaration. Refuses every key this build does not
     /// define, so a descriptor cannot smuggle facts past the validator.
@@ -222,6 +280,7 @@ impl NativeDescriptor {
                     | NATIVE_ENTRY_RUNTIME
                     | NATIVE_FORMAT_RUNTIME
                     | NATIVE_SIGNATURE_RUNTIME
+                    | NATIVE_SIGNATURE_TARGET_RUNTIME
             ) {
                 return Err(NativeDescriptorError("native_descriptor_unknown_key"));
             }
@@ -258,6 +317,19 @@ impl NativeDescriptor {
             Some(value) => NativeSignaturePolicy::parse(value)
                 .ok_or(NativeDescriptorError("native_signature_policy_invalid"))?,
         };
+        let signature_target = match step.runtimes.get(NATIVE_SIGNATURE_TARGET_RUNTIME) {
+            None => NativeSignatureTarget::Executable,
+            Some(value) => NativeSignatureTarget::parse(value)
+                .ok_or(NativeDescriptorError("native_signature_target_invalid"))?,
+        };
+        // A bundle target names a directory the artifact must actually carry.
+        // The entry-relative check is host-independent; the adapter proves the
+        // bundle exists after extraction and verifies that root.
+        if signature_target.is_bundle() && native_bundle_root(&entry).is_none() {
+            return Err(NativeDescriptorError(
+                "native_signature_target_not_a_bundle",
+            ));
+        }
         Ok(Self {
             os,
             arch,
@@ -265,6 +337,7 @@ impl NativeDescriptor {
             entry,
             format,
             signature,
+            signature_target,
         })
     }
 
@@ -297,6 +370,12 @@ impl NativeDescriptor {
             runtimes.insert(
                 NATIVE_SIGNATURE_RUNTIME.to_owned(),
                 self.signature.as_str().to_owned(),
+            );
+        }
+        if self.signature_target != NativeSignatureTarget::Executable {
+            runtimes.insert(
+                NATIVE_SIGNATURE_TARGET_RUNTIME.to_owned(),
+                self.signature_target.as_str().to_owned(),
             );
         }
         runtimes
@@ -472,5 +551,120 @@ mod tests {
             NativeDescriptor::from_step(&candidate).unwrap_err().0,
             "native_protocol_required"
         );
+    }
+
+    #[test]
+    fn the_default_signature_target_is_executable_and_stays_out_of_the_bytes() {
+        let descriptor = NativeDescriptor::from_step(&valid_step()).unwrap();
+        assert_eq!(
+            descriptor.signature_target,
+            NativeSignatureTarget::Executable
+        );
+        assert_eq!(descriptor.runtimes(), valid_step().runtimes);
+        assert!(
+            !descriptor
+                .runtimes()
+                .contains_key(NATIVE_SIGNATURE_TARGET_RUNTIME)
+        );
+
+        // Declaring the default explicitly is the same declaration, so it is
+        // not written either: one fact has one byte form.
+        let mut explicit = valid_step();
+        explicit.runtimes.insert(
+            NATIVE_SIGNATURE_TARGET_RUNTIME.to_owned(),
+            "executable".to_owned(),
+        );
+        let descriptor = NativeDescriptor::from_step(&explicit).unwrap();
+        assert_eq!(
+            descriptor.signature_target,
+            NativeSignatureTarget::Executable
+        );
+        assert_eq!(descriptor.runtimes(), valid_step().runtimes);
+    }
+
+    #[test]
+    fn a_bundle_signature_target_round_trips_for_an_entry_inside_an_app() {
+        let mut candidate = valid_step();
+        candidate.runtimes.insert(
+            NATIVE_ENTRY_RUNTIME.to_owned(),
+            "MyApp.app/Contents/MacOS/MyApp".to_owned(),
+        );
+        candidate.runtimes.insert(
+            NATIVE_SIGNATURE_TARGET_RUNTIME.to_owned(),
+            "bundle".to_owned(),
+        );
+        let descriptor = NativeDescriptor::from_step(&candidate).unwrap();
+        assert_eq!(descriptor.signature_target, NativeSignatureTarget::Bundle);
+        assert_eq!(native_bundle_root(&descriptor.entry), Some("MyApp.app"));
+        assert_eq!(
+            descriptor
+                .runtimes()
+                .get(NATIVE_SIGNATURE_TARGET_RUNTIME)
+                .map(String::as_str),
+            Some("bundle")
+        );
+
+        // A bundle at a nested path keeps its whole prefix as the target.
+        assert_eq!(
+            native_bundle_root("apps/Tools/Editor.app/Contents/MacOS/editor"),
+            Some("apps/Tools/Editor.app")
+        );
+    }
+
+    #[test]
+    fn a_bundle_signature_target_without_an_app_ancestor_is_refused() {
+        for entry in [
+            "app/run.sh",
+            "MyApp.app",
+            "Contents/MacOS/MyApp",
+            "MyApp.app/../run.sh",
+        ] {
+            let mut candidate = valid_step();
+            candidate
+                .runtimes
+                .insert(NATIVE_ENTRY_RUNTIME.to_owned(), entry.to_owned());
+            candidate.runtimes.insert(
+                NATIVE_SIGNATURE_TARGET_RUNTIME.to_owned(),
+                "bundle".to_owned(),
+            );
+            let error = NativeDescriptor::from_step(&candidate).unwrap_err();
+            // An unsafe entry is refused first; a safe one must fail for the
+            // bundle requirement.
+            assert!(
+                matches!(
+                    error.0,
+                    "native_signature_target_not_a_bundle" | "native_entry_invalid"
+                ),
+                "{entry}: {}",
+                error.0
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_signature_target_is_refused() {
+        for value in ["codesign", "application", "BUNDLE", ""] {
+            let mut candidate = valid_step();
+            candidate
+                .runtimes
+                .insert(NATIVE_SIGNATURE_TARGET_RUNTIME.to_owned(), value.to_owned());
+            assert_eq!(
+                NativeDescriptor::from_step(&candidate).unwrap_err().0,
+                "native_signature_target_invalid",
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plain_entry_has_no_bundle_root() {
+        for entry in [
+            "run",
+            "app/run.sh",
+            "MyApp.appx/Contents/run",
+            "a.b.app.c/run",
+        ] {
+            assert_eq!(native_bundle_root(entry), None, "{entry}");
+        }
     }
 }

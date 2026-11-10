@@ -18,7 +18,7 @@ use crate::authoring::{
 use crate::model_set::MODEL_SET_PROTOCOL;
 use crate::native_desktop::{
     NATIVE_PROTOCOL, NativeArch, NativeArtifactFormat, NativeOs, NativeSignaturePolicy,
-    valid_native_entry,
+    NativeSignatureTarget, native_bundle_root, valid_native_entry,
 };
 use crate::requirements::HostRequirement;
 
@@ -147,6 +147,8 @@ pub struct PortableNativeDraftV2 {
     pub artifact_path: String,
     pub format: Option<String>,
     pub signature: Option<String>,
+    /// `executable` (default, omitted) or `bundle`.
+    pub signature_target: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -349,6 +351,9 @@ struct Derivation {
     format: Option<String>,
     #[serde(default)]
     signature: Option<String>,
+    /// `executable` (default) or `bundle`: what the signature verdict covers.
+    #[serde(default)]
+    signature_target: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -997,6 +1002,7 @@ fn parse_single_route(
         arch,
         format,
         signature,
+        signature_target,
         ..
     } = derivation;
     let argv = argv.unwrap_or_default();
@@ -1009,7 +1015,8 @@ fn parse_single_route(
         || os.is_some()
         || arch.is_some()
         || format.is_some()
-        || signature.is_some();
+        || signature.is_some()
+        || signature_target.is_some();
     let has_web_fields = entry.is_some() || spa_fallback.is_some();
     let mut static_entry = None;
     let mut static_spa_fallback = false;
@@ -1127,6 +1134,24 @@ fn parse_single_route(
                         .to_owned(),
                 ),
             };
+            let signature_target = match signature_target.as_deref() {
+                None => None,
+                Some(value) => {
+                    let target = NativeSignatureTarget::parse(value).ok_or_else(|| {
+                        invalid(
+                            "derivation.signature_target",
+                            "must be `executable` or `bundle`",
+                        )
+                    })?;
+                    if target.is_bundle() && native_bundle_root(&entry).is_none() {
+                        return Err(invalid(
+                            "derivation.signature_target",
+                            "`bundle` requires the entry to be inside an `.app` bundle in the artifact",
+                        ));
+                    }
+                    Some(target.as_str().to_owned())
+                }
+            };
             native = Some(PortableNativeDraftV2 {
                 os: os.as_str().to_owned(),
                 arch: arch.as_str().to_owned(),
@@ -1134,6 +1159,7 @@ fn parse_single_route(
                 artifact_path: artifact,
                 format,
                 signature,
+                signature_target,
             });
             PortableDerivationKindV2::Native
         }
@@ -1344,6 +1370,7 @@ fn parse_service_group(
         || derivation.arch.is_some()
         || derivation.format.is_some()
         || derivation.signature.is_some()
+        || derivation.signature_target.is_some()
     {
         return Err(invalid(
             "derivation",
@@ -2605,5 +2632,102 @@ default = "pure"
             "use = \"ato.browser@1\"\nruntimes = {}",
         );
         assert!(parse_capsule_toml_v2(&text).is_err());
+    }
+
+    const NATIVE_BUNDLE_TARGET: &str = r#"
+schema = "ato.capsule/2"
+
+[application]
+title = "Native bundle target"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "proof"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/proof.txt"
+status = 200
+
+[[derivation]]
+id = "native-macos"
+use = "ato.native@1"
+runtimes = {}
+guest_port = 18080
+artifact = "artifacts/app-macos.tar.gz"
+os = "macos"
+arch = "aarch64"
+entry = "MyApp.app/Contents/MacOS/MyApp"
+signature = "require-valid-or-local-override"
+signature_target = "bundle"
+
+[effects]
+default = "pure"
+"#;
+
+    #[test]
+    fn a_native_route_can_declare_a_bundle_signature_target() {
+        let draft = parse_capsule_toml_v2(NATIVE_BUNDLE_TARGET).unwrap();
+        let native = draft.derivations[0].native.as_ref().unwrap();
+        assert_eq!(native.signature_target.as_deref(), Some("bundle"));
+        assert_eq!(native.entry, "MyApp.app/Contents/MacOS/MyApp");
+
+        // Omitting the key keeps the pre-existing declaration and byte form.
+        let without = NATIVE_BUNDLE_TARGET.replace("signature_target = \"bundle\"\n", "");
+        let draft = parse_capsule_toml_v2(&without).unwrap();
+        assert!(
+            draft.derivations[0]
+                .native
+                .as_ref()
+                .unwrap()
+                .signature_target
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_bundle_signature_target_is_refused_where_it_cannot_hold() {
+        for (what, text) in [
+            (
+                "unknown target",
+                NATIVE_BUNDLE_TARGET.replace(
+                    "signature_target = \"bundle\"",
+                    "signature_target = \"codesign\"",
+                ),
+            ),
+            (
+                "bundle without an app ancestor",
+                NATIVE_BUNDLE_TARGET.replace(
+                    "entry = \"MyApp.app/Contents/MacOS/MyApp\"",
+                    "entry = \"app/run.sh\"",
+                ),
+            ),
+            (
+                "bundle needs an entry inside it",
+                NATIVE_BUNDLE_TARGET.replace(
+                    "entry = \"MyApp.app/Contents/MacOS/MyApp\"",
+                    "entry = \"MyApp.app\"",
+                ),
+            ),
+            (
+                "target on a static-web route",
+                NATIVE_BUNDLE_TARGET.replace(
+                    "use = \"ato.native@1\"",
+                    "use = \"ato.browser@1\"",
+                ).replace(
+                    "artifact = \"artifacts/app-macos.tar.gz\"\nos = \"macos\"\narch = \"aarch64\"\n",
+                    "",
+                ),
+            ),
+        ] {
+            assert!(parse_capsule_toml_v2(&text).is_err(), "{what}");
+        }
     }
 }
