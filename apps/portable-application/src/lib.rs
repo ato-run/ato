@@ -42,6 +42,7 @@ pub mod dependency_transport;
 pub mod hosted_export;
 pub mod instance_snapshot;
 pub mod local_instance;
+pub(crate) mod native_desktop;
 #[cfg(test)]
 mod native_desktop_tests;
 #[cfg(test)]

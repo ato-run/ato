@@ -234,6 +234,7 @@ fn admit(
         sandbox_shim: Path::new("/nonexistent/ato"),
         sandbox_subcommand: "__portable-sandbox-exec",
         host: Some(host),
+        native_local_override: false,
     };
     let binding_environment = BTreeMap::new();
     let executor = PortableBundleExecutor {
@@ -282,6 +283,7 @@ fn a_native_route_is_admitted_only_on_the_platform_it_was_built_for() {
         "aarch64",
         ato_host_facts::NativeFacts {
             sandbox_tool: true,
+            sandbox_detail: None,
             signature_tools: true,
         },
     );
@@ -314,6 +316,7 @@ fn a_native_route_is_admitted_only_on_the_platform_it_was_built_for() {
         "x86_64",
         ato_host_facts::NativeFacts {
             sandbox_tool: false,
+            sandbox_detail: Some("not enforced".to_owned()),
             signature_tools: true,
         },
     );
@@ -339,10 +342,12 @@ fn a_native_route_whose_mandatory_policy_cannot_be_enforced_is_refused() {
     for native in [
         ato_host_facts::NativeFacts {
             sandbox_tool: false,
+            sandbox_detail: Some("not enforced".to_owned()),
             signature_tools: true,
         },
         ato_host_facts::NativeFacts {
             sandbox_tool: true,
+            sandbox_detail: None,
             signature_tools: false,
         },
     ] {
@@ -592,6 +597,48 @@ fn the_native_artifact_is_part_of_the_verified_closure() {
     );
     assert!(validate_bytes_all(&resealed).is_err());
     drop(bytes);
+}
+
+#[test]
+fn a_native_route_that_declares_tcp_egress_is_refused_at_admission() {
+    let (bytes, bundle) = sample_bundle();
+    let (_, validated) = validate_bytes_all(&bytes).unwrap();
+    let macos = validated
+        .iter()
+        .find(|route| {
+            route
+                .native
+                .as_ref()
+                .is_some_and(|n| n.descriptor.os.as_str() == "macos")
+        })
+        .unwrap();
+    let mut derivation = macos.derivation.clone();
+    derivation.requirements.network = vec![ato_formation::requirements::NetworkRequirement {
+        phase: ato_formation::requirements::ExecutionPhase::Runtime,
+        host: "example.com".to_owned(),
+        port: 443,
+    }];
+    let resealed = reseal(&bundle, vec![derivation], &[]);
+    let resealed_bundle = crate::decode_portable_application_bundle(&resealed).unwrap();
+    let selected = resealed_bundle.index.derivations[0].clone();
+    let route = crate::validate_bundle_for_derivation(&resealed_bundle, selected.as_str()).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let host = host_facts(
+        "macos",
+        "aarch64",
+        ato_host_facts::NativeFacts {
+            sandbox_tool: true,
+            sandbox_detail: None,
+            signature_tools: true,
+        },
+    );
+    let failure = admit(&resealed_bundle, &route, scratch.path(), &host);
+    assert_eq!(
+        failure
+            .expect("an unenforceable egress policy must refuse")
+            .code,
+        "native_egress_policy_unavailable"
+    );
 }
 
 fn tiny_bundle_artifact() -> Vec<u8> {

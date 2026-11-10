@@ -21,7 +21,9 @@ pub mod docker;
 pub mod reason;
 
 pub use capability::{
-    ConnectorChoice, ExecutionRequirements, HostFacts, NativeFacts, execution_status,
+    CODESIGN_PATH, ConnectorChoice, ExecutionRequirements, HostFacts, LSOF_PATH, NativeFacts,
+    PS_PATH, SEATBELT_LAUNCHER_PATH, SPCTL_PATH, execution_status, trusted_tool,
+    trusted_tool_with_path,
 };
 pub use docker::{
     DockerFacts, DockerProbeInput, EndpointKind, PlatformSupport, WorkspaceSharing, facts_from,
