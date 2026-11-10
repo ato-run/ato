@@ -87,6 +87,41 @@ CREATE TABLE IF NOT EXISTS outbox (
   created_at INTEGER NOT NULL,
   PRIMARY KEY (resource_id, revision)
 );
+CREATE TABLE IF NOT EXISTS protocol_operations (
+  protocol_ref TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  semantics TEXT NOT NULL CHECK (semantics IN ('evolution', 'observation')),
+  access TEXT NOT NULL CHECK (access IN ('read', 'read_write')),
+  implementation_digest TEXT NOT NULL,
+  publisher TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (protocol_ref, operation)
+);
+CREATE TRIGGER IF NOT EXISTS protocol_operation_claim_guard
+BEFORE INSERT ON protocol_operations
+WHEN EXISTS (
+  SELECT 1 FROM protocol_operations existing
+  WHERE existing.protocol_ref = NEW.protocol_ref
+    AND (
+      existing.publisher <> NEW.publisher
+      OR (
+        existing.operation = NEW.operation
+        AND existing.implementation_digest <> NEW.implementation_digest
+      )
+    )
+)
+BEGIN SELECT RAISE(ABORT, 'protocol_operation_publisher_conflict'); END;
+CREATE TABLE IF NOT EXISTS bindings (
+  id TEXT PRIMARY KEY,
+  resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+  port_name TEXT NOT NULL,
+  protocol_ref TEXT NOT NULL,
+  access TEXT NOT NULL CHECK (access IN ('read', 'read_write', 'operations')),
+  operations_json TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
+  binding_epoch INTEGER NOT NULL DEFAULT 0 CHECK (binding_epoch >= 0),
+  created_at INTEGER NOT NULL
+);
 "#;
 
 #[derive(Debug, Error)]
@@ -97,6 +132,8 @@ pub enum CoordinatorError {
     Conflict(&'static str),
     #[error("{0}")]
     Invalid(&'static str),
+    #[error("{0}")]
+    Forbidden(&'static str),
     #[error("storage_error: {0}")]
     Storage(#[from] rusqlite::Error),
     #[error("json_error: {0}")]
@@ -141,6 +178,18 @@ pub struct CommitOutcome {
     pub content_digest: String,
     pub receipt: Value,
     pub replayed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Binding {
+    pub binding_id: String,
+    pub resource_id: String,
+    pub port_name: String,
+    pub protocol: String,
+    pub access: String,
+    pub operations: Vec<String>,
+    pub status: String,
+    pub binding_epoch: i64,
 }
 
 pub struct Coordinator {
@@ -383,6 +432,205 @@ impl Coordinator {
             receipt,
             replayed: false,
         })
+    }
+
+    /// Register one operation of a Protocol. The first publisher of a
+    /// (protocol, operation) owns it; a different publisher, or a different
+    /// implementation digest for the same operation, is refused by the DB
+    /// trigger.
+    pub fn register_operation(
+        &mut self,
+        protocol: &str,
+        operation: &str,
+        semantics: &str,
+        access: &str,
+        implementation_digest: &str,
+        publisher: &str,
+    ) -> Result<(), CoordinatorError> {
+        validate_protocol(protocol)?;
+        if operation.is_empty() || operation.len() > 128 {
+            return Err(CoordinatorError::Invalid("invalid_operation"));
+        }
+        if !matches!(semantics, "evolution" | "observation") {
+            return Err(CoordinatorError::Invalid("invalid_semantics"));
+        }
+        if !matches!(access, "read" | "read_write") {
+            return Err(CoordinatorError::Invalid("invalid_access"));
+        }
+        let result = self.conn.execute(
+            "INSERT INTO protocol_operations(protocol_ref,operation,semantics,access,implementation_digest,publisher,created_at)
+             VALUES (?,?,?,?,?,?,?)",
+            params![
+                protocol,
+                operation,
+                semantics,
+                access,
+                implementation_digest,
+                publisher,
+                now()
+            ],
+        );
+        match result {
+            Ok(_) => Ok(()),
+            Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+                if message.contains("protocol_operation_publisher_conflict") =>
+            {
+                Err(CoordinatorError::Conflict(
+                    "protocol_operation_publisher_conflict",
+                ))
+            }
+            Err(error) => Err(CoordinatorError::Storage(error)),
+        }
+    }
+
+    /// Bind a Resource to a Port. An `operations` binding is operation-only:
+    /// it must list at least one registered operation and never grants document
+    /// read or replace.
+    pub fn bind_resource(
+        &mut self,
+        resource_id: &str,
+        port_name: &str,
+        protocol: &str,
+        access: &str,
+        operations: Vec<String>,
+    ) -> Result<Binding, CoordinatorError> {
+        if port_name.is_empty() || port_name.len() > 64 {
+            return Err(CoordinatorError::Invalid("invalid_port"));
+        }
+        if !matches!(access, "read" | "read_write" | "operations") {
+            return Err(CoordinatorError::Invalid("invalid_access"));
+        }
+        let resource = self.read_resource("local", resource_id)?;
+        if resource.protocol != protocol {
+            return Err(CoordinatorError::Invalid("protocol_mismatch"));
+        }
+        if access == "operations" {
+            if operations.is_empty() {
+                return Err(CoordinatorError::Invalid("operation_list_required"));
+            }
+            for operation in &operations {
+                let registered: Option<i64> = self
+                    .conn
+                    .query_row(
+                        "SELECT 1 FROM protocol_operations WHERE protocol_ref=? AND operation=?",
+                        params![protocol, operation],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if registered.is_none() {
+                    return Err(CoordinatorError::Invalid("operation_not_registered"));
+                }
+            }
+        } else if !operations.is_empty() {
+            return Err(CoordinatorError::Invalid(
+                "operations_require_operations_access",
+            ));
+        }
+        let binding_id = new_id("dbind");
+        self.conn.execute(
+            "INSERT INTO bindings(id,resource_id,port_name,protocol_ref,access,operations_json,status,binding_epoch,created_at)
+             VALUES (?,?,?,?,?,?,'active',0,?)",
+            params![
+                binding_id,
+                resource_id,
+                port_name,
+                protocol,
+                access,
+                serde_json::to_string(&operations)?,
+                now()
+            ],
+        )?;
+        self.read_binding(&binding_id)
+    }
+
+    pub fn read_binding(&self, binding_id: &str) -> Result<Binding, CoordinatorError> {
+        self.conn
+            .query_row(
+                "SELECT id,resource_id,port_name,protocol_ref,access,operations_json,status,binding_epoch
+                 FROM bindings WHERE id=?",
+                params![binding_id],
+                |row| {
+                    let operations_json: String = row.get(5)?;
+                    Ok(Binding {
+                        binding_id: row.get(0)?,
+                        resource_id: row.get(1)?,
+                        port_name: row.get(2)?,
+                        protocol: row.get(3)?,
+                        access: row.get(4)?,
+                        operations: serde_json::from_str(&operations_json).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                5,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        status: row.get(6)?,
+                        binding_epoch: row.get(7)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or(CoordinatorError::NotFound)
+    }
+
+    /// Read the document through a binding. An operation-only binding is
+    /// refused: it may only invoke its listed operations.
+    pub fn read_binding_document(
+        &self,
+        binding_id: &str,
+    ) -> Result<ResourceSnapshot, CoordinatorError> {
+        let binding = self.read_binding(binding_id)?;
+        if binding.status != "active" {
+            return Err(CoordinatorError::Forbidden("binding_revoked"));
+        }
+        if binding.access == "operations" {
+            return Err(CoordinatorError::Forbidden("operation_only_binding"));
+        }
+        self.read_resource("local", &binding.resource_id)
+    }
+
+    /// Invoke an operation through a binding. The operation must be registered
+    /// for the Protocol and, for an operation-only binding, explicitly listed.
+    pub fn invoke_binding_operation(
+        &mut self,
+        binding_id: &str,
+        operation: &str,
+        input: CommitInput,
+    ) -> Result<CommitOutcome, CoordinatorError> {
+        let binding = self.read_binding(binding_id)?;
+        if binding.status != "active" {
+            return Err(CoordinatorError::Forbidden("binding_revoked"));
+        }
+        let registered: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT access FROM protocol_operations WHERE protocol_ref=? AND operation=?",
+                params![binding.protocol, operation],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(registered_access) = registered else {
+            return Err(CoordinatorError::Forbidden("operation_not_registered"));
+        };
+        if binding.access == "operations" && !binding.operations.iter().any(|op| op == operation) {
+            return Err(CoordinatorError::Forbidden("operation_not_granted"));
+        }
+        if binding.access == "read" && registered_access == "read_write" {
+            return Err(CoordinatorError::Forbidden("binding_read_only"));
+        }
+        self.commit("local", &binding.resource_id, input)
+    }
+
+    /// Revoke a binding. Every later read or invoke through it is refused.
+    pub fn revoke_binding(&mut self, binding_id: &str) -> Result<Binding, CoordinatorError> {
+        let changed = self.conn.execute(
+            "UPDATE bindings SET status='revoked', binding_epoch=binding_epoch+1 WHERE id=? AND status='active'",
+            params![binding_id],
+        )?;
+        if changed == 0 {
+            return Err(CoordinatorError::Conflict("binding_conflict"));
+        }
+        self.read_binding(binding_id)
     }
 }
 
