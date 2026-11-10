@@ -11,8 +11,9 @@ use ato_objects::{
 };
 use ato_portable_application::bundle_sha256;
 use ato_portable_application::instance_snapshot::{
-    DATA_JSON_PROTOCOL, INSTANCE_SNAPSHOT_SCHEMA, InstanceSnapshotAssetV1,
-    InstanceSnapshotResourceV1, InstanceSnapshotV1, attach_instance_snapshot,
+    BROWSER_INSTANCE_STATE_PROTOCOL, INSTANCE_SNAPSHOT_SCHEMA, InstanceSnapshotAssetBindingV1,
+    InstanceSnapshotAssetLocationV1, InstanceSnapshotAssetV1, InstanceSnapshotResourceV1,
+    InstanceSnapshotV1, attach_instance_snapshot, encode_browser_state,
 };
 use ato_portable_application::portability_export::repack_portable_dependencies;
 use serde_json::Value;
@@ -77,7 +78,16 @@ fn attach_test_snapshot(source: PortableApplicationBundle) -> Vec<u8> {
     let (_, source) =
         repack_portable_dependencies(&source, PortableDependencyProfile::Cached, &BTreeMap::new())
             .unwrap();
-    let saved_data = br#"{"todos":["one","two"]}"#.to_vec();
+    let state_value = serde_json::to_string(&serde_json::json!({
+        "photo": "ato-asset-alias://asset-1",
+        "todos": ["one", "two"]
+    }))
+    .unwrap();
+    let saved_data = encode_browser_state(&BTreeMap::from([(
+        "portable-todo-v1".to_owned(),
+        state_value,
+    )]))
+    .unwrap();
     let asset = b"portable-photo-bytes".to_vec();
     let saved_data_ref = bundle_sha256(&saved_data);
     let asset_ref = bundle_sha256(&asset);
@@ -85,7 +95,7 @@ fn attach_test_snapshot(source: PortableApplicationBundle) -> Vec<u8> {
         schema: INSTANCE_SNAPSHOT_SCHEMA.to_owned(),
         resources: vec![InstanceSnapshotResourceV1 {
             slot: "main".to_owned(),
-            protocol: DATA_JSON_PROTOCOL.to_owned(),
+            protocol: BROWSER_INSTANCE_STATE_PROTOCOL.to_owned(),
             content_ref: saved_data_ref.clone(),
             save: None,
         }],
@@ -96,7 +106,15 @@ fn attach_test_snapshot(source: PortableApplicationBundle) -> Vec<u8> {
             content_type: "image/jpeg".to_owned(),
             size: asset.len() as u64,
         }],
-        asset_bindings: vec![],
+        asset_bindings: vec![InstanceSnapshotAssetBindingV1 {
+            alias: "asset-1".to_owned(),
+            resource_slot: "main".to_owned(),
+            location: InstanceSnapshotAssetLocationV1::BrowserLocalStorage {
+                key: "portable-todo-v1".to_owned(),
+                pointer: "/photo".to_owned(),
+                json_encoded: true,
+            },
+        }],
     };
     let content = BTreeMap::from([(saved_data_ref, saved_data), (asset_ref, asset)]);
     attach_instance_snapshot(&source, snapshot, &content)
@@ -641,6 +659,59 @@ fn app_import_accepts_an_explicit_state_migration_approval() {
 }
 
 #[test]
+fn a_run_whose_saved_state_changed_fails_without_a_receipt() {
+    let root = tempfile::tempdir().unwrap();
+    let capsule = root.path().join("saved.capsule");
+    snapshot_fixture(&capsule);
+    let imported = ato_with_home(root.path())
+        .args(["app", "import"])
+        .arg(&capsule)
+        .output()
+        .unwrap();
+    assert!(
+        imported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    let instance: Value = serde_json::from_slice(&imported.stdout).unwrap();
+    let instance_id = instance["instance_id"].as_str().unwrap();
+    let snapshot_ref = instance["data_snapshot_ref"].as_str().unwrap();
+    let digest = snapshot_ref
+        .strip_prefix("sha256:")
+        .expect("saved snapshot reference is a SHA-256");
+    let instance_root = root.path().join("instances").join(instance_id);
+    let snapshot_root = instance_root.join("snapshots").join(digest);
+    let restored: Value =
+        serde_json::from_slice(&fs::read(snapshot_root.join("snapshot.json")).unwrap()).unwrap();
+    let resource_path = restored["resources"][0]["path"].as_str().unwrap();
+
+    // The live state the Run would actually receive no longer matches the
+    // saved digest the Contract observes.
+    fs::write(snapshot_root.join(resource_path), b"tampered saved state").unwrap();
+
+    let start = ato_with_home(root.path())
+        .args(["app", "start", instance_id, "--no-open"])
+        .output()
+        .unwrap();
+
+    assert!(!start.status.success(), "start must refuse");
+    let stderr = String::from_utf8_lossy(&start.stderr);
+    assert!(
+        stderr.contains("instance_state_unverified"),
+        "start fails with the named reason: {stderr}"
+    );
+    assert!(
+        !instance_root.join("active-run.json").exists(),
+        "a Run whose state was not verified is never activated"
+    );
+    assert_eq!(
+        fs::read_dir(instance_root.join("runs")).unwrap().count(),
+        0,
+        "no Run receipt is produced for an unverified state"
+    );
+}
+
+#[test]
 fn snapshot_bundle_imports_into_independent_asset_namespaces_and_reexports() {
     let root = tempfile::tempdir().unwrap();
     let capsule = root.path().join("saved.capsule");
@@ -757,7 +828,7 @@ fn snapshot_bundle_start_records_the_installed_snapshot_in_its_receipt() {
 }
 
 #[test]
-fn process_snapshot_start_fails_before_claiming_a_restore() {
+fn a_snapshot_a_process_route_cannot_receive_is_refused_before_a_restore() {
     let root = tempfile::tempdir().unwrap();
     let capsule = root.path().join("process-saved.capsule");
     let source = match decode_capsule_bundle_document(&fs::read(multi_fixture()).unwrap()).unwrap()
@@ -767,38 +838,28 @@ fn process_snapshot_start_fails_before_claiming_a_restore() {
     };
     fs::write(&capsule, attach_test_snapshot(source)).unwrap();
     let process_ref = "sha256:5d1ec4660745130f196102c1bd81828993ab75d69130f0fdf2e1e2598fd9f3cc";
+
+    // A dynamic process route cannot receive browser state or Assets. The
+    // switch is refused by name at import, before any Instance, Run or receipt
+    // exists — a start is never reached.
     let imported = ato_with_home(root.path())
         .args(["app", "import"])
         .arg(&capsule)
         .args(["--derivation", process_ref])
         .output()
         .unwrap();
-    assert!(imported.status.success());
-    let instance: Value = serde_json::from_slice(&imported.stdout).unwrap();
 
-    ato_with_home(root.path())
-        .args([
-            "app",
-            "start",
-            instance["instance_id"].as_str().unwrap(),
-            "--no-open",
-        ])
-        .assert()
-        .failure();
-    let runs = root
-        .path()
-        .join("instances")
-        .join(instance["instance_id"].as_str().unwrap())
-        .join("runs");
-    let log = fs::read_dir(runs)
-        .unwrap()
-        .next()
-        .map(|entry| fs::read_to_string(entry.unwrap().path().join("output.log")).unwrap())
-        .unwrap();
-
-    assert!(log.contains(
-        "local dynamic Instance snapshot restore supports only its declared filesystem state"
-    ));
+    assert!(!imported.status.success(), "the import must refuse");
+    let stderr = String::from_utf8_lossy(&imported.stderr);
+    assert!(
+        stderr.contains("state-resource-not-deliverable"),
+        "the refusal names the reason: {stderr}"
+    );
+    assert_eq!(
+        fs::read_dir(root.path().join("instances")).unwrap().count(),
+        0,
+        "a refused switch leaves no Instance, hence no Run or receipt"
+    );
 }
 
 // ── stage 2c: process and static Runs through the common attempt ───────────

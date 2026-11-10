@@ -35,7 +35,6 @@ use ato_adapter_browser::{
 use ato_adapter_process::terminate_process_tree;
 use ato_adapter_workspace::restore_workspace;
 use ato_computation::{ComputationRef, ContentRef};
-use ato_formation::authoring::STATE_FILESYSTEM_PROTOCOL;
 use ato_formation::verify::{ContractVerificationReceipt, VerificationTargetKind};
 use ato_materializer_api::{
     ContractContext, MaterializerContext, MaterializerRegistry, accept_candidate,
@@ -1825,6 +1824,11 @@ fn start_local_instance(args: AppStartArgs) -> Result<()> {
     let bundle = portable_export_bundle(&bundle_bytes)?;
     let selected = validate_bundle_for_derivation(&bundle, &instance.selected_derivation_ref)?;
     resolve_application_bindings(&selected.application, &bindings)?;
+    // The state this Run will actually receive is observed before a Run exists.
+    // A snapshot reference in the Instance metadata is never evidence by itself:
+    // if the live state no longer observes the saved digests, start fails with
+    // `instance_state_unverified` and no Run is claimed, so no receipt exists.
+    store.observe_run_state(&instance.instance_id, &instance.selected_derivation_ref)?;
     let binding_payload = serde_json::to_vec(&bindings)?;
     let starting = store.claim_run(&instance.instance_id)?;
     let run_root = store.run_root(&instance.instance_id, &starting.run_id)?;
@@ -2201,25 +2205,13 @@ fn portable_instance_worker_claimed(
     let bundle_bytes = store.bundle_bytes(&instance)?;
     let bundle = portable_export_bundle(&bundle_bytes)?;
     let selected = validate_bundle_for_derivation(&bundle, &instance.selected_derivation_ref)?;
-    let restored_snapshot = store.restored_snapshot(&claimed.instance_id)?;
-    if selected.realization != PortableRealizationKind::StaticWeb
-        && restored_snapshot.as_ref().is_some_and(|snapshot| {
-            !snapshot.assets.is_empty()
-                || snapshot.resources.iter().any(|resource| {
-                    resource.protocol != STATE_FILESYSTEM_PROTOCOL
-                        || !selected
-                            .derivation
-                            .state
-                            .iter()
-                            .any(|state| state.id == resource.slot)
-                })
-        })
-    {
-        bail!(
-            "local dynamic Instance snapshot restore supports only its declared filesystem state"
-        );
-    }
-    let restored_snapshot_ref = instance.data_snapshot_ref.clone();
+    // Authoritative Run gate, immediately before the attempt is built: the state
+    // the runtime is about to receive must observe the saved digests. Only then
+    // does the attempt cite the saved snapshot, so the common verifier can only
+    // mark that requirement Satisfied from state this Run actually gets.
+    let observed =
+        store.observe_run_state(&claimed.instance_id, &instance.selected_derivation_ref)?;
+    let restored_snapshot_ref = observed.snapshot_ref;
     let static_state = if selected.realization == PortableRealizationKind::StaticWeb {
         store
             .local_surface_snapshot(&claimed.instance_id)?
