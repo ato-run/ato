@@ -30,7 +30,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// Bumped when the on-disk schema changes in a way that needs a migration.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Default per-owner quota (64 MiB) and operation-result retention (30 days).
 pub const DEFAULT_QUOTA_BYTES: i64 = 64 * 1024 * 1024;
@@ -140,7 +140,8 @@ CREATE TABLE IF NOT EXISTS bindings (
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
   binding_epoch INTEGER NOT NULL DEFAULT 0 CHECK (binding_epoch >= 0),
   created_at INTEGER NOT NULL,
-  instance_id TEXT
+  instance_id TEXT,
+  last_used_at INTEGER
 );
 "#;
 
@@ -218,6 +219,9 @@ pub struct Binding {
     pub binding_epoch: i64,
     /// The app instance this binding serves, when the bridge created it.
     pub instance_id: Option<String>,
+    /// Last time this binding invoked an operation (Unix seconds), refreshed at
+    /// most once a minute so a read-heavy app cannot rewrite the row per call.
+    pub last_used_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -281,6 +285,7 @@ impl Coordinator {
             "ALTER TABLE protocol_operations ADD COLUMN module_export TEXT",
             [],
         );
+        let _ = conn.execute("ALTER TABLE bindings ADD COLUMN last_used_at INTEGER", []);
         let _ = conn.execute(
             "ALTER TABLE protocol_operations ADD COLUMN expose_mcp INTEGER NOT NULL DEFAULT 0",
             [],
@@ -740,7 +745,7 @@ impl Coordinator {
     pub fn read_binding(&self, binding_id: &str) -> Result<Binding, CoordinatorError> {
         self.conn
             .query_row(
-                "SELECT id,resource_id,port_name,protocol_ref,access,operations_json,status,binding_epoch,instance_id
+                "SELECT id,resource_id,port_name,protocol_ref,access,operations_json,status,binding_epoch,instance_id,last_used_at
                  FROM bindings WHERE id=?",
                 params![binding_id],
                 |row| {
@@ -761,6 +766,7 @@ impl Coordinator {
                         status: row.get(6)?,
                         binding_epoch: row.get(7)?,
                         instance_id: row.get(8)?,
+                        last_used_at: row.get(9)?,
                     })
                 },
             )
@@ -1109,7 +1115,7 @@ impl Coordinator {
         if binding.access == "operations" && !binding.operations.iter().any(|op| op == operation) {
             return Err(CoordinatorError::Forbidden("operation_not_granted"));
         }
-        self.invoke_operation(
+        let outcome = self.invoke_operation(
             "local",
             &binding.resource_id,
             operation,
@@ -1117,7 +1123,15 @@ impl Coordinator {
             operation_id,
             expected_revision,
             expected_generation,
-        )
+        )?;
+        // Debounced: at most one row update a minute per binding, and a failed
+        // update must not fail the operation.
+        let now = now();
+        let _ = self.conn.execute(
+            "UPDATE bindings SET last_used_at=? WHERE id=? AND (last_used_at IS NULL OR last_used_at < ?)",
+            params![now, binding.binding_id, now - 60],
+        );
+        Ok(outcome)
     }
 }
 
@@ -1668,5 +1682,51 @@ export function createTask({ arguments: args, state }) {
             .set_operation_exposure("todo.board@1", "todo_create", true)
             .unwrap();
         assert_eq!(coordinator.mcp_tools().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn records_when_a_binding_was_last_used() {
+        let mut coordinator = Coordinator::open_in_memory().unwrap();
+        coordinator
+            .register_handler_operation(
+                "todo.board@1",
+                "todo_create",
+                "evolution",
+                "read_write",
+                HANDLER_MODULE,
+                "createTask",
+                "alice/app",
+            )
+            .unwrap();
+        let created = coordinator
+            .create_resource(
+                "local",
+                "todo.board@1",
+                None,
+                serde_json::json!({"tasks": {}}),
+            )
+            .unwrap();
+        let binding = coordinator
+            .bind_resource(
+                &created.resource_id,
+                "tasks",
+                "todo.board@1",
+                "operations",
+                vec!["todo_create".into()],
+            )
+            .unwrap();
+        assert_eq!(binding.last_used_at, None);
+        coordinator
+            .invoke_binding_handler(
+                &binding.binding_id,
+                "todo_create",
+                &serde_json::json!({"title": "Tracked"}),
+                "op-tracked",
+                1,
+                0,
+            )
+            .unwrap();
+        let used = coordinator.read_binding(&binding.binding_id).unwrap();
+        assert!(used.last_used_at.is_some());
     }
 }
