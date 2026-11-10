@@ -3,10 +3,10 @@ name: Documentation acceptance
 on:
   pull_request:
     branches: [dev, stg, main]
-    paths: ["docs/**", "README*.md", "CONTRIBUTING.md", "scripts/docs-*", ".github/workflows/docs-ci.yml"]
+    paths: ["docs/**", "README*.md", "CONTRIBUTING.md", "scripts/docs-*", "scripts/docs-audit-baseline/**", ".github/workflows/docs-ci.yml"]
   push:
     branches: [dev, stg]
-    paths: ["docs/**", "README*.md", "CONTRIBUTING.md", "scripts/docs-*", ".github/workflows/docs-ci.yml"]
+    paths: ["docs/**", "README*.md", "CONTRIBUTING.md", "scripts/docs-*", "scripts/docs-audit-baseline/**", ".github/workflows/docs-ci.yml"]
 
 permissions:
   contents: read
@@ -20,7 +20,7 @@ jobs:
         with:
           python-version: "3.x"
       - name: Check current links and reject new historical failures
-        run: python3 scripts/docs-audit.py --allow-historical-from docs/archive/2026/documentation-reorganization/link-audit.json --output .tmp/docs-ci-links.json
+        run: python3 scripts/docs-audit.py --allow-historical-from scripts/docs-audit-baseline/link-audit.json --output .tmp/docs-ci-links.json
       - name: Check the README first example
         run: |
           grep -F 'ato run samples/interop-static.capsule --no-open' README.md

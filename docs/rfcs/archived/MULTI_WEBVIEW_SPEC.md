@@ -548,7 +548,7 @@ Rust 側でファイルドロップを処理し、適切な Webview に転送：
 
 ## 10. 関連ドキュメント
 
-- [DESKTOP_TAB_SPEC.md](../../../apps/desktop/docs/DESKTOP_TAB_SPEC.md) - タブ管理仕様
+- [DESKTOP_TAB_SPEC.md](https://github.com/ato-run/ato-archive-2026-11/blob/45f5ed4274336c9ffa94208874c052c39f9bcdac/apps/desktop/docs/DESKTOP_TAB_SPEC.md) - タブ管理仕様
 - [Tauri v2 Webview API](https://docs.rs/tauri/latest/tauri/webview/)
 - [Tauri v2 Window Events](https://docs.rs/tauri/latest/tauri/enum.WindowEvent.html)
 

@@ -22,12 +22,12 @@ evidence, rebuild, K verification, state/effect assessment and controlled
 rollout. The repository contains mechanisms and bounded experiments for parts
 of this process. That does not establish automatic production rollout, a
 general advisory engine, or universal state migration. The historical
-[patching ledger](../archive/2026/ops/continuous-patching-ledger.md) is dated
+[patching ledger](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/ops/continuous-patching-ledger.md) is dated
 evidence; the [runtime image ledger](../operations/runtime-image-ledger.md)
 records declared artifacts rather than proving an image was scanned.
 
 Even when `K_old = K_new` and a new receipt is fully satisfied, independently
 assess state continuity, side effects, security, supported platforms and
 rollback. K equality alone guarantees none of those properties outside K.
-The [stateful transformation experiment](../archive/2026/ops/stateful-transformation-v1.md)
+The [stateful transformation experiment](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/ops/stateful-transformation-v1.md)
 uses fresh process memory; it explicitly does not prove restart persistence.

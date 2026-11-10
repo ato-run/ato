@@ -25,5 +25,4 @@ owned by the [ato.run documentation](https://ato.run/docs/); see the
 
 Component-specific instructions stay with their source, including
 [Nacelle](../../extensions/providers/nacelle/CONTRIBUTING.md),
-[Desktop](../../apps/desktop/README.md), and
 [manual tests](../../tests/manual/README.md).

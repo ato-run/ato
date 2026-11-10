@@ -1,6 +1,6 @@
 [package]
 name = "ato-cli"
-version = "0.8.2"
+version = "0.9.0"
 edition = "2024"
 description = "Ato command line interface for addressable computations"
 authors = ["ato-run"]
@@ -47,6 +47,7 @@ ato-adapter-pty = { path = "../../extensions/adapters/pty", version = "0.1.0" }
 ato-adapter-workspace = { path = "../../extensions/adapters/workspace", version = "0.1.0" }
 ato-browser-semantics = { path = "../../extensions/semantics/browser", version = "0.1.0" }
 ato-computation = { path = "../../lib/computation", version = "0.1.0" }
+ato-coordinator = { path = "../../services/coordinator", version = "0.1.0" }
 ato-formation = { path = "../../lib/formation", version = "0.1.0" }
 ato-ipc = { path = "../../lib/ipc", version = "0.1.0" }
 ato-kernel = { path = "../../lib/kernel", version = "0.1.0" }
@@ -81,6 +82,7 @@ signal-hook = "0.3"
 socket2 = "=0.6.4"
 tempfile = "3"
 toml = "0.8"
+serde_yaml_ng = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Threading"] }

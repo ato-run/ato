@@ -25,8 +25,8 @@ path also refuses a frozen bundle with an Instance snapshot; do not infer a
 saved-data upgrade from a fresh-instance success. It does not publish,
 activate, switch, or automatically roll out the candidate.
 
-The [v0 experiment](../archive/2026/ops/contract-preserving-transformation-v0.md)
-and [stateful scenario experiment](../archive/2026/ops/stateful-transformation-v1.md)
+The [v0 experiment](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/ops/contract-preserving-transformation-v0.md)
+and [stateful scenario experiment](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/ops/stateful-transformation-v1.md)
 record exact fixtures, negative cases and Linux prerequisites. They are
 historical evidence, including Japanese source text, rather than production
 availability claims. Read [compatibility](../concepts/compatibility.md) before

@@ -86,6 +86,7 @@ impl Origin {
                 token,
                 shutdown,
                 apps: None,
+                workspace: Vec::new(),
             },
         }
     }

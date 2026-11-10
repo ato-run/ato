@@ -94,7 +94,7 @@ workload lifecycle:
   **fresh** workload with the real env → health → expose. The value lives only on
   tmpfs and in the running process's environment, never in the snapshot.
 
-**Value never enters the agent's heap.** A KVM spike (`spikes/firecracker-supervisor/`)
+**Value never enters the agent's heap.** A KVM spike ([`spikes/firecracker-supervisor/`](https://github.com/ato-run/ato-archive-2026-11/tree/45f5ed4274336c9ffa94208874c052c39f9bcdac/spikes/firecracker-supervisor), archived)
 found that composing the env inside the long-lived agent left the value resident in
 guest RAM (the agent is init; its heap is never freed, so `init_on_free` can't zero
 it). The agent therefore hands the workload child a plan of tmpfs **paths**, and the

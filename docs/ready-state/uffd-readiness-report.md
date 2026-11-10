@@ -37,7 +37,7 @@
 - **Remote read-through fetched 0 chunks** — CAS dedup already puts 52/55 memory chunks
   locally; remote's value needs a network CAS (P4). Full analysis:
   [`uffd-mem-backend.md`](./uffd-mem-backend.md) · raw:
-  `benchmarks/ready-state/uffd-productization/2026-07-01/`.
+  `benchmarks/ready-state/uffd-productization/2026-07-01/` ([archive](https://github.com/ato-run/ato-archive-2026-11/tree/45f5ed4274336c9ffa94208874c052c39f9bcdac/benchmarks/ready-state/uffd-productization/2026-07-01); removed from the 0.1.0 tree).
 
 ## Recommended default policy
 

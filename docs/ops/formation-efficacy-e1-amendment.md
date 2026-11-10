@@ -1,6 +1,6 @@
 # E1 protocol amendment — comparator integration error
 
-This page moved to [E1 protocol amendment — comparator integration error](../archive/2026/ops/formation-efficacy-e1-amendment.md).
+This page moved to [E1 protocol amendment — comparator integration error](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/ops/formation-efficacy-e1-amendment.md).
 
 Status: historical evidence; not current specification or deployment state.
 Language of the preserved document: English.

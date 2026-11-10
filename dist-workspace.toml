@@ -1,24 +1,13 @@
 # cargo-dist configuration for the `ato-run/ato` monorepo.
 #
-# **Scope**: this file is intentionally CLI-only. The Desktop bundle
-# is built by the `xtask` crate driven by `desktop-release.yml`, NOT
-# by cargo-dist. Mixing both would force cargo-dist to crawl the GPUI
-# / WebKit native deps, which it isn't designed to package.
+# **Scope**: CLI-only. The Desktop is released from `ato-run/ato-desktop`.
 #
 # The `packages = ["ato-cli"]` line is the load-bearing scope filter:
 # without it, cargo-dist would pick up every workspace member and try
-# to publish artifacts for `ato-desktop`, `xtask`, `lock-draft-engine`,
-# etc. With it, only the `ato-cli` binary feeds the Homebrew Formula
-# and CLI MSI installer.
+# to publish artifacts for them.
+# Only the `ato-cli` binary feeds the Homebrew Formula and CLI MSI installer.
 #
-# Tag prefix routing:
-#   - `v*`             → triggers cargo-dist's release.yml AND
-#                        .github/workflows/desktop-release.yml (unified).
-#                        desktop-release.yml's publish-release job waits
-#                        for the cargo-dist release to exist, then appends
-#                        .dmg/.msi/.AppImage artifacts to the same release.
-#   - `ato-desktop-v*` → triggers .github/workflows/desktop-release.yml
-#                        alone (legacy desktop-only release path).
+# `v*` tags trigger cargo-dist's release.yml.
 
 [workspace]
 members = ["cargo:."]

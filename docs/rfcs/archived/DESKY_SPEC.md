@@ -2,13 +2,13 @@
 
 > Historical reference: this document describes a past design, experiment or
 > component version. Its unresolved references are recorded in the
-> [acceptance review](../../archive/2026/documentation-reorganization/REVIEW-ACCEPTANCE.md). Use [current specification status](../../specifications/README.md)
+> [acceptance review](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/documentation-reorganization/REVIEW-ACCEPTANCE.md). Use [current specification status](../../specifications/README.md)
 > before applying any command or contract here.
 
 **Status:** Draft v0.1
 **Last Updated:** 2026-04-05
 **Target:** Desky Phase 1 (Electron MVP), Phase 2 (Pure Rust + Wry)
-**Related:** [DESKY_INSTALL_SPEC.md](DESKY_INSTALL_SPEC.md), [DESKTOP_SPEC.md](DESKTOP_SPEC.md), [NACELLE_SPEC.md](../../archive/rfcs-legacy-accepted/NACELLE_SPEC.md), [CAPSULE_IPC_SPEC.md](../../archive/rfcs-legacy-accepted/CAPSULE_IPC_SPEC.md), [DESKTOP_TAB_SPEC.md](../../../apps/desktop/docs/DESKTOP_TAB_SPEC.md), [MULTI_WEBVIEW_SPEC.md](MULTI_WEBVIEW_SPEC.md)
+**Related:** [DESKY_INSTALL_SPEC.md](DESKY_INSTALL_SPEC.md), [DESKTOP_SPEC.md](DESKTOP_SPEC.md), [NACELLE_SPEC.md](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/rfcs-legacy-accepted/NACELLE_SPEC.md), [CAPSULE_IPC_SPEC.md](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/rfcs-legacy-accepted/CAPSULE_IPC_SPEC.md), [DESKTOP_TAB_SPEC.md](https://github.com/ato-run/ato-archive-2026-11/blob/45f5ed4274336c9ffa94208874c052c39f9bcdac/apps/desktop/docs/DESKTOP_TAB_SPEC.md), [MULTI_WEBVIEW_SPEC.md](MULTI_WEBVIEW_SPEC.md)
 
 ---
 

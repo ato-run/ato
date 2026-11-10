@@ -1,6 +1,6 @@
 # Formation v0共通Session・Skillの引き継ぎ
 
-This page moved to [Formation v0共通Session・Skillの引き継ぎ](../archive/2026/ops/formation-agent-delivery-20261003.md).
+This page moved to [Formation v0共通Session・Skillの引き継ぎ](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/ops/formation-agent-delivery-20261003.md).
 
 Status: historical evidence; not current specification or deployment state.
 Language of the preserved document: Japanese / English.

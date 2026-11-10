@@ -1,6 +1,6 @@
 # Snapshot v1 Compatibility Contract
 
-This page moved to [Snapshot v1 Compatibility Contract](archive/2026/legacy/snapshot-v1-compatibility.md).
+This page moved to [Snapshot v1 Compatibility Contract](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/legacy/snapshot-v1-compatibility.md).
 
 Status: historical evidence; not current specification or deployment state.
 Language of the preserved document: English.

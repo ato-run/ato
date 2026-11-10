@@ -9,7 +9,7 @@ navigation.
 - [Dashboards](dashboards/README.md)
 
 These existing plans, research, handoffs and dashboards are classified as
-Archive in the [inventory](../archive/2026/documentation-reorganization/inventory.tsv).
+Archive in the [inventory](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/documentation-reorganization/inventory.tsv).
 They are historical working records, not current implementation or release
 authority. [Test isolation](testing-isolation.md) remains a developer guide.
 Current durable documentation is indexed by [docs/README.md](../README.md).

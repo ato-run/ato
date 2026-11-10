@@ -1,6 +1,6 @@
 # Windows attempt journalの限定修正
 
-This page moved to [Windows attempt journalの限定修正](../archive/2026/ops/formation-windows-attempt-journal-local-20261003.md).
+This page moved to [Windows attempt journalの限定修正](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/ops/formation-windows-attempt-journal-local-20261003.md).
 
 Status: historical evidence; not current specification or deployment state.
 Language of the preserved document: Japanese / English.

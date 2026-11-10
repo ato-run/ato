@@ -42,18 +42,3 @@ jobs:
       # Runs the same manifest/version resolution the release `plan` job does.
       - name: dist plan
         run: dist plan
-
-  xtask-build-paths:
-    name: desktop xtask build paths
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # ato-desktop-xtask is a pure-Rust build tool (anyhow + sha2 only, no GUI deps)
-      # and is excluded from rust-ci. Its WorkspacePaths::discover() resolves the
-      # cli/netd/desktop/nacelle build manifests; discovered_crate_manifests_all_exist
-      # asserts each one exists, catching crate-rename leftovers that previously only
-      # failed when desktop-release ran on the tag.
-      - name: xtask path tests
-        run: cargo test --manifest-path apps/desktop/xtask/Cargo.toml

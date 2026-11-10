@@ -14,7 +14,7 @@ related:
 
 > Historical reference: this document describes a past design, experiment or
 > component version. Its unresolved references are recorded in the
-> [acceptance review](../../archive/2026/documentation-reorganization/REVIEW-ACCEPTANCE.md). Use [current specification status](../../specifications/README.md)
+> [acceptance review](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/documentation-reorganization/REVIEW-ACCEPTANCE.md). Use [current specification status](../../specifications/README.md)
 > before applying any command or contract here.
 
 ## 1. 目的
