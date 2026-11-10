@@ -173,6 +173,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let step = runtime.block_on(relay_loop.step(&origin, &mut transport));
                 println!("{step:?}");
                 if once {
+                    // A one-shot run must fail loudly when the relay could not be
+                    // reached, so a script or health check cannot read it as
+                    // "nothing to do".
+                    if matches!(step, ato_coordinator::relay::RelayStep::Unavailable) {
+                        return Err("relay_unavailable".into());
+                    }
                     break;
                 }
                 match step {
