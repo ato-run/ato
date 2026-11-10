@@ -768,6 +768,7 @@ impl Coordinator {
     /// Register an operation whose implementation is a handler module. The
     /// digest is the SHA-256 of the module source, so a changed handler is a
     /// different implementation.
+    #[allow(clippy::too_many_arguments)] // mirrors the registration columns
     pub fn register_handler_operation(
         &mut self,
         protocol: &str,
@@ -829,6 +830,7 @@ impl Coordinator {
 
     /// Run a registered handler for `operation`, apply its operations and
     /// commit (evolution) or return its result (observation).
+    #[allow(clippy::too_many_arguments)] // mirrors the invocation envelope
     pub fn invoke_operation(
         &mut self,
         owner_id: &str,
