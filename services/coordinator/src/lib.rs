@@ -245,6 +245,10 @@ impl Coordinator {
 
     fn init(conn: Connection) -> Result<Self, CoordinatorError> {
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Two Coordinators may legitimately open the same database file (for
+        // example one per served app); wait for the other writer instead of
+        // failing immediately with SQLITE_BUSY.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(SCHEMA)?;
         // Databases created before schema 2 lack the retention column; adding
         // it is idempotent and keeps the file usable without a rebuild.
