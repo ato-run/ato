@@ -100,6 +100,15 @@ fn state_refusal(refusal: StateContinuityRefusal) -> LocalInstanceError {
     }
 }
 
+/// The Run gate's named refusal: the state the Run would receive is not the
+/// saved state. The detail keeps the specific observation that failed.
+fn run_state_unverified(detail: impl std::fmt::Display) -> LocalInstanceError {
+    LocalInstanceError::StateContinuity {
+        code: state_continuity::STATE_CODE_INSTANCE_STATE_UNVERIFIED,
+        detail: detail.to_string(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalApplicationMetadata {
@@ -132,6 +141,16 @@ pub struct LocalRestoredSnapshot {
     pub snapshot_ref: String,
     pub resources: Vec<LocalRestoredResource>,
     pub assets: Vec<LocalRestoredAsset>,
+}
+
+/// What a Run of one Instance will actually receive, observed before it starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalRunStateObservation {
+    /// The saved-data point the Run's state was verified against. `None` when the
+    /// Instance carries no saved data.
+    pub snapshot_ref: Option<String>,
+    /// Saved slots whose live state was observed against the saved digest.
+    pub observed_slots: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -288,7 +307,7 @@ impl LocalApplicationStore {
         selected_derivation: Option<&str>,
         approval: StateMigrationApproval,
     ) -> Result<LocalInstanceMetadata, LocalInstanceError> {
-        let mut bundle = portable_bundle(bundle_bytes)?;
+        let bundle = portable_bundle(bundle_bytes)?;
         // Saved data is validated on read: an unknown schema is refused by name
         // before any other requirement is checked, so a newer producer never
         // looks like a partial restore.
@@ -313,19 +332,23 @@ impl LocalApplicationStore {
         if let Some(snapshot_ref) = bundle.index.instance_snapshot_ref.as_deref() {
             let saved = snapshot_from_bundle(&bundle, snapshot_ref)?;
             let target_state = derivation_state_of(&bundle, &selected_derivation)?;
-            state_continuity::compare_state_slots(&saved, &target_state).map_err(state_refusal)?;
+            state_continuity::compare_state_slots_before_admission(&saved, &target_state)
+                .map_err(state_refusal)?;
         }
-        let mut bytes = bundle_bytes.to_vec();
-        let mut validated = validate_bundle_for_derivation(&bundle, &selected_derivation)
+        let bytes = bundle_bytes.to_vec();
+        let validated = validate_bundle_for_derivation(&bundle, &selected_derivation)
             .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
         // The D switch gate. No saved byte is materialized before it passes.
         let saved = match validated.instance_snapshot_ref.as_ref() {
             None => None,
             Some(snapshot_ref) => {
                 let snapshot = snapshot_from_bundle(&bundle, snapshot_ref.as_str())?;
-                let compatibility =
-                    state_continuity::compare_state_slots(&snapshot, &validated.derivation.state)
-                        .map_err(state_refusal)?;
+                let compatibility = state_continuity::compare_state_slots(
+                    &snapshot,
+                    &validated.derivation.state,
+                    validated.realization,
+                )
+                .map_err(state_refusal)?;
                 let content = snapshot_content_map(&bundle, &snapshot)?;
                 // Observe what is about to be imported before writing anything.
                 state_continuity::observe_imported_content(&snapshot, &content)
@@ -338,23 +361,14 @@ impl LocalApplicationStore {
                                 state_continuity::migration_approval_refusal(&migrations),
                             ));
                         }
-                        // Identity copy only: the migrated snapshot names the
-                        // target's declared format/version, the bytes do not
-                        // change and nothing is reinterpreted.
-                        let migrated = state_continuity::migrate_snapshot(&snapshot, &migrations)
+                        // v0 has one migration and it is an identity copy: the
+                        // target declared the saved version readable, so the
+                        // saved bytes AND their declared version are kept. The
+                        // source bundle (and its K) is never rewritten; the
+                        // approval is what changes.
+                        state_continuity::migrate_snapshot(&snapshot, &migrations)
                             .map_err(state_refusal)?;
-                        let (migrated_bytes, migrated_bundle) =
-                            attach_instance_snapshot(&bundle, migrated.clone(), &content)
-                                .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
-                        // The source bundle and its K are never rewritten: the
-                        // migrated copy is a new saved-data point under the
-                        // existing v4 snapshot Contract rules.
-                        bundle = migrated_bundle;
-                        bytes = migrated_bytes;
-                        validated =
-                            validate_bundle_for_derivation(&bundle, &selected_derivation)
-                                .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
-                        Some(migrated)
+                        Some(snapshot)
                     }
                 }
             }
@@ -486,17 +500,18 @@ impl LocalApplicationStore {
         Ok(Some(restored))
     }
 
-    /// Restore evidence for this Instance.
+    /// Restore evidence for this Instance: the restored copies.
     ///
-    /// Recomputes the digest of every saved resource and Asset from the bytes
-    /// this Instance actually holds — including a fresh capture of the restored
+    /// Recomputes the digest of every saved resource and Asset from the restored
+    /// files this Instance holds — including a fresh capture of the restored
     /// filesystem state — and compares each with the saved-data index. A
-    /// snapshot reference alone is never evidence, so a caller that starts a Run
-    /// can require this to pass first.
+    /// snapshot reference alone is never evidence.
     ///
     /// The filesystem capture compares what a Run would read, so this is valid
     /// only while no Run is mutating the state; a running Instance's state
-    /// legitimately differs from the saved point until it is saved again.
+    /// legitimately differs from the saved point until it is saved again. The
+    /// Run gate built on this is [`Self::observe_run_state`], which also checks
+    /// that the selected Derivation can receive the saved data.
     pub fn observe_restored_digests(&self, instance_id: &str) -> Result<(), LocalInstanceError> {
         let instance = self.instance(instance_id)?;
         let Some(snapshot_ref) = instance.data_snapshot_ref.as_deref() else {
@@ -513,6 +528,75 @@ impl LocalApplicationStore {
             ));
         }
         observe_restored_content(&self.instance_root(instance_id)?, &snapshot, &restored)
+    }
+
+    /// The state a Run of this Instance will actually receive, observed before
+    /// the Run starts.
+    ///
+    /// Unlike [`Self::observe_restored_digests`], which checks the restored
+    /// copies, this is the Run gate: it first requires the saved data to be
+    /// deliverable to the selected Derivation, then re-hashes the live state the
+    /// workload will read (a fresh capture of every declared filesystem slot,
+    /// the restored browser-state bytes the static surface will receive, and
+    /// every Asset) and compares each with the saved-data index. Only when that
+    /// succeeds is the saved snapshot reference evidence; a mismatch fails with
+    /// `instance_state_unverified`, so no receipt may cite a snapshot the Run
+    /// did not actually receive.
+    pub fn observe_run_state(
+        &self,
+        instance_id: &str,
+        derivation_ref: &str,
+    ) -> Result<LocalRunStateObservation, LocalInstanceError> {
+        let instance = self.instance(instance_id)?;
+        if instance.selected_derivation_ref != derivation_ref {
+            return Err(LocalInstanceError::InvalidState(format!(
+                "local instance `{instance_id}` is selected for `{}`, not `{derivation_ref}`",
+                instance.selected_derivation_ref
+            )));
+        }
+        let Some(snapshot_ref) = instance.data_snapshot_ref.as_deref() else {
+            return Ok(LocalRunStateObservation {
+                snapshot_ref: None,
+                observed_slots: Vec::new(),
+            });
+        };
+        let bundle_bytes = self.bundle_bytes(&instance)?;
+        let bundle = portable_bundle(&bundle_bytes)?;
+        let selected = validate_bundle_for_derivation(&bundle, derivation_ref)
+            .map_err(|error| LocalInstanceError::Bundle(error.to_string()))?;
+        let snapshot = snapshot_from_bundle(&bundle, snapshot_ref)?;
+        let unverified = |refusal: StateContinuityRefusal| {
+            run_state_unverified(format!("local Instance `{instance_id}`: {refusal}"))
+        };
+        state_continuity::validate_saved_data(&snapshot).map_err(unverified)?;
+        state_continuity::check_state_delivery(
+            &snapshot,
+            &selected.derivation.state,
+            selected.realization,
+        )
+        .map_err(unverified)?;
+        let restored = read_restored_snapshot(&self.snapshot_root(instance_id, snapshot_ref)?)?;
+        if restored.snapshot_ref != snapshot_ref {
+            return Err(run_state_unverified(LocalInstanceError::InvalidState(
+                "restored snapshot metadata does not name the saved snapshot".to_owned(),
+            )));
+        }
+        observe_restored_content(&self.instance_root(instance_id)?, &snapshot, &restored).map_err(
+            |error| match error {
+                LocalInstanceError::StateContinuity { code, detail } => run_state_unverified(
+                    format!("local Instance `{instance_id}`: {code}: {detail}"),
+                ),
+                other => other,
+            },
+        )?;
+        Ok(LocalRunStateObservation {
+            snapshot_ref: Some(snapshot_ref.to_owned()),
+            observed_slots: snapshot
+                .resources
+                .iter()
+                .map(|resource| resource.slot.clone())
+                .collect(),
+        })
     }
 
     /// Whether another declared Derivation could restore this Instance's saved
@@ -534,8 +618,12 @@ impl LocalApplicationStore {
             return Ok(StateCompatibility::Compatible);
         };
         let snapshot = snapshot_from_bundle(&bundle, snapshot_ref.as_str())?;
-        state_continuity::compare_state_slots(&snapshot, &validated.derivation.state)
-            .map_err(state_refusal)
+        state_continuity::compare_state_slots(
+            &snapshot,
+            &validated.derivation.state,
+            validated.realization,
+        )
+        .map_err(state_refusal)
     }
 
     pub fn local_surface_snapshot(
@@ -2209,6 +2297,12 @@ mod tests {
     }
 
     fn bundle_with_snapshot() -> (Vec<u8>, PortableApplicationBundle) {
+        bundle_with_browser_snapshot()
+    }
+
+    /// A saved bundle whose resource is `ato.data.json@1` — not deliverable to
+    /// any v0 route, so a restore through it must be refused by name.
+    fn bundle_with_data_json_snapshot() -> Vec<u8> {
         let (_, source) = build_static_bundle(&fixture_root(), "fixture").unwrap();
         let (_, source) = repack_portable_dependencies(
             &source,
@@ -2217,7 +2311,9 @@ mod tests {
         )
         .unwrap();
         let (snapshot, content) = snapshot_fixture();
-        attach_instance_snapshot(&source, snapshot, &content).unwrap()
+        attach_instance_snapshot(&source, snapshot, &content)
+            .unwrap()
+            .0
     }
 
     fn bundle_with_browser_snapshot() -> (Vec<u8>, PortableApplicationBundle) {
@@ -2564,7 +2660,8 @@ mod tests {
     #[test]
     fn filesystem_state_save_roundtrips_through_an_independent_instance() {
         let root = tempfile::tempdir().unwrap();
-        let (bytes, original, process_ref) = stateful_fixture();
+        let (bytes, original, process_ref, _) =
+            stateful_fixture_with_save(Some(save_declaration("app.notes.save", 1, &[])));
         let store = LocalApplicationStore::open(root.path()).unwrap();
         let imported = store.import(&bytes, Some(&process_ref)).unwrap();
         let state_path = store
@@ -2842,12 +2939,22 @@ mod tests {
             migrated_resource.save,
             Some(InstanceSnapshotSaveV1 {
                 format: "app.notes.save".to_owned(),
-                version: 2,
-            })
+                version: 1,
+            }),
+            "reading v1 is not converting it: the saved version is preserved"
         );
         assert_eq!(
             migrated_resource.content_ref, saved_resource_before.content_ref,
             "the migration copies the saved bytes, it does not reinterpret them"
+        );
+        assert_eq!(
+            saved_resource(&migrated_export),
+            saved_resource_before,
+            "export/import keeps the saved resource byte-for-byte"
+        );
+        assert_eq!(
+            migrated_export, migrated_source,
+            "the approved import keeps the v1 saved bundle as it is"
         );
         // The original saved data is untouched byte-for-byte.
         assert_eq!(store.export_instance(&first.instance_id).unwrap(), saved);
@@ -2884,12 +2991,10 @@ mod tests {
             &oci_ref,
             save_declaration("app.notes.save", 2, &[1]),
         );
-        // Transform succeeds, but committing the migrated saved point fails.
-        let bundles = store
-            .application_root(&first.application_id)
-            .unwrap()
-            .join("bundles");
-        fs::set_permissions(&bundles, fs::Permissions::from_mode(0o555)).unwrap();
+        // The approved migration transforms (identity copy) and verifies, but
+        // committing the new Instance fails.
+        let instances = root.path().join("instances");
+        fs::set_permissions(&instances, fs::Permissions::from_mode(0o555)).unwrap();
         let migrated_source_ref = route_of(&migrated_source, PortableRealizationKind::OciContainer);
         let error = store
             .import_with_state_migration(
@@ -2898,7 +3003,7 @@ mod tests {
                 StateMigrationApproval::granted(),
             )
             .unwrap_err();
-        fs::set_permissions(&bundles, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&instances, fs::Permissions::from_mode(0o755)).unwrap();
 
         assert!(matches!(error, LocalInstanceError::Io { .. }), "{error}");
         assert_eq!(store.export_instance(&first.instance_id).unwrap(), saved);
@@ -2949,7 +3054,8 @@ mod tests {
     #[test]
     fn restore_succeeds_only_after_the_imported_digest_is_observed() {
         let root = tempfile::tempdir().unwrap();
-        let (bytes, _, process_ref) = stateful_fixture();
+        let (bytes, _, process_ref, _) =
+            stateful_fixture_with_save(Some(save_declaration("app.notes.save", 1, &[])));
         let store = LocalApplicationStore::open(root.path()).unwrap();
         let first = store.import(&bytes, Some(&process_ref)).unwrap();
         write_and_save_filesystem_state(&store, &first.instance_id, "notes.sqlite", b"one");
@@ -2989,7 +3095,8 @@ mod tests {
     #[test]
     fn a_run_that_changes_the_restored_state_cannot_claim_the_saved_digest() {
         let root = tempfile::tempdir().unwrap();
-        let (bytes, _, process_ref) = stateful_fixture();
+        let (bytes, _, process_ref, _) =
+            stateful_fixture_with_save(Some(save_declaration("app.notes.save", 1, &[])));
         let store = LocalApplicationStore::open(root.path()).unwrap();
         let first = store.import(&bytes, Some(&process_ref)).unwrap();
         write_and_save_filesystem_state(&store, &first.instance_id, "notes.sqlite", b"one");
@@ -3014,6 +3121,138 @@ mod tests {
             error.state_continuity_code(),
             Some(state_continuity::STATE_CODE_RESTORE_DIGEST_MISMATCH)
         );
+    }
+
+    #[test]
+    fn an_undeclared_save_format_is_refused_on_a_derivation_switch() {
+        let root = tempfile::tempdir().unwrap();
+        // Legacy fixture: neither route declares a save format.
+        let (bytes, _, process_ref, oci_ref) = stateful_fixture_with_save(None);
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let first = store.import(&bytes, Some(&process_ref)).unwrap();
+        write_and_save_filesystem_state(&store, &first.instance_id, "notes.sqlite", b"one");
+        let saved = store.export_instance(&first.instance_id).unwrap();
+
+        let error = store.import(&saved, Some(&oci_ref)).unwrap_err();
+
+        assert_eq!(
+            error.state_continuity_code(),
+            Some(state_continuity::STATE_CODE_FORMAT_UNDECLARED),
+            "an undeclared save format is not a shared legacy format: {error}"
+        );
+        assert_eq!(store.export_instance(&first.instance_id).unwrap(), saved);
+        assert_eq!(
+            fs::read_dir(root.path().join("instances")).unwrap().count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_data_json_snapshot_is_refused_as_undeliverable() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = bundle_with_data_json_snapshot();
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+
+        let error = store.import(&bytes, None).unwrap_err();
+
+        assert_eq!(
+            error.state_continuity_code(),
+            Some(state_continuity::STATE_CODE_RESOURCE_NOT_DELIVERABLE),
+            "a data.json resource is delivered to no v0 route: {error}"
+        );
+        assert_eq!(
+            fs::read_dir(root.path().join("instances")).unwrap().count(),
+            0
+        );
+    }
+
+    #[test]
+    fn observe_run_state_verifies_the_state_a_run_receives() {
+        let root = tempfile::tempdir().unwrap();
+        let (bytes, _, process_ref, _) =
+            stateful_fixture_with_save(Some(save_declaration("app.notes.save", 1, &[])));
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let instance = store.import(&bytes, Some(&process_ref)).unwrap();
+        write_and_save_filesystem_state(&store, &instance.instance_id, "notes.sqlite", b"one");
+
+        let observed = store
+            .observe_run_state(&instance.instance_id, &process_ref)
+            .unwrap();
+
+        assert_eq!(
+            observed.snapshot_ref,
+            store
+                .instance(&instance.instance_id)
+                .unwrap()
+                .data_snapshot_ref
+        );
+        assert_eq!(observed.observed_slots, vec!["data".to_owned()]);
+    }
+
+    #[test]
+    fn observe_run_state_refuses_live_state_that_changed() {
+        let root = tempfile::tempdir().unwrap();
+        let (bytes, _, process_ref, _) =
+            stateful_fixture_with_save(Some(save_declaration("app.notes.save", 1, &[])));
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let instance = store.import(&bytes, Some(&process_ref)).unwrap();
+        write_and_save_filesystem_state(&store, &instance.instance_id, "notes.sqlite", b"one");
+
+        // The live state the Run would read is no longer the saved state.
+        let state_dir = store
+            .filesystem_state_paths(&instance.instance_id)
+            .unwrap()
+            .remove("data")
+            .unwrap();
+        fs::write(state_dir.join("notes.sqlite"), b"changed after the save").unwrap();
+
+        let error = store
+            .observe_run_state(&instance.instance_id, &process_ref)
+            .unwrap_err();
+
+        assert_eq!(
+            error.state_continuity_code(),
+            Some(state_continuity::STATE_CODE_INSTANCE_STATE_UNVERIFIED),
+            "the Run gate names the unverified state: {error}"
+        );
+        assert!(
+            error.to_string().contains(instance.instance_id.as_str()),
+            "the refusal names the Instance: {error}"
+        );
+    }
+
+    #[test]
+    fn observe_run_state_requires_the_selected_derivation() {
+        let root = tempfile::tempdir().unwrap();
+        let (bytes, _, process_ref, oci_ref) =
+            stateful_fixture_with_save(Some(save_declaration("app.notes.save", 1, &[])));
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let instance = store.import(&bytes, Some(&process_ref)).unwrap();
+
+        let error = store
+            .observe_run_state(&instance.instance_id, &oci_ref)
+            .unwrap_err();
+
+        assert!(
+            matches!(error, LocalInstanceError::InvalidState(_)),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn same_derivation_restart_does_not_require_save_format_declarations() {
+        let root = tempfile::tempdir().unwrap();
+        // Legacy route and legacy saved data: no declaration on either side.
+        let (bytes, _, process_ref) = stateful_fixture();
+        let store = LocalApplicationStore::open(root.path()).unwrap();
+        let instance = store.import(&bytes, Some(&process_ref)).unwrap();
+        write_and_save_filesystem_state(&store, &instance.instance_id, "notes.sqlite", b"one");
+
+        // Starting the same selected Derivation again is not a format switch.
+        let observed = store
+            .observe_run_state(&instance.instance_id, &process_ref)
+            .unwrap();
+        assert!(observed.snapshot_ref.is_some());
     }
 
     #[test]
