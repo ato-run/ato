@@ -104,7 +104,7 @@ or safe side effects. See [compatibility](docs/concepts/compatibility.md) and
 
 Work is tracked in [GitHub Issues](https://github.com/ato-run/ato/issues) (and
 GitHub Projects when a board is used). There is no Markdown roadmap in this
-repository; [the archived roadmap](docs/archive/2026/legacy/OPEN_ISSUES_ROADMAP.md)
+repository; [the archived roadmap](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/legacy/OPEN_ISSUES_ROADMAP.md)
 is historical evidence and is not updated.
 
 ## Documentation

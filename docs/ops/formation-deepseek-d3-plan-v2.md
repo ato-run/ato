@@ -1,6 +1,6 @@
 # Formation D3 v2 — exact request evidence preregistration
 
-This page moved to [Formation D3 v2 — exact request evidence preregistration](../archive/2026/ops/formation-deepseek-d3-plan-v2.md).
+This page moved to [Formation D3 v2 — exact request evidence preregistration](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/ops/formation-deepseek-d3-plan-v2.md).
 
 Status: historical evidence; not current specification or deployment state.
 Language of the preserved document: English.

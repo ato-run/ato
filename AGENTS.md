@@ -78,23 +78,22 @@ Practical consequences:
 ## Repository Structure
 
 This directory is the `ato-run/ato` Git repository and a Rust workspace. The
-desktop app under `apps/desktop` and the Nacelle provider under
-`extensions/providers/nacelle` have separate build boundaries and are excluded
-from the root Cargo workspace.
+Nacelle provider under `extensions/providers/nacelle` has a separate build
+boundary and is excluded from the root Cargo workspace. The Desktop lives in the
+separate `ato-run/ato-desktop` repository.
 
 ### Git Commit Rules
 
 - Commit per logical change, not per file touched.
 - Commit in small, coherent chunks during implementation so progress is saved incrementally.
 - Do not hardcode a commit author identity. Use the currently authenticated `gh` user for GitHub operations, and use the current repository/global `git config user.name` and `git config user.email` for local commits. Do not add any `Co-Authored-By` lines.
-- Message format: `<scope>(<app>): <what changed>` — e.g., `fix(ato-desktop): guard evaluate_script after PageLoadEvent::Finished`
+- Message format: `<scope>(<app>): <what changed>` — e.g., `fix(cli): reject an unknown capsule profile`
 
 ## Repository layout
 
 ```text
 apps/
-├── cli/                         # lifecycle CLI and supervisor
-└── desktop/                     # GPUI + Wry shell; separate workspace
+└── cli/                         # lifecycle CLI and supervisor
 lib/
 ├── computation/                 # Semantic Core values and identity
 ├── kernel/                      # Evolution
@@ -138,16 +137,6 @@ Hermetic CLI, desktop, MCP, and manual smoke verification must use a fresh env r
  cargo check --workspace && cargo test --workspace --no-fail-fast && cargo fmt --all -- --check && cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-### Desktop (GPUI + Wry)
-
-```bash
-cd apps/desktop
-
-# Dev
-cargo run --bin ato-desktop
-
-# Test
-cargo test
 
 # Bundle (macOS)
 cargo run --manifest-path xtask/Cargo.toml -- bundle --target darwin-arm64
@@ -205,7 +194,7 @@ feat/* (feature flag only) ──PR──▶ nightly
   protocol and implementation specifications, operations, archive). See
   `docs/README.md`.
 - Roadmap and work tracking are GitHub Issues/Projects. Do not add a Markdown
-  roadmap; `docs/archive/2026/legacy/OPEN_ISSUES_ROADMAP.md` is historical.
+  roadmap; the archived `OPEN_ISSUES_ROADMAP.md` (ato-archive-2026-11) is historical.
 - Prefer an explicit `Status: Current|Draft|Archived` line; directory position
   (`rfcs/accepted`, `rfcs/draft`, `archive/`) carries status when a page has
   none. `Current` does not imply implemented, deployed or verified.
@@ -220,7 +209,6 @@ feat/* (feature flag only) ──PR──▶ nightly
 - **extensions/adapters**: physical interactions mapped to logical Protocols
 - **extensions/materializers**: physical encoding and restoration strategies
 - **apps/cli**: lifecycle supervision and product assembly
-- **apps/desktop**: separate GPUI + Wry shell (NOT Tauri)
 - **extensions/providers/nacelle**: OS-native sandbox and source execution provider
 - **services/netd**: session network broker
 - **tools/snapshot-builder**: Ready-State implementation tooling, not Capsule identity
@@ -232,8 +220,6 @@ feat/* (feature flag only) ──PR──▶ nightly
   `docs/rfcs/accepted/CAPSULE_CLI_LIFECYCLE.md` and CLI tests.
 - For `extensions/providers/nacelle`, consult its local documentation before
   changing provider or sandbox behavior.
-- For `apps/desktop` (GPUI + Wry shell), follow Rust + GPUI patterns; do NOT
-  apply Tauri/TypeScript patterns.
 - Keep app-specific release flow, semver policy, and test commands in the nearest app-level `AGENTS.md` instead of duplicating operational detail here.
 
 ### Semantic core, explicit realization
@@ -387,7 +373,6 @@ placement-specific semantic roots.
 
 - **Engine Discovery**: Set `NACELLE_PATH` or use `ato engine register`
 - **Build Failures**: `cargo clean && cargo build`
-- **Desktop ato binary**: Develop ato-desktop against a locally-built CLI by setting `ATO_DESKTOP_ATO_BIN=target/debug/ato` (or `target/release/ato`). Without this, Desktop falls back to `$PATH` resolution which may pick up an older installed release. Desktop logs the resolved binary path on startup.
 - **Debug**: Use `tracing`, `RUST_BACKTRACE=1`
 
 ## Release Notes

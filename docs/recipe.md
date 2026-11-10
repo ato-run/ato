@@ -126,8 +126,8 @@ When a recipe is loaded from the Store, the Store surface shows:
 
 References:
 
-- [historical Capsule specification](archive/rfcs-legacy-accepted/CAPSULE_SPEC.md)
+- [historical Capsule specification](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/rfcs-legacy-accepted/CAPSULE_SPEC.md)
 - [legacy Capsule Artifact Format v2](rfcs/archived/CAPSULE_FORMAT_V2.md)
-- [historical dependency contracts](archive/rfcs-legacy-accepted/CAPSULE_DEPENDENCY_CONTRACTS.md)
+- [historical dependency contracts](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/rfcs-legacy-accepted/CAPSULE_DEPENDENCY_CONTRACTS.md)
 - [Execution Identity](execution-identity.md)
 - [Capsule](capsule.md)

@@ -651,6 +651,7 @@ fn snapshot_fixture() -> Fixture {
             slot: "main".to_owned(),
             protocol: DATA_JSON_PROTOCOL.to_owned(),
             content_ref: resource_ref.clone(),
+            save: None,
         }],
         assets: vec![InstanceSnapshotAssetV1 {
             alias: "asset-1".to_owned(),
@@ -695,6 +696,7 @@ fn realization_name(kind: PortableRealizationKind) -> &'static str {
         PortableRealizationKind::OciContainer => "oci_container",
         PortableRealizationKind::OciServiceGroup => "oci_service_group",
         PortableRealizationKind::ProcessServiceGroup => "process_service_group",
+        PortableRealizationKind::NativeDesktop => "native_desktop",
     }
 }
 

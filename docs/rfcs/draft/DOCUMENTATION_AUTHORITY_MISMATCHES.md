@@ -86,7 +86,7 @@ and operating procedures.
 K equality plus verification establishes the observations in K. It does not
 establish arbitrary state migration, exactly-once side effects, patch status
 or safe rollout. The
-[stateful transformation evidence](../../archive/2026/ops/stateful-transformation-v1.md)
+[stateful transformation evidence](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/ops/stateful-transformation-v1.md)
 uses fresh process memory and expressly excludes restart persistence. Any
 stronger claim needs a separate state/effect contract and measured evidence;
 there is no adoption proposal for a new universal continuity schema here.

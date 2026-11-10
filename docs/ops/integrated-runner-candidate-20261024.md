@@ -1,6 +1,6 @@
 # 統合した通常Runnerの導入候補
 
-This page moved to [統合した通常Runnerの導入候補](../archive/2026/ops/integrated-runner-candidate-20261024.md).
+This page moved to [統合した通常Runnerの導入候補](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/ops/integrated-runner-candidate-20261024.md).
 
 Status: historical evidence; not current specification or deployment state.
 Language of the preserved document: Japanese / English.

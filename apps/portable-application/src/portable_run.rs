@@ -23,6 +23,7 @@ use std::process::Command;
 // The native process group (and its peer broker) is a Unix-only
 // materialization: it needs process groups and Unix sockets, and it refuses
 // the whole route on other hosts. The import follows the code it belongs to.
+use crate::native_desktop::{NativeStart, refusal as native_refusal};
 #[cfg(unix)]
 use crate::process_group::{HelperProcess, ProcessServiceGroup, ServiceSpec};
 use crate::{
@@ -74,6 +75,12 @@ pub struct PortableRunContext<'a> {
     /// probed (the CLI) passes its own so `ato pack` and `ato run` cannot
     /// disagree.
     pub host: Option<&'a ato_host_facts::HostFacts>,
+    /// The explicit local decision to run an unsigned/ad-hoc native artifact.
+    ///
+    /// It is recorded in the receipt as evidence and never relaxes the
+    /// mandatory filesystem, state, egress or lifecycle policy. A route whose
+    /// signature policy is `require-valid` refuses it regardless.
+    pub native_local_override: bool,
 }
 
 /// Project a validated native OCI route into the existing Runner wire contract.
@@ -228,6 +235,16 @@ pub fn execution_requirements_for(
         PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup => {
             ato_host_facts::ExecutionRequirements::container(route_platform(derivation))
         }
+        PortableRealizationKind::NativeDesktop => {
+            let native = validated
+                .native
+                .as_ref()
+                .expect("a NativeDesktop route carries its validated descriptor");
+            ato_host_facts::ExecutionRequirements::native_desktop(
+                native.descriptor.os.as_str(),
+                native.descriptor.arch.as_str(),
+            )
+        }
     };
     // A state slot that declares it can be found through
     // `ATO_STATE_PATH_<ID>` does not need the Linux sandbox's mount namespace,
@@ -352,6 +369,24 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
                  group route runs through the relay, and a native Linux daemon runs directly",
             );
         }
+        if self.validated.realization == PortableRealizationKind::NativeDesktop {
+            if self.validated.native.is_none() {
+                return refused(
+                    "native_descriptor_missing",
+                    "the selected native route carries no validated descriptor",
+                );
+            }
+            if !self.validated.derivation.requirements.network.is_empty() {
+                // Inbound loopback Ports are enforced by the Seatbelt profile;
+                // an arbitrary declared TCP destination is not. A mandatory
+                // policy that cannot be enforced before launch is a refusal,
+                // never a receipt entry.
+                return refused(
+                    "native_egress_policy_unavailable",
+                    "this native Adapter can enforce inbound loopback Ports only; the route                      declares TCP egress that would not be enforced",
+                );
+            }
+        }
         if requirements.needs_container && host.connector_choice().is_none() {
             return refused(
                 "oci_connector_unavailable",
@@ -413,6 +448,9 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
             }
             PortableRealizationKind::ProcessServiceGroup => {
                 self.start_process_group(workspace, &state_mounts, &input_mounts)?
+            }
+            PortableRealizationKind::NativeDesktop => {
+                self.start_native_desktop(workspace, &state_mounts)?
             }
         };
         realized.execution.dependency_fetches = dependency_fetches;
@@ -662,6 +700,56 @@ impl PortableBundleExecutor<'_> {
             evidence: None,
             execution: evidence("process", Some(executable), Some(version), Some(pid), &base),
             kept: None,
+        })
+    }
+}
+
+impl PortableBundleExecutor<'_> {
+    /// The selected native desktop route: materialize the verified artifact,
+    /// verify and record the signature verdicts, apply Seatbelt, own the
+    /// process group and hand the declared Ports to the common verifier.
+    ///
+    /// Nothing here decides K. A launch, a valid signature or an intact
+    /// artifact is execution evidence and satisfies no observation.
+    fn start_native_desktop(
+        &self,
+        workspace: PathBuf,
+        state_mounts: &[PortableStateMount],
+    ) -> Result<Realized, RealizeFailure> {
+        let route = self.validated;
+        let native = route.native.as_ref().ok_or_else(|| {
+            native_refusal(
+                "native_descriptor_missing",
+                "the selected native route carries no validated descriptor",
+            )
+        })?;
+        let artifact_ref = ato_computation::ContentRef::parse(native.descriptor.artifact.clone())
+            .map_err(|error| {
+            native_refusal(
+                "native_artifact_invalid",
+                format!("the artifact reference is invalid: {error}"),
+            )
+        })?;
+        let artifact_bytes = self.bundle.payload_bytes(&artifact_ref).map_err(|error| {
+            native_refusal(
+                "native_artifact_invalid",
+                format!("the verified artifact payload is unreadable: {error}"),
+            )
+        })?;
+        let state_paths = state_mounts
+            .iter()
+            .map(|state| (state.id.clone(), state.host_path.clone()))
+            .collect::<Vec<_>>();
+        crate::native_desktop::start(NativeStart {
+            artifact_bytes,
+            descriptor: &native.descriptor,
+            ports: &native.ports,
+            workspace,
+            runtime_root: self.runtime_root,
+            state_paths,
+            environment: self.binding_environment,
+            local_override: self.context.native_local_override,
+            declares_egress: !route.derivation.requirements.network.is_empty(),
         })
     }
 }
@@ -1440,7 +1528,7 @@ fn evidence(
 }
 
 /// Remove what a Run's realization unpacked or created for itself.
-fn remove_owned(paths: &[PathBuf]) -> Result<()> {
+pub(crate) fn remove_owned(paths: &[PathBuf]) -> Result<()> {
     let mut failed = Vec::new();
     for path in paths {
         if path.exists()
@@ -2291,7 +2379,7 @@ fn portable_process_bwrap_command(
     Ok(command)
 }
 
-fn endpoint_port_env_name(port_id: &str) -> String {
+pub(crate) fn endpoint_port_env_name(port_id: &str) -> String {
     format!(
         "ATO_ENDPOINT_{}_PORT",
         port_id
@@ -2404,6 +2492,8 @@ pub fn run_portable_bundle_attempt(
         sandbox_shim: request.sandbox_shim,
         sandbox_subcommand: request.sandbox_subcommand,
         host: request.host,
+        // A hosted/Formation attempt never carries a local override decision.
+        native_local_override: false,
     };
     let executor = PortableBundleExecutor {
         bundle: request.bundle,
@@ -2471,6 +2561,7 @@ mod state_path_tests {
             protocol: ato_formation::authoring::STATE_FILESYSTEM_PROTOCOL.to_owned(),
             mount: "/data".to_owned(),
             access: StateAccess::ReadWrite,
+            save: None,
             mount_required,
         }
     }
@@ -2549,6 +2640,7 @@ default = "pure"
             sandbox_shim: Path::new("/usr/bin/true"),
             sandbox_subcommand: "__portable-sandbox-exec",
             host: None,
+            native_local_override: false,
         };
         let executor = PortableBundleExecutor {
             bundle: &bundle,
@@ -2731,6 +2823,7 @@ Server(("127.0.0.1", int(os.environ["ATO_ENDPOINT_APP_HTTP_PORT"])), Handler).se
                 sandbox_shim: &shim,
                 sandbox_subcommand: "__portable-sandbox-exec",
                 host: None,
+                native_local_override: false,
             };
             let executor = PortableBundleExecutor {
                 bundle: &bundle,

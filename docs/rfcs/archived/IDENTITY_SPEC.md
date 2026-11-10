@@ -443,4 +443,4 @@ sequenceDiagram
 - [did:key Method Specification](https://w3c-ccg.github.io/did-method-key/)
 - [RFC 8785 - JSON Canonicalization Scheme](https://tools.ietf.org/html/rfc8785)
 - [Ed25519 Signature Algorithm](https://ed25519.cr.yp.to/)
-- [TRUST_AND_KEYS.md](../../archive/rfcs-legacy-accepted/TRUST_AND_KEYS.md)
+- [TRUST_AND_KEYS.md](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/rfcs-legacy-accepted/TRUST_AND_KEYS.md)

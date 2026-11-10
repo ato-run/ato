@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 Repo-wide guidance for Claude Code (and humans). Crate-specific notes live in
-each crate's own `CLAUDE.md` (currently: `apps/desktop/CLAUDE.md`).
+each crate's own `CLAUDE.md`.
 
 ## Commit author identity
 
@@ -43,11 +43,9 @@ feat/* (feature flag only) ──PR──▶ nightly
 ### Release promotion
 
 1. `dev → stg` PR; verify on shared Staging.
-2. Bump versions in the release crates (`cli`, `desktop`, `nacelle`,
-   `ato-desktop-xtask` — xtask tracks desktop because bundle filenames embed
-   `CARGO_PKG_VERSION`), refresh Cargo.lock files, commit on `dev`, promote.
+2. Bump the `ato-cli` version, refresh Cargo.lock, commit on `dev`, promote.
 3. `stg → main` release PR. After merge, tag `vX.Y.Z` on `main` and push the tag
-   (`release.yml` / `desktop-release.yml` publish artifacts).
+   (`release.yml` publishes artifacts).
 
 ## Parallel development with git worktrees
 
@@ -116,22 +114,13 @@ git push --delete origin fix/issue-NNN-slug        # remote
 
 ## Release artifacts
 
-`v*` tags fire two workflows in parallel: `release.yml` (cargo-dist, builds
-cli + nacelle) and `desktop-release.yml` (xtask, builds ato-desktop
-bundles). Both upload to the same GitHub release. The desktop workflow
-waits up to 15 min for cargo-dist's `host` job to create the release object,
-then falls through to creating it itself — so the order of the two
-workflows finishing doesn't matter.
-
-Desktop bundle filenames embed `env!("CARGO_PKG_VERSION")` from the
-`ato-desktop-xtask` crate. **Always bump xtask's version together with the
-ato-desktop bundle's** or the bundle filenames will lag the actual release version.
+`v*` tags fire `release.yml` (cargo-dist), which builds `ato-cli` and publishes
+the GitHub release, Homebrew formula and installers. The Desktop is released
+from the separate `ato-run/ato-desktop` repository.
 
 ## Memory and skills
 
-- `.claude/skills/aodd/SKILL.md` — Agent Operation Driven Development. The
-  release gate for desktop-touching features is an AODD receipt with
-  `result: complete`.
+- `.claude/skills/aodd/SKILL.md` — Agent Operation Driven Development.
 - Auto-memory at `~/.claude/projects/.../memory/MEMORY.md` is the source of
   truth for user preferences (commit authorship, "no lying UI" policy,
   v0.5.0 scope decisions). Read it before making release-process decisions.

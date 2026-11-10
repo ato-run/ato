@@ -37,7 +37,7 @@ sudo -E env ATO_READY_STATE_BENCH=1 ATO_FC_BIN=~/bin/firecracker ATO_FC_KERNEL=~
   harness only measures. Exclude: `secrets_required`, `[bindings.*]`, `[external.*]`,
   OAuth, user-file, large-model, GPU capsules.
 
-See `benchmarks/ready-state/store-bench/capsules.example.json`.
+See `benchmarks/ready-state/store-bench/capsules.example.json` in the [archive](https://github.com/ato-run/ato-archive-2026-11/tree/45f5ed4274336c9ffa94208874c052c39f9bcdac/benchmarks/ready-state/store-bench) (removed from the 0.1.0 tree).
 
 ## Output
 
