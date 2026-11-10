@@ -411,6 +411,12 @@ pub struct VerificationNativeEvidence {
     /// The declared signature policy (`require-valid` or
     /// `require-valid-or-local-override`).
     pub signature_policy: String,
+    /// What the verdict was about: `executable` (the entry file) or `bundle`
+    /// (the `.app` directory that contains it).
+    pub signature_target: String,
+    /// The artifact-relative path the signature verdict was taken on: the
+    /// entry for `executable`, the `.app` root for `bundle`.
+    pub verified_target: String,
     /// `valid` or `invalid`: the exit verdict of
     /// `codesign --verify --deep --strict`.
     pub codesign_verify: String,
