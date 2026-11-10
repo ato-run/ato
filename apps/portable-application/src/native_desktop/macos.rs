@@ -45,6 +45,14 @@ fn seatbelt_launcher() -> Option<PathBuf> {
     ato_host_facts::trusted_tool(&[ato_host_facts::SEATBELT_LAUNCHER_PATH])
 }
 
+fn lsof_tool() -> Option<PathBuf> {
+    ato_host_facts::trusted_tool(&[ato_host_facts::LSOF_PATH])
+}
+
+fn ps_tool() -> Option<PathBuf> {
+    ato_host_facts::trusted_tool(&[ato_host_facts::PS_PATH])
+}
+
 /// Whether this process can actually apply a Seatbelt profile.
 ///
 /// Finding the launcher is not the capability: a process already sandboxed by
@@ -343,6 +351,9 @@ pub(crate) fn prepare(
         .iter()
         .map(|port| port.guest_port)
         .collect::<Vec<_>>();
+    // Admission: a declared Port that already answers cannot become this Run's
+    // endpoint, and a native Run never attaches to a listener it did not start.
+    ensure_ports_free(request.ports)?;
     let sandbox = sandbox_plan(
         &extracted.root,
         &request.workspace,
@@ -432,6 +443,117 @@ fn wait_for_ports_with_timeout(
                 ));
             }
             std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse before launch when a declared Port already has a listener.
+///
+/// A native app is launched with the exact Port its descriptor declares, so a
+/// port that is already bound cannot become this Run's endpoint. Binding it
+/// ourselves first is the check; the listener is released immediately and the
+/// post-readiness ownership proof closes the remaining window.
+fn ensure_ports_free(ports: &[crate::ValidatedNativePort]) -> Result<(), NativeRefusal> {
+    for port in ports {
+        match std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port.guest_port)) {
+            Ok(listener) => drop(listener),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                return Err(NativeRefusal {
+                    code: "native_port_in_use",
+                    detail: format!(
+                        "the declared Port `{}` (127.0.0.1:{}) is already in use; a native Run \
+                         never attaches to a listener it did not start",
+                        port.id, port.guest_port
+                    ),
+                });
+            }
+            Err(error) => {
+                return Err(NativeRefusal {
+                    code: "native_port_unavailable",
+                    detail: format!(
+                        "the declared Port `{}` (127.0.0.1:{}) cannot be bound: {error}",
+                        port.id, port.guest_port
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The process group `pid` belongs to, from `/bin/ps`.
+fn process_group_of(pid: u32) -> Result<i32, String> {
+    let ps = ps_tool().ok_or_else(|| format!("{} is not present", ato_host_facts::PS_PATH))?;
+    let output = std::process::Command::new(ps)
+        .args(["-o", "pgid=", "-p", &pid.to_string()])
+        .output()
+        .map_err(|error| format!("could not run ps for pid {pid}: {error}"))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.trim()
+        .parse::<i32>()
+        .map_err(|_| format!("ps reported no process group for pid {pid}: {text:?}"))
+}
+
+/// pids listening on one TCP Port, from `/usr/sbin/lsof`.
+fn listening_pids(port: u16) -> Result<Vec<u32>, String> {
+    let lsof =
+        lsof_tool().ok_or_else(|| format!("{} is not present", ato_host_facts::LSOF_PATH))?;
+    let output = std::process::Command::new(lsof)
+        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
+        .output()
+        .map_err(|error| format!("could not run lsof for port {port}: {error}"))?;
+    // lsof exits 1 with no output when nothing listens; any other failure is an
+    // error this Run must not read as "no owner".
+    if !output.status.success() && output.stdout.is_empty() {
+        return Ok(Vec::new());
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| {
+            line.trim()
+                .parse::<u32>()
+                .map_err(|_| format!("lsof reported an unparsable pid: {line:?}"))
+        })
+        .collect()
+}
+
+/// Prove every declared Port's listener is inside the Run's process group.
+///
+/// Readiness alone only proves *something* accepts on the Port. A listener
+/// started by another process would make K look satisfied without the Run
+/// having served it, so the owner is resolved by the OS and compared with the
+/// group this Run started.
+fn verify_port_ownership(
+    ports: &[crate::ValidatedNativePort],
+    owned_process_group: i32,
+) -> Result<(), String> {
+    for port in ports {
+        let pids = listening_pids(port.guest_port)
+            .map_err(|detail| format!("port ownership could not be proven: {detail}"))?;
+        if pids.is_empty() {
+            return Err(format!(
+                "no listener on 127.0.0.1:{} belongs to a process",
+                port.guest_port
+            ));
+        }
+        let mut owned = false;
+        let mut observed = Vec::new();
+        for pid in pids {
+            let group = process_group_of(pid)
+                .map_err(|detail| format!("port ownership could not be proven: {detail}"))?;
+            observed.push((pid, group));
+            if group == owned_process_group {
+                owned = true;
+                break;
+            }
+        }
+        if !owned {
+            return Err(format!(
+                "the listener on 127.0.0.1:{} is not in the Run's process group {owned_process_group} \
+                 (observed pid/process-group pairs: {observed:?})",
+                port.guest_port
+            ));
         }
     }
     Ok(())
@@ -555,7 +677,29 @@ pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure
     }
     let pids = group.pids();
     let pid = pids.first().map(|(_, pid)| *pid);
-    let process_group = pid;
+    // Readiness only proves something accepts. Prove it is this Run's own
+    // process group before any observation can be taken.
+    let owned_process_group = match pid {
+        Some(pid) => process_group_of(pid).unwrap_or(pid as i32),
+        None => 0,
+    };
+    if let Err(detail) = verify_port_ownership(request.ports, owned_process_group) {
+        let stop = group.stop();
+        let error = match stop {
+            Ok(()) => anyhow::Error::new(NativeRefusal {
+                code: "native_port_owner_mismatch",
+                detail,
+            }),
+            Err(stop) => anyhow::Error::new(NativeRefusal {
+                code: "native_port_owner_mismatch",
+                detail: format!(
+                    "{detail}; additionally the process group was not fully stopped: {stop:#}"
+                ),
+            }),
+        };
+        return Err(launch_failure(error, &owned));
+    }
+    let process_group = u32::try_from(owned_process_group).ok();
     let endpoints = request
         .ports
         .iter()
@@ -1009,19 +1153,30 @@ time.sleep(0.3)
         assert!(wait_for_ports_with_timeout(&ports, Duration::from_secs(2)).is_ok());
         drop(listener);
         drop(second_listener);
-        // A port nobody listens on: bind once to learn a number, then release
-        // it immediately before asking the readiness probe to wait on it.
-        let silent = {
-            let guard = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-            let port = guard.local_addr().unwrap().port();
-            drop(guard);
-            port
-        };
-        let ports = vec![crate::ValidatedNativePort {
-            id: "app.http".to_owned(),
-            guest_port: silent,
-        }];
-        let error = wait_for_ports_with_timeout(&ports, Duration::from_millis(150)).unwrap_err();
+        // A port nobody listens on. Selecting one means binding and releasing
+        // it, so another concurrent test could take it in between: retry with a
+        // fresh port instead of treating that as the behaviour under test.
+        let mut refusal = None;
+        for _ in 0..16 {
+            let silent = {
+                let guard = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+                let port = guard.local_addr().unwrap().port();
+                drop(guard);
+                port
+            };
+            let ports = vec![crate::ValidatedNativePort {
+                id: "app.http".to_owned(),
+                guest_port: silent,
+            }];
+            match wait_for_ports_with_timeout(&ports, Duration::from_millis(60)) {
+                Ok(()) => continue,
+                Err(error) => {
+                    refusal = Some(error);
+                    break;
+                }
+            }
+        }
+        let error = refusal.expect("a silent port must not become ready");
         assert!(error.contains("did not accept TCP"), "{error}");
     }
 
@@ -1083,6 +1238,27 @@ time.sleep(0.3)
         assert!(plan.inbound_ports.is_empty());
     }
 
+    /// A tar.gz artifact with one executable entry and optional data files.
+    fn tiny_artifact(entry: &str, entry_bytes: &[u8], extra: &[(&str, &[u8])]) -> Vec<u8> {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+        let mut append = |path: &str, bytes: &[u8], mode: u32| {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(mode);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, path, std::io::Cursor::new(bytes.to_vec()))
+                .unwrap();
+        };
+        append(entry, entry_bytes, 0o755);
+        for (path, bytes) in extra {
+            append(path, bytes, 0o644);
+        }
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
     /// The whole adapter path: extract → signature verdict → Seatbelt →
     /// launch → readiness → stop/reap. It runs only where a profile can
     /// actually be applied; elsewhere the same measured fact must refuse
@@ -1134,23 +1310,11 @@ time.sleep(0.3)
         // A tiny artifact: a wrapper that serves its own proof document on the
         // declared Port, exactly the shape the fixture uses.
         let wrapper = b"#!/bin/sh\nexec python3 -m http.server \"$ATO_NATIVE_PORT\" --bind 127.0.0.1 --directory \"$(dirname \"$0\")\"\n";
-        let proof = b"native-desktop-proof\n";
-        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-        let mut builder = tar::Builder::new(encoder);
-        for (path, bytes, mode) in [
-            ("app/run.sh", wrapper.as_slice(), 0o755u32),
-            ("app/proof.txt", proof.as_slice(), 0o644u32),
-        ] {
-            let mut header = tar::Header::new_gnu();
-            header.set_size(bytes.len() as u64);
-            header.set_mode(mode);
-            header.set_entry_type(tar::EntryType::Regular);
-            header.set_cksum();
-            builder
-                .append_data(&mut header, path, std::io::Cursor::new(bytes))
-                .unwrap();
-        }
-        let artifact = builder.into_inner().unwrap().finish().unwrap();
+        let artifact = tiny_artifact(
+            "app/run.sh",
+            wrapper,
+            &[("app/proof.txt", b"native-desktop-proof\n")],
+        );
 
         let scratch = tempfile::tempdir().unwrap();
         let runtime_root = scratch.path().join("run");
@@ -1258,5 +1422,148 @@ time.sleep(0.3)
         stream.read_to_string(&mut response).ok()?;
         let (_, body) = response.split_once("\r\n\r\n")?;
         Some(body.to_owned())
+    }
+
+    #[test]
+    fn a_declared_port_that_is_already_bound_is_refused_before_launch() {
+        // A listener that would happily serve the expected bytes: the Run must
+        // not attach to it, and must not let it stand in for its own app.
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_thread = stop.clone();
+        let serving = std::thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            while !stop_thread.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        use std::io::Write;
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\nnative-desktop-proof\n"
+                        );
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let ports = vec![crate::ValidatedNativePort {
+            id: "app.http".to_owned(),
+            guest_port: port,
+        }];
+        let refusal = ensure_ports_free(&ports).unwrap_err();
+        assert_eq!(refusal.code, "native_port_in_use");
+
+        // The real admission path refuses too. `prepare` runs before any
+        // realization, so a refused Run produces no receipt and nothing is
+        // handed to the verifier.
+        let scratch = tempfile::tempdir().unwrap();
+        let runtime_root = scratch.path().join("run");
+        fs::create_dir_all(&runtime_root).unwrap();
+        let workspace = scratch.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let artifact = tiny_artifact("app/run.sh", b"#!/bin/sh\nexit 0\n", &[]);
+        let descriptor = ato_formation::native_desktop::NativeDescriptor {
+            os: ato_formation::native_desktop::NativeOs::Macos,
+            arch: ato_formation::native_desktop::NativeArch::Aarch64,
+            artifact: format!("sha256:{}", "a".repeat(64)),
+            entry: "app/run.sh".to_owned(),
+            format: ato_formation::native_desktop::NativeArtifactFormat::TarGz,
+            signature: NativeSignaturePolicy::RequireValidOrLocalOverride,
+            signature_target: ato_formation::native_desktop::NativeSignatureTarget::Executable,
+        };
+        let environment = BTreeMap::new();
+        let request = NativeStart {
+            artifact_bytes: artifact,
+            descriptor: &descriptor,
+            ports: &ports,
+            workspace: workspace.clone(),
+            runtime_root: &runtime_root,
+            state_paths: Vec::new(),
+            environment: &environment,
+            local_override: true,
+            declares_egress: false,
+        };
+        let facts = ato_host_facts::NativeFacts::probe();
+        let refusal = prepare(&request, &runtime_root.join("native")).unwrap_err();
+        if facts.sandbox_tool {
+            assert_eq!(refusal.code, "native_port_in_use");
+        } else {
+            // The host cannot apply the mandatory sandbox, which is refused
+            // first; either way nothing launches.
+            assert_eq!(refusal.code, "native_sandbox_unavailable");
+        }
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        serving.join().unwrap();
+        // The refusal happened before a candidate existed, so no receipt can be
+        // produced for this Run.
+        assert!(matches!(
+            refusal.code,
+            "native_port_in_use" | "native_sandbox_unavailable"
+        ));
+    }
+
+    fn ownership_tools_usable() -> bool {
+        let Some(ps) = ps_tool() else {
+            return false;
+        };
+        let Some(lsof) = lsof_tool() else {
+            return false;
+        };
+        let ps_ok = std::process::Command::new(ps)
+            .args(["-o", "pgid=", "-p", &std::process::id().to_string()])
+            .output()
+            .is_ok_and(|output| output.status.success());
+        let lsof_ok = std::process::Command::new(lsof).arg("-h").output().is_ok();
+        ps_ok && lsof_ok
+    }
+
+    #[test]
+    fn a_listener_must_belong_to_the_runs_own_process_group() {
+        let workspace = tempfile::tempdir().unwrap();
+        let pid_file = workspace.path().join("child.pid");
+        let (group, port, leader) = start_tiny_child(workspace.path(), &pid_file);
+        let ports = vec![crate::ValidatedNativePort {
+            id: "app.http".to_owned(),
+            guest_port: port,
+        }];
+        if !ownership_tools_usable() {
+            // The OS tools that prove ownership cannot run here (a harness may
+            // forbid ps/lsof). Ownership is then unprovable, and the Adapter
+            // must fail closed rather than accept any listener.
+            let error = verify_port_ownership(&ports, 1).unwrap_err();
+            assert!(error.contains("could not be proven"), "{error}");
+            group.stop().expect("the tiny group stops");
+            return;
+        }
+        let owned = process_group_of(leader).expect("the leader has a process group");
+        verify_port_ownership(&ports, owned).expect("the Run's own listener is proven");
+
+        let error = verify_port_ownership(&ports, owned + 1).unwrap_err();
+        assert!(error.contains("not in the Run's process group"), "{error}");
+
+        // A Port with no listener at all is not an owned endpoint either.
+        let silent = {
+            let guard = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let port = guard.local_addr().unwrap().port();
+            drop(guard);
+            port
+        };
+        let error = verify_port_ownership(
+            &[crate::ValidatedNativePort {
+                id: "admin.http".to_owned(),
+                guest_port: silent,
+            }],
+            owned,
+        )
+        .unwrap_err();
+        assert!(error.contains("no listener"), "{error}");
+
+        group.stop().expect("the tiny group stops");
     }
 }
