@@ -13,7 +13,7 @@ mod mcp_stdio;
 mod model_cache;
 mod object_transport;
 mod portable_dependency;
-mod workspace;
+pub mod workspace;
 pub mod zip_store;
 
 pub mod activity_client;
