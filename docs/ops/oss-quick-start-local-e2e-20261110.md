@@ -78,3 +78,19 @@ PASS
 Both phases are far inside the 90-second basic budget; the remaining budget
 question is the one-time install and sample acquisition on each host, which the
 script reports separately via `--install-cmd`.
+
+## Linux x86_64 run (ubuntu-sugamo)
+
+- Host: `ubuntu-sugamo`, `x86_64`, Rust 1.96.0 installed with rustup (the
+  first-time developer step). Source built with
+  `cargo build --locked -p ato-cli` (debug), samples packed on the host with
+  the built CLI, then the acceptance script ran unchanged.
+- Result: **PASS**
+  - open **4,195 ms**
+  - resume **4,139 ms**
+  - total **8,334 ms** (excluding sample acquisition and install)
+- The install step here was the Rust toolchain + source build, not the published
+  release installer; the release install path (H1) is verified separately and
+  the 90-second acceptance still needs the packaged release on this host.
+- A cross-host continuation (checkpoint taken on macOS, resumed on Linux) has
+  not been run yet.
