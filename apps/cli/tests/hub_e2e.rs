@@ -230,6 +230,25 @@ fn pull_with_token(command: &mut AssertCommand, link: &str, output: &Path, token
         .expect("ato hub pull runs")
 }
 
+fn pull_with_env_token(
+    command: &mut AssertCommand,
+    link: &str,
+    output: &Path,
+    token: &str,
+    configured_hub: Option<&str>,
+) -> Output {
+    command
+        .args(["hub", "pull", link, "--allow-loopback-http", "--output"])
+        .arg(output);
+    if let Some(configured_hub) = configured_hub {
+        command.arg("--hub-url").arg(configured_hub);
+    }
+    command
+        .env("ATO_HUB_TOKEN", token)
+        .output()
+        .expect("ato hub pull runs")
+}
+
 fn link_from(output: &Output) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout);
     stdout
@@ -522,15 +541,106 @@ fn real_coordinator_authenticated_reads_accept_a_pull_token() {
     assert_success(&credentialed);
     assert_eq!(fs::read(&credentialed_output).unwrap(), original);
 
+    // The environment token is sent because the link's hub is the configured
+    // hub (`--hub-url` with a trailing slash, normalized).
     let env_output = directory.path().join("env-token.capsule");
-    let env_pulled = ato()
+    let env_pulled = pull_with_env_token(
+        &mut ato(),
+        &link,
+        &env_output,
+        PUT_TOKEN,
+        Some(&format!("{}/", hub.base_url())),
+    );
+    assert_success(&env_pulled);
+    assert_eq!(fs::read(&env_output).unwrap(), original);
+}
+
+#[test]
+fn real_coordinator_withholds_the_env_token_from_a_foreign_hub() {
+    let directory = tempfile::tempdir().unwrap();
+    let capsule = v3_bundle(directory.path());
+    let original = fs::read(&capsule).unwrap();
+    // Reads need the upload token, so a withheld token fails closed (401).
+    let hub = RealHub::start(Some(PUT_TOKEN), Some(DELETE_TOKEN), false);
+    let pushed = push(&mut ato(), &capsule, &hub, Some(PUT_TOKEN));
+    assert_success(&pushed);
+    let link = link_from(&pushed);
+
+    // 1. A configured hub that is NOT the link's hub: the env token is withheld.
+    let foreign_output = directory.path().join("foreign.capsule");
+    let foreign = pull_with_env_token(
+        &mut ato(),
+        &link,
+        &foreign_output,
+        PUT_TOKEN,
+        Some("https://other.example"),
+    );
+    assert!(!foreign.status.success());
+    let message = stderr(&foreign);
+    assert!(
+        message.contains("--token explicitly"),
+        "the credential rule must be named: {message}"
+    );
+    assert!(
+        !message.contains(PUT_TOKEN),
+        "a withheld environment token must never be echoed: {message}"
+    );
+    assert!(!foreign_output.exists());
+
+    // 2. No configured hub at all: the env token is withheld as well.
+    let unconfigured_output = directory.path().join("unconfigured.capsule");
+    let unconfigured =
+        pull_with_env_token(&mut ato(), &link, &unconfigured_output, PUT_TOKEN, None);
+    assert!(!unconfigured.status.success());
+    assert!(
+        stderr(&unconfigured).contains("--token explicitly"),
+        "{}",
+        stderr(&unconfigured)
+    );
+    assert!(!stderr(&unconfigured).contains(PUT_TOKEN));
+    assert!(!unconfigured_output.exists());
+
+    // 3. A different path on the same origin is a different hub.
+    let path_output = directory.path().join("other-path.capsule");
+    let path_mismatch = pull_with_env_token(
+        &mut ato(),
+        &link,
+        &path_output,
+        PUT_TOKEN,
+        Some(&format!("{}/other", hub.base_url())),
+    );
+    assert!(!path_mismatch.status.success());
+    assert!(
+        stderr(&path_mismatch).contains("--token explicitly"),
+        "{}",
+        stderr(&path_mismatch)
+    );
+    assert!(!path_output.exists());
+
+    // 4. An explicit --token is the user's choice for this link: it is sent
+    //    even when the configured hub differs.
+    let explicit_output = directory.path().join("explicit.capsule");
+    let explicit = ato()
+        .args(["hub", "pull", &link, "--allow-loopback-http"])
+        .args(["--token", PUT_TOKEN])
+        .args(["--hub-url", "https://other.example", "--output"])
+        .arg(&explicit_output)
+        .output()
+        .expect("ato hub pull runs");
+    assert_success(&explicit);
+    assert_eq!(fs::read(&explicit_output).unwrap(), original);
+
+    // 5. ATO_HUB_URL is the configured hub, so the env token is sent.
+    let env_url_output = directory.path().join("env-url.capsule");
+    let env_url = ato()
         .args(["hub", "pull", &link, "--allow-loopback-http", "--output"])
-        .arg(&env_output)
+        .arg(&env_url_output)
+        .env("ATO_HUB_URL", hub.base_url())
         .env("ATO_HUB_TOKEN", PUT_TOKEN)
         .output()
         .expect("ato hub pull runs");
-    assert_success(&env_pulled);
-    assert_eq!(fs::read(&env_output).unwrap(), original);
+    assert_success(&env_url);
+    assert_eq!(fs::read(&env_url_output).unwrap(), original);
 }
 
 #[test]

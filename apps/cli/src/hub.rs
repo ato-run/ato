@@ -23,10 +23,26 @@
 //! The link key lives only in the URL fragment, which is never part of an HTTP
 //! request target. Errors never include key material.
 //!
+//! ## Credentials
+//!
 //! Both directions accept an optional bearer credential (`--token` or
-//! `ATO_HUB_TOKEN`). Uploads require it when the coordinator uses token auth.
-//! Reads are anonymous by default; the credential is also sent on a pull so a
-//! coordinator started with `--allow-anonymous-read false` remains pull-able.
+//! `ATO_HUB_TOKEN`). Reads are anonymous by default; a pull credential is sent
+//! so a coordinator started with `--allow-anonymous-read false` remains
+//! pull-able. Uploads go to the hub named by `--hub-url`, so the upload token
+//! belongs to that explicit target.
+//!
+//! A shared link, however, can name any host. Therefore:
+//!
+//! - an explicit `--token` is always sent to the link's hub (the user chose
+//!   that credential for that link);
+//! - `ATO_HUB_TOKEN` is sent **only** when the link's hub matches the
+//!   configured hub (`--hub-url` or `ATO_HUB_URL`), compared as scheme, host,
+//!   explicit non-default port, and base path after normalization (casefolded
+//!   host, trailing slashes removed). A different path on the same origin is a
+//!   different hub. If no hub is configured or it differs, the environment
+//!   token is withheld — never silently sent to a foreign host — and an
+//!   authentication failure names that rule and asks for `--token`;
+//! - with neither, the download is anonymous.
 
 use std::fs;
 use std::io::{self, Read};
@@ -94,8 +110,14 @@ pub struct PullArgs {
     /// Overwrite an existing destination file.
     #[arg(long)]
     pub force: bool,
-    /// Bearer token for coordinators that require authenticated reads. Falls
-    /// back to `ATO_HUB_TOKEN`. Omitted means an anonymous download.
+    /// Configured hub base URL (origin plus optional path base). Falls back to
+    /// `ATO_HUB_URL`. Used only to decide whether `ATO_HUB_TOKEN` may be sent
+    /// to the link's hub; the link itself names the download target.
+    #[arg(long)]
+    pub hub_url: Option<String>,
+    /// Bearer token for coordinators that require authenticated reads. Sent
+    /// only when given explicitly; otherwise `ATO_HUB_TOKEN` is sent only to
+    /// the configured hub. Omitted means an anonymous download.
     #[arg(long)]
     pub token: Option<String>,
     /// Permit plain HTTP to a literal loopback host (self-hosted coordinator).
@@ -216,10 +238,32 @@ fn pull(args: PullArgs) -> Result<()> {
         bail!("the output directory {} does not exist", parent.display());
     }
 
-    let token = args
-        .token
-        .or_else(|| std::env::var(HUB_TOKEN_ENV).ok())
+    // The link names the download target, but it can name any host: never send
+    // the environment token there unless it is the configured hub.
+    let link_identity = hub_base_identity(&base)?;
+    let configured_hub = args
+        .hub_url
+        .or_else(|| std::env::var(HUB_URL_ENV).ok())
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            hub_base_identity(&value)
+                .with_context(|| format!("invalid configured hub base URL `{value}`"))
+        })
+        .transpose()?;
+    let explicit_token = args.token.filter(|value| !value.is_empty());
+    let env_token = std::env::var(HUB_TOKEN_ENV)
+        .ok()
         .filter(|value| !value.is_empty());
+    let (token, env_token_withheld) = match explicit_token {
+        Some(token) => (Some(token), false),
+        None => match env_token {
+            Some(token) if configured_hub.as_deref() == Some(link_identity.as_str()) => {
+                (Some(token), false)
+            }
+            Some(_) => (None, true),
+            None => (None, false),
+        },
+    };
 
     let client = hub_client()?;
     let url = object_url(&base, &link.object_id);
@@ -241,8 +285,13 @@ fn pull(args: PullArgs) -> Result<()> {
         );
     }
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        if env_token_withheld {
+            bail!(
+                "hub refused the download ({status}); {HUB_TOKEN_ENV} is only sent to the hub configured with --hub-url or {HUB_URL_ENV}, and this link names {base}; pass --token explicitly to authenticate to this hub"
+            );
+        }
         bail!(
-            "hub refused the download ({status}); pass --token or set {HUB_TOKEN_ENV} if this coordinator requires authenticated reads"
+            "hub refused the download ({status}); pass --token or set {HUB_TOKEN_ENV} with a matching --hub-url to authenticate to this coordinator"
         );
     }
     ensure!(status.is_success(), "hub download failed ({status})");
@@ -483,5 +532,178 @@ fn sync_directory_best_effort(path: &Path) {
     // rename itself is atomic; failure to sync the directory is not reported.
     if let Ok(directory) = fs::File::open(path) {
         let _ = directory.sync_all();
+    }
+}
+
+/// Identity of a hub base used to decide whether `ATO_HUB_TOKEN` may be sent.
+///
+/// Compares scheme, host, an explicit non-default port, and base path after
+/// normalization: scheme/host casefolded, default ports elided, trailing
+/// slashes removed. Query and fragment are already rejected by the link parser
+/// and by the configured-hub validation, so they never participate.
+///
+/// A different path on the same origin is a different hub, and the token is
+/// withheld for it.
+fn hub_base_identity(base: &str) -> Result<String> {
+    let base = base.trim().trim_end_matches('/');
+    let (scheme, rest) = base
+        .split_once("://")
+        .ok_or_else(|| anyhow::anyhow!("the hub base URL must be an absolute http(s) URL"))?;
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        bail!("unsupported hub URL scheme `{scheme}`; http(s) is required");
+    }
+    if rest.is_empty() {
+        bail!("the hub base URL has no host");
+    }
+    let (authority, path) = match rest.split_once('/') {
+        Some((authority, path)) => (authority, path),
+        None => (rest, ""),
+    };
+    if authority.is_empty() {
+        bail!("the hub base URL has no host");
+    }
+    if authority.contains('@') {
+        bail!("the hub base URL must not carry userinfo");
+    }
+    let (host, port) = split_authority(authority)?;
+    let port = port.filter(|port| default_port(&scheme) != Some(*port));
+    let path = path.trim_matches('/');
+
+    let mut identity = format!("{scheme}://{}", host.to_ascii_lowercase());
+    if let Some(port) = port {
+        identity.push(':');
+        identity.push_str(&port.to_string());
+    }
+    if !path.is_empty() {
+        identity.push('/');
+        identity.push_str(path);
+    }
+    Ok(identity)
+}
+
+fn split_authority(authority: &str) -> Result<(&str, Option<u16>)> {
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (inside, remainder) = rest
+            .split_once(']')
+            .ok_or_else(|| anyhow::anyhow!("the hub base URL has an invalid IPv6 host"))?;
+        let host = &authority[..inside.len() + 2];
+        if remainder.is_empty() {
+            return Ok((host, None));
+        }
+        let Some(port) = remainder.strip_prefix(':') else {
+            bail!("the hub base URL has an invalid host");
+        };
+        return Ok((host, Some(parse_hub_port(port)?)));
+    }
+    // An unbracketed IPv6 loopback literal has no port.
+    if authority == "::1" {
+        return Ok((authority, None));
+    }
+    if let Some((host, port)) = authority.rsplit_once(':') {
+        if port.is_empty() {
+            bail!("the hub base URL has an invalid port");
+        }
+        if port.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Ok((host, Some(parse_hub_port(port)?)));
+        }
+        // A non-bracketed authority with a non-numeric tail is not a valid
+        // host:port form.
+        bail!("the hub base URL has an invalid port");
+    }
+    Ok((authority, None))
+}
+
+fn parse_hub_port(text: &str) -> Result<u16> {
+    text.parse()
+        .map_err(|_| anyhow::anyhow!("the hub base URL has an invalid port"))
+}
+
+fn default_port(scheme: &str) -> Option<u16> {
+    match scheme {
+        "http" => Some(80),
+        "https" => Some(443),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hub_base_identity_normalizes_scheme_host_port_and_trailing_slashes() {
+        assert_eq!(
+            hub_base_identity("https://hub.example").unwrap(),
+            "https://hub.example"
+        );
+        assert_eq!(
+            hub_base_identity("https://hub.example/").unwrap(),
+            "https://hub.example"
+        );
+        assert_eq!(
+            hub_base_identity("https://HUB.Example:443").unwrap(),
+            "https://hub.example"
+        );
+        assert_eq!(
+            hub_base_identity("https://hub.example/base/").unwrap(),
+            "https://hub.example/base"
+        );
+        assert_eq!(
+            hub_base_identity("http://127.0.0.1:8080").unwrap(),
+            "http://127.0.0.1:8080"
+        );
+        assert_eq!(
+            hub_base_identity("http://127.0.0.1:80").unwrap(),
+            "http://127.0.0.1"
+        );
+        assert_eq!(
+            hub_base_identity("https://[::1]:8443").unwrap(),
+            "https://[::1]:8443"
+        );
+    }
+
+    #[test]
+    fn a_different_host_or_base_path_is_a_different_hub() {
+        let configured = hub_base_identity("https://hub.example/base").unwrap();
+        assert_ne!(
+            configured,
+            hub_base_identity("https://hub.example/other").unwrap()
+        );
+        assert_ne!(
+            configured,
+            hub_base_identity("https://hub.example").unwrap()
+        );
+        assert_ne!(
+            configured,
+            hub_base_identity("http://hub.example/base").unwrap()
+        );
+        assert_ne!(
+            configured,
+            hub_base_identity("https://other.example/base").unwrap()
+        );
+        assert_eq!(
+            configured,
+            hub_base_identity("https://HUB.EXAMPLE:443/base/").unwrap()
+        );
+    }
+
+    #[test]
+    fn hub_base_identity_rejects_malformed_values() {
+        for value in [
+            "",
+            "hub.example",
+            "ftp://hub.example",
+            "https://",
+            "https://user:pw@hub.example",
+            "https://hub.example:",
+            "https://hub.example:notaport",
+            "https://[::1",
+        ] {
+            assert!(
+                hub_base_identity(value).is_err(),
+                "`{value}` must be rejected"
+            );
+        }
     }
 }
