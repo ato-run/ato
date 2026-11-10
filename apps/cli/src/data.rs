@@ -86,6 +86,20 @@ pub enum ResourceCommand {
         #[command(flatten)]
         coordinator: CoordinatorArgs,
     },
+    /// Export every Resource as one saved-state file.
+    ExportSet {
+        #[arg(long)]
+        out: PathBuf,
+        #[command(flatten)]
+        coordinator: CoordinatorArgs,
+    },
+    /// Import a saved-state file, creating a NEW Resource per entry.
+    ImportSet {
+        #[arg(long)]
+        file: PathBuf,
+        #[command(flatten)]
+        coordinator: CoordinatorArgs,
+    },
     /// Import an exported document as a NEW Resource.
     Import {
         #[arg(long)]
@@ -229,6 +243,12 @@ pub fn run(args: DataArgs) -> Result<()> {
                 coordinator,
             } => resource_export(&coordinator, &resource_id, &out),
             ResourceCommand::Import { file, coordinator } => resource_import(&coordinator, &file),
+            ResourceCommand::ExportSet { out, coordinator } => {
+                resource_export_set(&coordinator, &out)
+            }
+            ResourceCommand::ImportSet { file, coordinator } => {
+                resource_import_set(&coordinator, &file)
+            }
             ResourceCommand::Create {
                 protocol,
                 display_name,
@@ -493,6 +513,36 @@ fn inspect(coordinator: &CoordinatorArgs, resource_id: &str) -> Result<()> {
 }
 
 const EXPORT_SCHEMA: &str = "ato.data.export/v1";
+const EXPORT_SET_SCHEMA: &str = "ato.data.export-set/v1";
+
+/// Validate one export envelope: schema, required fields and the digest of the
+/// document it carries. Nothing is sent anywhere until this passes.
+fn verify_export(entry: &Value) -> Result<(String, Value)> {
+    if entry.get("schema").and_then(Value::as_str) != Some(EXPORT_SCHEMA) {
+        bail!("export schema must be {EXPORT_SCHEMA}");
+    }
+    let protocol = entry
+        .get("protocol")
+        .and_then(Value::as_str)
+        .context("export has no protocol")?
+        .to_owned();
+    let document = entry
+        .get("document")
+        .cloned()
+        .context("export has no document")?;
+    let expected = entry
+        .get("content_digest")
+        .and_then(Value::as_str)
+        .context("export has no content_digest")?;
+    let actual = format!(
+        "sha256:{:x}",
+        Sha256::digest(serde_json::to_string(&document)?.as_bytes())
+    );
+    if actual != expected {
+        bail!("export_digest_mismatch: envelope says {expected}, document hashes to {actual}");
+    }
+    Ok((protocol, document))
+}
 
 fn resource_export(coordinator: &CoordinatorArgs, resource_id: &str, out: &PathBuf) -> Result<()> {
     // The authority owns the envelope: it writes the digest next to the
@@ -534,31 +584,7 @@ fn resource_import(coordinator: &CoordinatorArgs, file: &PathBuf) -> Result<()> 
     let bytes = std::fs::read(file).with_context(|| format!("read export {}", file.display()))?;
     let export: Value = serde_json::from_slice(&bytes)
         .with_context(|| format!("parse export {}", file.display()))?;
-    if export.get("schema").and_then(Value::as_str) != Some(EXPORT_SCHEMA) {
-        bail!("export schema must be {EXPORT_SCHEMA}");
-    }
-    let protocol = export
-        .get("protocol")
-        .and_then(Value::as_str)
-        .context("export has no protocol")?;
-    let document = export
-        .get("document")
-        .cloned()
-        .context("export has no document")?;
-    // Integrity: the envelope records the digest of the document it carries.
-    // Recompute it before sending anything; a tampered or truncated export is
-    // refused instead of imported under a wrong identity.
-    let expected = export
-        .get("content_digest")
-        .and_then(Value::as_str)
-        .context("export has no content_digest")?;
-    let actual = format!(
-        "sha256:{:x}",
-        Sha256::digest(serde_json::to_string(&document)?.as_bytes())
-    );
-    if actual != expected {
-        bail!("export_digest_mismatch: envelope says {expected}, document hashes to {actual}");
-    }
+    let (protocol, document) = verify_export(&export)?;
     let created = request(
         coordinator,
         reqwest::Method::POST,
@@ -580,6 +606,69 @@ fn resource_import(coordinator: &CoordinatorArgs, file: &PathBuf) -> Result<()> 
             .and_then(Value::as_i64)
             .unwrap_or_default()
     );
+    Ok(())
+}
+fn resource_export_set(coordinator: &CoordinatorArgs, out: &PathBuf) -> Result<()> {
+    let export = request(
+        coordinator,
+        reqwest::Method::GET,
+        "/v1/data-resources/export",
+        None,
+    )?;
+    if export.get("schema").and_then(Value::as_str) != Some(EXPORT_SET_SCHEMA) {
+        bail!("Coordinator returned an unexpected export-set schema");
+    }
+    let count = export
+        .get("resources")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or_default();
+    std::fs::write(out, serde_json::to_vec_pretty(&export)?)
+        .with_context(|| format!("write export set {}", out.display()))?;
+    println!("exported {} resources -> {}", count, out.display());
+    Ok(())
+}
+
+fn resource_import_set(coordinator: &CoordinatorArgs, file: &PathBuf) -> Result<()> {
+    let bytes = std::fs::read(file).with_context(|| format!("read export {}", file.display()))?;
+    let export: Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse export {}", file.display()))?;
+    if export.get("schema").and_then(Value::as_str) != Some(EXPORT_SET_SCHEMA) {
+        bail!("export schema must be {EXPORT_SET_SCHEMA}");
+    }
+    let entries = export
+        .get("resources")
+        .and_then(Value::as_array)
+        .context("export set has no resources")?;
+    // Verify every entry before creating anything, so a bad file cannot leave a
+    // half-imported saved state.
+    let mut verified = Vec::with_capacity(entries.len());
+    for entry in entries {
+        verified.push(verify_export(entry)?);
+    }
+    for (index, (protocol, document)) in verified.into_iter().enumerate() {
+        let created = request(
+            coordinator,
+            reqwest::Method::POST,
+            "/v1/data-resources",
+            Some(json!({
+                "protocol": protocol,
+                "display_name": entries[index].get("resource_id").and_then(Value::as_str),
+                "document": document,
+            })),
+        )?;
+        println!(
+            "imported as {} revision {}",
+            created
+                .get("resource_id")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+            created
+                .get("revision")
+                .and_then(Value::as_i64)
+                .unwrap_or_default()
+        );
+    }
     Ok(())
 }
 
