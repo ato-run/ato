@@ -61,8 +61,11 @@ fails the resume instead of silently starting empty.
 ## Continue on another computer
 
 Copy the capsules, `workspace.toml` and the checkpoint (including its
-`.state/` directory) to the other host and resume there. For live continuation
-between two machines, point both at one Coordinator:
+`.state/` directory) to the other host and resume there. The capsules are
+byte-identical across hosts, so a bundle built elsewhere does not need new
+digests; a checkpoint written on another machine resumes the same task and
+layout. For live continuation between two machines, point both at one
+Coordinator:
 
 ```sh
 ato workspace open workspace.toml --coordinator http://<coordinator>:8788 --token <token>
