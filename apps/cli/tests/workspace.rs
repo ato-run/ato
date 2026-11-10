@@ -248,3 +248,42 @@ fn checkpoint_capture_resume_round_trips_local_state() {
     let storage = board.server.local_storage().unwrap().unwrap();
     assert_eq!(storage.get("todos").map(String::as_str), Some("[1,2]"));
 }
+
+#[test]
+fn capture_reads_the_shell_view_state_from_its_state_bridge() {
+    let directory = tempfile::tempdir().unwrap();
+    let (file, _) = two_pane_workspace(directory.path());
+    let running = ato_cli::workspace::start(&file, None).expect("the workspace starts");
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let view = serde_json::json!({
+        "direction": "horizontal",
+        "split": [0.3, 0.7],
+        "active_pane": "calendar"
+    });
+    let body = serde_json::json!({
+        "local_storage": { "ato.workspace.view": view.to_string() }
+    });
+    let response = client
+        .post(format!(
+            "{}__ato/instance-state/local-storage",
+            running.shell_url
+        ))
+        .header("x-ato-state-token", running.shell_persistence_token())
+        .header("content-type", "application/json")
+        .body(body.to_string())
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let checkpoint = running.capture().expect("the workspace captures");
+    assert_eq!(checkpoint.view.split, vec![0.3, 0.7]);
+    assert_eq!(checkpoint.view.active_pane, "calendar");
+    let path = directory.path().join("checkpoint.toml");
+    ato_cli::workspace::write_checkpoint_atomic(&path, &checkpoint).unwrap();
+    let read = ato_cli::workspace::read_checkpoint(&path).unwrap();
+    assert_eq!(read.view.split, vec![0.3, 0.7]);
+}
