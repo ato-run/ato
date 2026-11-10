@@ -449,6 +449,114 @@ fn protocol_list_prints_the_registry_view() {
 }
 
 #[test]
+fn saved_state_export_and_import_round_trip() {
+    let set = r#"{"schema":"ato.data.export-set/v1","resources":[{"schema":"ato.data.export/v1","resource_id":"dres_1","protocol":"todo.board@1","revision":1,"content_digest":"sha256:c69a77cccb6699e6265e3d74409ad48bb3ac76bbbba1bdcce10fdad8bf8c36a1","document":{"tasks":{}}},{"schema":"ato.data.export/v1","resource_id":"dres_2","protocol":"todo.board@1","revision":2,"content_digest":"sha256:7bc5dfb0f7c8e326912b6c10a55446463d90d87b80719f7ebe74c194e1387c0c","document":{"tasks":{"t1":{"id":"t1"}}}}]}"#;
+    let (port, requests, handle) = capturing_stub(vec![(200, set)]);
+    let directory = tempfile::tempdir().unwrap();
+    let out = directory.path().join("saved-state.json");
+    let exported = ato()
+        .args([
+            "data",
+            "resource",
+            "export-set",
+            "--out",
+            out.to_str().unwrap(),
+            "--coordinator",
+            &format!("http://127.0.0.1:{port}"),
+            "--token",
+            "test-token",
+        ])
+        .output()
+        .expect("run ato data resource export-set");
+    handle.join().expect("stub");
+    assert!(exported.status.success(), "{exported:?}");
+    let request = requests.lock().unwrap()[0].clone();
+    assert!(request.contains("/v1/data-resources/export"), "{request}");
+    let written: serde_json::Value = serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
+    assert_eq!(written["schema"], "ato.data.export-set/v1");
+    assert_eq!(written["resources"].as_array().unwrap().len(), 2);
+
+    let (port, handle) = stub(vec![
+        (
+            201,
+            r#"{"resource_id":"dres_new_1","revision":1,"content_digest":"sha256:a"}"#,
+        ),
+        (
+            201,
+            r#"{"resource_id":"dres_new_2","revision":1,"content_digest":"sha256:b"}"#,
+        ),
+    ]);
+    let imported = ato()
+        .args([
+            "data",
+            "resource",
+            "import-set",
+            "--file",
+            out.to_str().unwrap(),
+            "--coordinator",
+            &format!("http://127.0.0.1:{port}"),
+            "--token",
+            "test-token",
+        ])
+        .output()
+        .expect("run ato data resource import-set");
+    handle.join().expect("stub");
+    assert!(imported.status.success(), "{imported:?}");
+    let stdout = String::from_utf8_lossy(&imported.stdout);
+    assert!(stdout.contains("dres_new_1"), "{stdout}");
+    assert!(stdout.contains("dres_new_2"), "{stdout}");
+}
+
+#[test]
+fn saved_state_import_refuses_a_tampered_entry_before_creating_anything() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("saved-state.json");
+    std::fs::write(
+        &file,
+        serde_json::json!({
+            "schema": "ato.data.export-set/v1",
+            "resources": [
+                {
+                    "schema": "ato.data.export/v1",
+                    "resource_id": "dres_1",
+                    "protocol": "todo.board@1",
+                    "revision": 1,
+                    "content_digest": "sha256:c69a77cccb6699e6265e3d74409ad48bb3ac76bbbba1bdcce10fdad8bf8c36a1",
+                    "document": {"tasks": {}}
+                },
+                {
+                    "schema": "ato.data.export/v1",
+                    "resource_id": "dres_2",
+                    "protocol": "todo.board@1",
+                    "revision": 2,
+                    "content_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "document": {"tasks": {"t1": {"id": "t1"}}}
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let output = ato()
+        .args([
+            "data",
+            "resource",
+            "import-set",
+            "--file",
+            file.to_str().unwrap(),
+            "--coordinator",
+            "http://127.0.0.1:1",
+            "--token",
+            "test-token",
+        ])
+        .output()
+        .expect("run ato data resource import-set");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("export_digest_mismatch"), "{stderr}");
+}
+
+#[test]
 fn resource_export_writes_the_document_with_its_digest() {
     let envelope = r#"{"schema":"ato.data.export/v1","resource_id":"dres_1","protocol":"todo.board@1","revision":2,"generation":0,"content_digest":"sha256:abc123","byte_size":17,"document":{"tasks":{"t1":{"id":"t1"}}}}"#;
     let (port, requests, handle) = capturing_stub(vec![(200, envelope)]);
