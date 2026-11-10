@@ -238,3 +238,13 @@ Bootstrap sequence per `ato workspace open --coordinator <url>`:
 Steps 3–4 must be safe to re-run: a second open reports `unchanged` rather than
 duplicating Resources or bindings. A failure in any step stops the open before
 the shell is exposed.
+
+## v0 scope: Static Web panes only
+
+The v0 shell materializes each pane's verified tree and serves it over HTTP, so
+`ato workspace open` accepts only panes whose selected Derivation is a Static
+Web route. A native or process-service pane now fails with a named reason
+instead of being served incorrectly; hosting those panes needs the native
+surface host (or a per-pane process supervisor) and is the D6 follow-up. The
+workspace model itself does not change: the pane is still a Capsule with its
+own K/D, and the shell still only orchestrates.
