@@ -36,6 +36,10 @@ Two pieces:
 `acceptance-median.sh --runs 3 --ato … --capsules …` repeats the whole check and
 prints the median phase times (single runs vary with machine load).
 
+`failure-paths.sh --ato … --capsules …` checks the negative paths: an
+unwritable checkpoint keeps the workspace running with an `error:` status, and a
+busy local-data port names `--local-data-port`.
+
 Measured on macOS arm64 and Linux x86_64 (see
 `docs/ops/oss-quick-start-local-e2e-20261110.md`): open/resume are a few
 seconds each. The 90-second budget still includes the one-time CLI install and
