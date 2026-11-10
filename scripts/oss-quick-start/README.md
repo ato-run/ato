@@ -33,6 +33,9 @@ Two pieces:
    restores the data and the saved split. It prints per-phase times and exits
    non-zero on the first failed assertion.
 
+`acceptance-median.sh --runs 3 --ato … --capsules …` repeats the whole check and
+prints the median phase times (single runs vary with machine load).
+
 Measured on macOS arm64 and Linux x86_64 (see
 `docs/ops/oss-quick-start-local-e2e-20261110.md`): open/resume are a few
 seconds each. The 90-second budget still includes the one-time CLI install and

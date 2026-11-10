@@ -115,3 +115,23 @@ ato workspace open ws3.toml --checkpoint ws3-ck.toml \
 This is the **same-user continuation** path: the receiving host imports the
 DataResource documents into its own local Coordinator. Writer-authority
 hand-over between two live Coordinators (D5) is not exercised by this run.
+
+## Stable timing (median of three runs)
+
+Single runs vary with machine load (4.1 s to 13.4 s observed for the same
+work). `scripts/oss-quick-start/acceptance-median.sh --runs 3` runs the whole
+acceptance several times and reports the median:
+
+```text
+run 1: open 4198ms resume 4173ms
+run 2: open 4106ms resume 4002ms
+run 3: open 3357ms resume 3732ms
+
+PASS
+  open median:   4106ms
+  resume median: 4002ms
+```
+
+So the workspace lifecycle costs about **4 seconds** per phase on macOS arm64
+(debug binary, prebuilt capsules); the earlier 13 s observation was one loaded
+run, not a regression.
