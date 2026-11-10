@@ -109,6 +109,13 @@ CREATE TABLE IF NOT EXISTS protocol_operations (
   expose_mcp INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (protocol_ref, operation)
 );
+-- A registered operation is immutable: its definition, handler and publisher
+-- cannot be swapped after the fact. Exposure (MCP visibility) is the only
+-- mutable column.
+CREATE TRIGGER IF NOT EXISTS protocol_operation_immutable
+BEFORE UPDATE OF protocol_ref, operation, semantics, access, implementation_digest,
+  module_source, module_export, publisher ON protocol_operations
+BEGIN SELECT RAISE(ABORT, 'protocol_operation_immutable'); END;
 CREATE TRIGGER IF NOT EXISTS protocol_operation_claim_guard
 BEFORE INSERT ON protocol_operations
 WHEN EXISTS (
@@ -1630,5 +1637,36 @@ export function createTask({ arguments: args, state }) {
             coordinator.set_operation_exposure("todo.board@1", "missing", true),
             Err(CoordinatorError::NotFound)
         ));
+    }
+
+    #[test]
+    fn a_registered_operation_cannot_be_swapped() {
+        let mut coordinator = Coordinator::open_in_memory().unwrap();
+        coordinator
+            .register_handler_operation(
+                "todo.board@1",
+                "todo_create",
+                "evolution",
+                "read_write",
+                HANDLER_MODULE,
+                "createTask",
+                "alice/app",
+            )
+            .unwrap();
+        let swap_digest = coordinator.conn.execute(
+            "UPDATE protocol_operations SET implementation_digest='sha256:other' WHERE protocol_ref='todo.board@1' AND operation='todo_create'",
+            [],
+        );
+        assert!(swap_digest.is_err(), "digest swap must be refused");
+        let swap_module = coordinator.conn.execute(
+            "UPDATE protocol_operations SET module_source='export function x(){}' WHERE protocol_ref='todo.board@1' AND operation='todo_create'",
+            [],
+        );
+        assert!(swap_module.is_err(), "handler swap must be refused");
+        // Exposure is the one mutable column.
+        coordinator
+            .set_operation_exposure("todo.board@1", "todo_create", true)
+            .unwrap();
+        assert_eq!(coordinator.mcp_tools().unwrap().len(), 1);
     }
 }
