@@ -179,9 +179,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ato_coordinator::relay::RelayStep::Idle => {
                         std::thread::sleep(std::time::Duration::from_millis(500))
                     }
-                    // An unreachable relay executes nothing; wait and retry.
+                    // An unreachable relay executes nothing; back off and retry.
                     ato_coordinator::relay::RelayStep::Unavailable => {
-                        std::thread::sleep(std::time::Duration::from_secs(1))
+                        std::thread::sleep(ato_coordinator::relay::backoff_delay(
+                            relay_loop.report().consecutive_failures,
+                        ))
                     }
                     ato_coordinator::relay::RelayStep::Answered { .. } => {}
                 }
