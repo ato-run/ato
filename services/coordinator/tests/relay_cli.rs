@@ -128,3 +128,48 @@ fn the_relay_command_answers_and_posts_the_reply() {
         replies[0]
     );
 }
+
+#[test]
+fn a_one_shot_run_fails_when_the_relay_is_unreachable() {
+    // Bind then drop: the port is closed, so the poll cannot connect.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("coordinator.sqlite");
+    let binary = env!("CARGO_BIN_EXE_ato-coordinator");
+    assert!(
+        Command::new(binary)
+            .args(["init", "--db"])
+            .arg(&database)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let output = Command::new(binary)
+        .arg("relay")
+        .arg("--db")
+        .arg(&database)
+        .args([
+            "--relay-url",
+            &format!("http://127.0.0.1:{port}"),
+            "--origin-id",
+            "relay-cli",
+            "--origin-epoch",
+            "7",
+            "--token",
+            "cli-token",
+            "--relay-token",
+            "origin-token",
+            "--once",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "a failed poll must not exit 0");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("relay_unavailable"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
