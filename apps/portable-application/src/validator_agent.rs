@@ -1137,6 +1137,7 @@ fn validated_routes(
                     PortableRealizationKind::OciContainer => "oci",
                     PortableRealizationKind::OciServiceGroup => "oci_service_group",
                     PortableRealizationKind::ProcessServiceGroup => "process_service_group",
+                    PortableRealizationKind::NativeDesktop => "native_desktop",
                 },
                 runtimes: route.derivation.runtimes.clone(),
                 argv: step.argv.clone(),

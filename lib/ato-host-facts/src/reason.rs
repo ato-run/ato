@@ -45,6 +45,22 @@ pub enum ReasonCode {
     /// The daemon is local but its file sharing does not include the path this
     /// Run needs to bind.
     DockerWorkspaceNotShared,
+    // ── native desktop routes ─────────────────────────────────────────
+    /// The selected native Derivation is built for another OS or architecture.
+    NativePlatformMismatch,
+    /// The native route's mandatory filesystem/state/egress/lifecycle policy
+    /// cannot be enforced on this host, so it must not launch.
+    NativeSandboxUnavailable,
+    /// A native route's signature policy cannot be enforced: the tooling that
+    /// produces the verdict is absent.
+    NativeSignatureVerificationUnavailable,
+    /// This host's platform has no native desktop Adapter that can enforce the
+    /// mandatory policies yet.
+    NativeAdapterUnsupported,
+    /// Windows native routes are fail-closed: the AppContainer policy that
+    /// would enforce the mandatory set is not implemented, so the route is
+    /// refused instead of run with a gap.
+    NativeWindowsContainmentUnavailable,
     // ── containment (process workloads) ───────────────────────────────
     BwrapBinaryMissing,
     BwrapProbeFailed,
@@ -76,6 +92,13 @@ impl ReasonCode {
             Self::DockerBridgeUnreachableRootless => "docker_bridge_unreachable_rootless",
             Self::RemoteDaemonWorkspaceUnsupported => "remote_daemon_workspace_unsupported",
             Self::DockerWorkspaceNotShared => "docker_workspace_not_shared",
+            Self::NativePlatformMismatch => "native_platform_mismatch",
+            Self::NativeSandboxUnavailable => "native_sandbox_unavailable",
+            Self::NativeSignatureVerificationUnavailable => {
+                "native_signature_verification_unavailable"
+            }
+            Self::NativeAdapterUnsupported => "native_adapter_unsupported",
+            Self::NativeWindowsContainmentUnavailable => "native_windows_containment_unavailable",
             Self::BwrapBinaryMissing => "bwrap_binary_missing",
             Self::BwrapProbeFailed => "bwrap_probe_failed",
             Self::ApparmorRestrictsUnprivilegedUserns => "apparmor_restricts_unprivileged_userns",

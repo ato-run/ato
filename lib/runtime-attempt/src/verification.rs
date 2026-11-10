@@ -20,8 +20,9 @@ use ato_formation::scenario::ScenarioObservation;
 use ato_formation::verify::{
     CONTRACT_VERIFICATION_RECEIPT_SCHEMA, CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2,
     CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V3, CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V4,
-    ContractVerification, ContractVerificationReceipt, RuntimeHttpObservation, RuntimeObservation,
-    RuntimeTlsObservation, VerificationExecutionEvidence, VerificationTargetKind, verify_runtime,
+    CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V5, ContractVerification, ContractVerificationReceipt,
+    RuntimeHttpObservation, RuntimeObservation, RuntimeTlsObservation,
+    VerificationExecutionEvidence, VerificationTargetKind, verify_runtime,
 };
 
 use crate::spec::AttemptSpec;
@@ -288,7 +289,9 @@ pub fn verify_observed_candidate(
             .as_ref()
             .is_some_and(|evidence| evidence.tls.is_some())
     });
-    receipt.schema = if execution.connector.is_some() {
+    receipt.schema = if execution.native.is_some() {
+        CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V5.to_owned()
+    } else if execution.connector.is_some() {
         CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V4.to_owned()
     } else if carries_tls {
         CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V3.to_owned()
