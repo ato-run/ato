@@ -870,3 +870,33 @@ fn resource_import_refuses_a_tampered_archive_before_contacting_the_authority() 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("export_digest_mismatch"), "{stderr}");
 }
+
+#[test]
+fn data_requests_carry_the_first_party_origin_when_asked() {
+    let snapshot = r#"{"resource_id":"dres_1","protocol":"todo.board@1","revision":1,"generation":0,"content_digest":"sha256:abc","byte_size":2,"document":{}}"#;
+    let (port, requests, handle) = capturing_stub(vec![(200, snapshot)]);
+    let output = ato()
+        .args([
+            "data",
+            "resource",
+            "inspect",
+            "dres_1",
+            "--coordinator",
+            &format!("http://127.0.0.1:{port}"),
+            "--token",
+            "test-token",
+            "--origin",
+            "tauri://localhost",
+        ])
+        .output()
+        .expect("run ato data resource inspect with origin");
+    handle.join().expect("stub");
+    assert!(output.status.success(), "{output:?}");
+    let request = requests.lock().unwrap()[0].clone();
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains("origin: tauri://localhost"),
+        "{request}"
+    );
+}
