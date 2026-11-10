@@ -53,6 +53,7 @@ fn error_response(error: CoordinatorError) -> Response<Body> {
         CoordinatorError::Invalid(code) => (StatusCode::UNPROCESSABLE_ENTITY, *code),
         CoordinatorError::Forbidden(code) => (StatusCode::FORBIDDEN, *code),
         CoordinatorError::QuotaExceeded => (StatusCode::PAYLOAD_TOO_LARGE, "quota_exceeded"),
+        CoordinatorError::HandlerFailed => (StatusCode::INTERNAL_SERVER_ERROR, "handler_failed"),
         CoordinatorError::Storage(_) | CoordinatorError::Json(_) => {
             (StatusCode::SERVICE_UNAVAILABLE, "storage_error")
         }
@@ -247,6 +248,8 @@ pub async fn handle_request(
                 .get("publisher")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
+            let module_source = input.get("module_source").and_then(Value::as_str);
+            let module_export = input.get("module_export").and_then(Value::as_str);
             let mut coordinator = match state.coordinator.lock() {
                 Ok(coordinator) => coordinator,
                 Err(_) => {
@@ -256,14 +259,20 @@ pub async fn handle_request(
                     );
                 }
             };
-            match coordinator.register_operation(
-                protocol,
-                operation,
-                semantics,
-                access,
-                implementation_digest,
-                publisher,
-            ) {
+            let registered = match (module_source, module_export) {
+                (Some(source), Some(export)) => coordinator.register_handler_operation(
+                    protocol, operation, semantics, access, source, export, publisher,
+                ),
+                _ => coordinator.register_operation(
+                    protocol,
+                    operation,
+                    semantics,
+                    access,
+                    implementation_digest,
+                    publisher,
+                ),
+            };
+            match registered {
                 Ok(()) => json_response(StatusCode::CREATED, json!({ "status": "registered" })),
                 Err(error) => error_response(error),
             }
@@ -368,17 +377,33 @@ pub async fn handle_request(
                     );
                 }
             };
-            match coordinator.invoke_binding_operation(
-                id,
-                &operation,
-                CommitInput {
-                    operation_id,
-                    expected_revision,
-                    expected_generation,
-                    document,
-                },
-            ) {
-                Ok(outcome) => json_response(StatusCode::OK, json!(outcome)),
+            let arguments = input.get("arguments").cloned();
+            let outcome = match arguments {
+                Some(arguments) => coordinator
+                    .invoke_binding_handler(
+                        id,
+                        &operation,
+                        &arguments,
+                        &operation_id,
+                        expected_revision,
+                        expected_generation,
+                    )
+                    .map(|outcome| json!(outcome)),
+                None => coordinator
+                    .invoke_binding_operation(
+                        id,
+                        &operation,
+                        CommitInput {
+                            operation_id,
+                            expected_revision,
+                            expected_generation,
+                            document,
+                        },
+                    )
+                    .map(|outcome| json!(outcome)),
+            };
+            match outcome {
+                Ok(value) => json_response(StatusCode::OK, value),
                 Err(error) => error_response(error),
             }
         }
@@ -819,6 +844,80 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["error"], "binding_read_only");
+    }
+
+    #[tokio::test]
+    async fn invokes_a_registered_handler_through_a_binding() {
+        let state = state();
+        let module = r#"
+function boardOf(state) {
+  return state && state.document && typeof state.document === "object" ? state.document : {};
+}
+export function createTask({ arguments: args, state }) {
+  const board = boardOf(state);
+  const tasks = Object.assign({}, board.tasks || {});
+  tasks["task-1"] = { id: "task-1", title: String(args.title), dueAt: null, completed: false };
+  return { operations: [{ kind: "replace", value: { tasks } }], result: { task_id: "task-1" } };
+}
+"#;
+        let (status, _) = call(
+            &state,
+            Method::POST,
+            "/v1/protocols/todo.board@1/operations",
+            Some("Bearer test-token"),
+            json!({
+                "operation": "todo_create",
+                "semantics": "evolution",
+                "access": "read_write",
+                "module_source": module,
+                "module_export": "createTask",
+                "publisher": "alice/app"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (_, created) = call(
+            &state,
+            Method::POST,
+            "/v1/data-resources",
+            Some("Bearer test-token"),
+            json!({"protocol": "todo.board@1", "document": {"tasks": {}}}),
+        )
+        .await;
+        let resource_id = created["resource_id"].as_str().unwrap().to_owned();
+        let (status, binding) = call(
+            &state,
+            Method::POST,
+            &format!("/v1/data-resources/{resource_id}/bindings"),
+            Some("Bearer test-token"),
+            json!({
+                "port": "tasks",
+                "protocol": "todo.board@1",
+                "access": "operations",
+                "operations": ["todo_create"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let binding_id = binding["binding_id"].as_str().unwrap().to_owned();
+        let (status, outcome) = call(
+            &state,
+            Method::POST,
+            &format!("/v1/bindings/{binding_id}/operations"),
+            Some("Bearer test-token"),
+            json!({
+                "operation": "todo_create",
+                "arguments": {"title": "From a handler"},
+                "operation_id": "op-create",
+                "expected_revision": 1,
+                "expected_generation": 0
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{outcome}");
+        assert_eq!(outcome["revision"], 2);
+        assert_eq!(outcome["result"]["task_id"], "task-1");
+        assert!(outcome["receipt"].is_object());
     }
 
     #[tokio::test]

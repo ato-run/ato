@@ -29,7 +29,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// Bumped when the on-disk schema changes in a way that needs a migration.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Default per-owner quota (64 MiB) and operation-result retention (30 days).
 pub const DEFAULT_QUOTA_BYTES: i64 = 64 * 1024 * 1024;
@@ -103,6 +103,8 @@ CREATE TABLE IF NOT EXISTS protocol_operations (
   implementation_digest TEXT NOT NULL,
   publisher TEXT NOT NULL,
   created_at INTEGER NOT NULL,
+  module_source TEXT,
+  module_export TEXT,
   PRIMARY KEY (protocol_ref, operation)
 );
 CREATE TRIGGER IF NOT EXISTS protocol_operation_claim_guard
@@ -144,6 +146,8 @@ pub enum CoordinatorError {
     Forbidden(&'static str),
     #[error("quota_exceeded")]
     QuotaExceeded,
+    #[error("handler_failed")]
+    HandlerFailed,
     #[error("storage_error: {0}")]
     Storage(#[from] rusqlite::Error),
     #[error("json_error: {0}")]
@@ -188,6 +192,8 @@ pub struct CommitOutcome {
     pub content_digest: String,
     pub receipt: Value,
     pub replayed: bool,
+    /// The Protocol handler's result, when the operation ran a handler.
+    pub result: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -200,6 +206,15 @@ pub struct Binding {
     pub operations: Vec<String>,
     pub status: String,
     pub binding_epoch: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InvokeOutcome {
+    pub revision: i64,
+    pub generation: i64,
+    pub result: Value,
+    pub receipt: Option<Value>,
+    pub replayed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -231,6 +246,14 @@ impl Coordinator {
         // it is idempotent and keeps the file usable without a rebuild.
         let _ = conn.execute(
             "ALTER TABLE operation_results ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE protocol_operations ADD COLUMN module_source TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE protocol_operations ADD COLUMN module_export TEXT",
             [],
         );
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -392,6 +415,30 @@ impl Coordinator {
         resource_id: &str,
         input: CommitInput,
     ) -> Result<CommitOutcome, CoordinatorError> {
+        self.commit_with_result(owner_id, resource_id, input, None)
+    }
+
+    /// Commit, optionally recording a trusted handler's result in the same
+    /// transaction.
+    fn commit_with_result(
+        &mut self,
+        owner_id: &str,
+        resource_id: &str,
+        input: CommitInput,
+        handler_result: Option<Value>,
+    ) -> Result<CommitOutcome, CoordinatorError> {
+        let fingerprint = fingerprint(&input)?;
+        self.commit_with_fingerprint(owner_id, resource_id, input, handler_result, fingerprint)
+    }
+
+    fn commit_with_fingerprint(
+        &mut self,
+        owner_id: &str,
+        resource_id: &str,
+        input: CommitInput,
+        handler_result: Option<Value>,
+        fingerprint: String,
+    ) -> Result<CommitOutcome, CoordinatorError> {
         if input.operation_id.is_empty() || input.operation_id.len() > 128 {
             return Err(CoordinatorError::Invalid("invalid_operation_id"));
         }
@@ -402,7 +449,6 @@ impl Coordinator {
         if quota.used_bytes + byte_size > self.quota_limit_bytes {
             return Err(CoordinatorError::QuotaExceeded);
         }
-        let fingerprint = fingerprint(&input)?;
         let tx = self.conn.transaction()?;
         let head = tx
             .query_row(
@@ -417,7 +463,7 @@ impl Coordinator {
 
         let existing = tx
             .query_row(
-                "SELECT fingerprint,receipt_json,revision FROM operation_results
+                "SELECT fingerprint,receipt_json,revision,result_json FROM operation_results
                  WHERE resource_id=? AND operation_id=?",
                 params![resource_id, input.operation_id],
                 |row| {
@@ -425,11 +471,12 @@ impl Coordinator {
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
                     ))
                 },
             )
             .optional()?;
-        if let Some((stored_fingerprint, receipt_json, revision)) = existing {
+        if let Some((stored_fingerprint, receipt_json, revision, result_json)) = existing {
             if stored_fingerprint != fingerprint {
                 return Err(CoordinatorError::Conflict("operation_id_conflict"));
             }
@@ -447,6 +494,7 @@ impl Coordinator {
                 content_digest,
                 receipt,
                 replayed: true,
+                result: serde_json::from_str(&result_json).ok(),
             });
         }
 
@@ -481,10 +529,13 @@ impl Coordinator {
             "content_digest": content_digest,
             "operation_id": input.operation_id,
         });
-        let result = serde_json::json!({
-            "revision": next_revision,
-            "content_digest": content_digest,
-        });
+        let result = match handler_result.clone() {
+            Some(value) => value,
+            None => serde_json::json!({
+                "revision": next_revision,
+                "content_digest": content_digest,
+            }),
+        };
         tx.execute(
             "INSERT INTO operation_results(resource_id,operation_id,fingerprint,result_json,receipt_json,revision,created_at,expires_at)
              VALUES (?,?,?,?,?,?,?,?)",
@@ -511,6 +562,7 @@ impl Coordinator {
             content_digest,
             receipt,
             replayed: false,
+            result: handler_result,
         })
     }
 
@@ -712,6 +764,241 @@ impl Coordinator {
         }
         self.read_binding(binding_id)
     }
+
+    /// Register an operation whose implementation is a handler module. The
+    /// digest is the SHA-256 of the module source, so a changed handler is a
+    /// different implementation.
+    pub fn register_handler_operation(
+        &mut self,
+        protocol: &str,
+        operation: &str,
+        semantics: &str,
+        access: &str,
+        module_source: &str,
+        module_export: &str,
+        publisher: &str,
+    ) -> Result<(), CoordinatorError> {
+        if module_source.is_empty() {
+            return Err(CoordinatorError::Invalid("invalid_module"));
+        }
+        if module_export.is_empty()
+            || !module_export
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$'))
+        {
+            return Err(CoordinatorError::Invalid("invalid_export"));
+        }
+        validate_protocol(protocol)?;
+        if operation.is_empty() || operation.len() > 128 {
+            return Err(CoordinatorError::Invalid("invalid_operation"));
+        }
+        if !matches!(semantics, "evolution" | "observation") {
+            return Err(CoordinatorError::Invalid("invalid_semantics"));
+        }
+        if !matches!(access, "read" | "read_write") {
+            return Err(CoordinatorError::Invalid("invalid_access"));
+        }
+        let digest = format!("sha256:{:x}", Sha256::digest(module_source.as_bytes()));
+        let result = self.conn.execute(
+            "INSERT INTO protocol_operations(protocol_ref,operation,semantics,access,implementation_digest,publisher,created_at,module_source,module_export)
+             VALUES (?,?,?,?,?,?,?,?,?)",
+            params![
+                protocol,
+                operation,
+                semantics,
+                access,
+                digest,
+                publisher,
+                now(),
+                module_source,
+                module_export
+            ],
+        );
+        match result {
+            Ok(_) => Ok(()),
+            Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+                if message.contains("protocol_operation_publisher_conflict") =>
+            {
+                Err(CoordinatorError::Conflict(
+                    "protocol_operation_publisher_conflict",
+                ))
+            }
+            Err(error) => Err(CoordinatorError::Storage(error)),
+        }
+    }
+
+    /// Run a registered handler for `operation`, apply its operations and
+    /// commit (evolution) or return its result (observation).
+    pub fn invoke_operation(
+        &mut self,
+        owner_id: &str,
+        resource_id: &str,
+        operation: &str,
+        arguments: &Value,
+        operation_id: &str,
+        expected_revision: i64,
+        expected_generation: i64,
+    ) -> Result<InvokeOutcome, CoordinatorError> {
+        let resource = self.read_resource(owner_id, resource_id)?;
+        let registration = self
+            .conn
+            .query_row(
+                "SELECT semantics,module_source,module_export FROM protocol_operations
+                 WHERE protocol_ref=? AND operation=?",
+                params![resource.protocol, operation],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((semantics, Some(module_source), Some(module_export))) = registration else {
+            return Err(CoordinatorError::Forbidden("operation_not_registered"));
+        };
+        let handler_fingerprint = handler_fingerprint(
+            operation_id,
+            expected_revision,
+            expected_generation,
+            operation,
+            arguments,
+        )?;
+        // A retried handler invocation returns the stored outcome instead of
+        // running the trusted handler a second time.
+        let stored = self
+            .conn
+            .query_row(
+                "SELECT fingerprint,receipt_json,revision FROM operation_results
+                 WHERE resource_id=? AND operation_id=?",
+                params![resource_id, operation_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((stored_fingerprint, receipt_json, revision)) = stored {
+            if stored_fingerprint != handler_fingerprint {
+                return Err(CoordinatorError::Conflict("operation_id_conflict"));
+            }
+            let receipt: Value = serde_json::from_str(&receipt_json)?;
+            let stored_result = self
+                .conn
+                .query_row(
+                    "SELECT result_json FROM operation_results WHERE resource_id=? AND operation_id=?",
+                    params![resource_id, operation_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .and_then(|value| serde_json::from_str::<Value>(&value).ok());
+            return Ok(InvokeOutcome {
+                revision,
+                generation: resource.generation,
+                result: stored_result.unwrap_or(Value::Null),
+                receipt: Some(receipt),
+                replayed: true,
+            });
+        }
+        let state = serde_json::json!({ "document": resource.document });
+        let value = crate::handlers::call_export(&module_source, &module_export, &state, arguments)
+            .map_err(|error| match error {
+                crate::handlers::HandlerError::InvalidModule(code) => {
+                    CoordinatorError::Invalid(code)
+                }
+                crate::handlers::HandlerError::Failed(_) => CoordinatorError::HandlerFailed,
+            })?;
+        let operations = value
+            .get("operations")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let result = value.get("result").cloned().unwrap_or(Value::Null);
+        if semantics == "observation" {
+            if !operations.is_empty() {
+                return Err(CoordinatorError::HandlerFailed);
+            }
+            return Ok(InvokeOutcome {
+                revision: resource.revision,
+                generation: resource.generation,
+                result,
+                receipt: None,
+                replayed: false,
+            });
+        }
+        if operations.len() != 1
+            || operations[0].get("kind").and_then(Value::as_str) != Some("replace")
+        {
+            return Err(CoordinatorError::HandlerFailed);
+        }
+        let next_document = operations[0]
+            .get("value")
+            .cloned()
+            .ok_or(CoordinatorError::HandlerFailed)?;
+        let outcome = self.commit_with_fingerprint(
+            owner_id,
+            resource_id,
+            CommitInput {
+                operation_id: operation_id.to_owned(),
+                expected_revision,
+                expected_generation,
+                document: next_document,
+            },
+            Some(result),
+            handler_fingerprint,
+        )?;
+        Ok(InvokeOutcome {
+            revision: outcome.revision,
+            generation: outcome.generation,
+            result: outcome.result.unwrap_or(Value::Null),
+            receipt: Some(outcome.receipt),
+            replayed: outcome.replayed,
+        })
+    }
+
+    /// Invoke a registered handler through a binding after the binding's own
+    /// checks (active, operation in the grant, read binding cannot write).
+    pub fn invoke_binding_handler(
+        &mut self,
+        binding_id: &str,
+        operation: &str,
+        arguments: &Value,
+        operation_id: &str,
+        expected_revision: i64,
+        expected_generation: i64,
+    ) -> Result<InvokeOutcome, CoordinatorError> {
+        let binding = self.read_binding(binding_id)?;
+        if binding.status != "active" {
+            return Err(CoordinatorError::Forbidden("binding_revoked"));
+        }
+        let registered: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT access FROM protocol_operations WHERE protocol_ref=? AND operation=?",
+                params![binding.protocol, operation],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if registered.is_none() {
+            return Err(CoordinatorError::Forbidden("operation_not_registered"));
+        }
+        if binding.access == "operations" && !binding.operations.iter().any(|op| op == operation) {
+            return Err(CoordinatorError::Forbidden("operation_not_granted"));
+        }
+        self.invoke_operation(
+            "local",
+            &binding.resource_id,
+            operation,
+            arguments,
+            operation_id,
+            expected_revision,
+            expected_generation,
+        )
+    }
 }
 
 fn validate_protocol(protocol: &str) -> Result<(), CoordinatorError> {
@@ -739,6 +1026,26 @@ fn encode_document(document: &Value) -> Result<(String, String, i64), Coordinato
     let digest = format!("sha256:{:x}", Sha256::digest(json.as_bytes()));
     let byte_size = json.len() as i64;
     Ok((json, digest, byte_size))
+}
+
+fn handler_fingerprint(
+    operation_id: &str,
+    expected_revision: i64,
+    expected_generation: i64,
+    operation: &str,
+    arguments: &Value,
+) -> Result<String, CoordinatorError> {
+    let payload = serde_json::json!({
+        "operation_id": operation_id,
+        "expected_revision": expected_revision,
+        "expected_generation": expected_generation,
+        "operation": operation,
+        "arguments": arguments,
+    });
+    Ok(format!(
+        "sha256:{:x}",
+        Sha256::digest(serde_json::to_string(&payload)?.as_bytes())
+    ))
 }
 
 fn fingerprint(input: &CommitInput) -> Result<String, CoordinatorError> {
@@ -1015,5 +1322,168 @@ mod tests {
                 .revision,
             2
         );
+    }
+
+    const HANDLER_MODULE: &str = r#"
+function boardOf(state) {
+  return state && state.document && typeof state.document === "object" ? state.document : {};
+}
+export function listDueDates({ state }) {
+  const tasks = Object.values(boardOf(state).tasks || {})
+    .filter((task) => task && task.dueAt && !task.archived)
+    .map((task) => ({
+      task_id: String(task.id),
+      title: String(task.title || ""),
+      due_at: String(task.dueAt),
+      completed: task.completed === true,
+    }));
+  return { operations: [], result: { tasks } };
+}
+export function createTask({ arguments: args, state }) {
+  const board = boardOf(state);
+  const tasks = Object.assign({}, board.tasks || {});
+  const id = "task-" + (Object.keys(tasks).length + 1);
+  tasks[id] = { id, title: String(args.title), dueAt: args.due_at ?? null, completed: false };
+  return { operations: [{ kind: "replace", value: { tasks } }], result: { task_id: id } };
+}
+"#;
+
+    #[test]
+    fn invokes_a_registered_handler_end_to_end() {
+        let mut coordinator = Coordinator::open_in_memory().unwrap();
+        coordinator
+            .register_handler_operation(
+                "todo.board@1",
+                "todo_list_due_dates",
+                "observation",
+                "read",
+                HANDLER_MODULE,
+                "listDueDates",
+                "alice/app",
+            )
+            .unwrap();
+        coordinator
+            .register_handler_operation(
+                "todo.board@1",
+                "todo_create",
+                "evolution",
+                "read_write",
+                HANDLER_MODULE,
+                "createTask",
+                "alice/app",
+            )
+            .unwrap();
+        let created = coordinator
+            .create_resource(
+                "local",
+                "todo.board@1",
+                None,
+                serde_json::json!({"tasks": {"t1": {"id": "t1", "title": "Due", "dueAt": "2026-11-20"}}}),
+            )
+            .unwrap();
+        let binding = coordinator
+            .bind_resource(
+                &created.resource_id,
+                "tasks",
+                "todo.board@1",
+                "operations",
+                vec!["todo_list_due_dates".into(), "todo_create".into()],
+            )
+            .unwrap();
+
+        let observed = coordinator
+            .invoke_binding_handler(
+                &binding.binding_id,
+                "todo_list_due_dates",
+                &serde_json::json!({}),
+                "op-due",
+                1,
+                0,
+            )
+            .unwrap();
+        assert_eq!(observed.revision, 1);
+        assert_eq!(observed.result["tasks"][0]["task_id"], "t1");
+        assert!(observed.receipt.is_none());
+
+        let created_task = coordinator
+            .invoke_binding_handler(
+                &binding.binding_id,
+                "todo_create",
+                &serde_json::json!({"title": "New", "due_at": "2026-12-01"}),
+                "op-create",
+                1,
+                0,
+            )
+            .unwrap();
+        assert_eq!(created_task.revision, 2);
+        assert_eq!(created_task.result["task_id"], "task-2");
+        let read = coordinator
+            .read_resource("local", &created.resource_id)
+            .unwrap();
+        assert_eq!(read.document["tasks"]["task-2"]["title"], "New");
+
+        // Same operation id + arguments replays the stored outcome.
+        let replay = coordinator
+            .invoke_binding_handler(
+                &binding.binding_id,
+                "todo_create",
+                &serde_json::json!({"title": "New", "due_at": "2026-12-01"}),
+                "op-create",
+                1,
+                0,
+            )
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.revision, 2);
+    }
+
+    #[test]
+    fn refuses_a_handler_operation_outside_the_grant() {
+        let mut coordinator = Coordinator::open_in_memory().unwrap();
+        for (operation, semantics, access, export) in [
+            ("todo_list_due_dates", "observation", "read", "listDueDates"),
+            ("todo_create", "evolution", "read_write", "createTask"),
+        ] {
+            coordinator
+                .register_handler_operation(
+                    "todo.board@1",
+                    operation,
+                    semantics,
+                    access,
+                    HANDLER_MODULE,
+                    export,
+                    "alice/app",
+                )
+                .unwrap();
+        }
+        let created = coordinator
+            .create_resource(
+                "local",
+                "todo.board@1",
+                None,
+                serde_json::json!({"tasks": {}}),
+            )
+            .unwrap();
+        let binding = coordinator
+            .bind_resource(
+                &created.resource_id,
+                "tasks",
+                "todo.board@1",
+                "operations",
+                vec!["todo_list_due_dates".into()],
+            )
+            .unwrap();
+        let refused = coordinator.invoke_binding_handler(
+            &binding.binding_id,
+            "todo_create",
+            &serde_json::json!({"title": "Nope"}),
+            "op-nope",
+            1,
+            0,
+        );
+        assert!(matches!(
+            refused,
+            Err(CoordinatorError::Forbidden("operation_not_granted"))
+        ));
     }
 }
