@@ -26,7 +26,7 @@ use hyper::{Method, Response, StatusCode};
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
-use crate::apps::{self, DATA_PORTS_BRIDGE_JS, DATA_PORTS_BRIDGE_PATH};
+use crate::apps;
 use crate::{CommitInput, Coordinator, CoordinatorError};
 
 pub type Body = Full<Bytes>;
@@ -35,6 +35,13 @@ pub type Body = Full<Bytes>;
 const EXPORT_SCHEMA: &str = "ato.data.export/v1";
 /// Envelope served by GET /v1/data-resources/export (the whole saved state).
 const EXPORT_SET_SCHEMA: &str = "ato.data.export-set/v1";
+
+/// One app served under a path prefix by the same Coordinator.
+#[derive(Debug, Clone)]
+pub struct WorkspaceApp {
+    pub prefix: String,
+    pub app: AppsConfig,
+}
 
 /// When set, the Coordinator serves a static app and its Data Ports bridge.
 #[derive(Debug, Clone)]
@@ -50,6 +57,9 @@ pub struct ApiState {
     pub token: String,
     pub shutdown: watch::Sender<bool>,
     pub apps: Option<AppsConfig>,
+    /// Additional apps served under `/apps/<prefix>`, sharing one Resource
+    /// database and one origin.
+    pub workspace: Vec<WorkspaceApp>,
 }
 
 fn json_response(status: StatusCode, value: Value) -> Response<Body> {
@@ -86,6 +96,151 @@ fn authorized(authorization: Option<&str>, token: &str) -> bool {
 
 /// Handle one request. Kept independent of hyper's body type so tests can call
 /// it directly with bytes.
+/// Serve one app: its bridges, its Data Ports endpoints and its files.
+///
+/// `base` is the path prefix the app is served under (`""` for the root app).
+/// The caller has already matched the app, so this only answers app-relative
+/// requests and returns `None` when the path is not the app's.
+fn serve_served_app(
+    state: &ApiState,
+    apps: &AppsConfig,
+    method: &Method,
+    path: &str,
+    body: &[u8],
+    base: &str,
+) -> Option<Response<Body>> {
+    let context_path = apps::RUNTIME_CONTEXT_PATH;
+    if method == Method::GET && path == context_path {
+        let script = apps::runtime_context_js(&apps.port);
+        return Some(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/javascript; charset=utf-8")
+                .header("cache-control", "no-store")
+                .body(Full::new(Bytes::from(script)))
+                .expect("static response"),
+        );
+    }
+    let bridge_path = apps::DATA_PORTS_BRIDGE_PATH;
+    if method == Method::GET && path == bridge_path {
+        return Some(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/javascript; charset=utf-8")
+                .header("cache-control", "no-store")
+                .body(Full::new(Bytes::from(apps::DATA_PORTS_BRIDGE_JS)))
+                .expect("static response"),
+        );
+    }
+    let data_ports_path = "/__ato/data-ports";
+    if method == Method::GET && path == data_ports_path {
+        let coordinator = match state.coordinator.lock() {
+            Ok(coordinator) => coordinator,
+            Err(_) => {
+                return Some(json_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    json!({ "error": "storage_error" }),
+                ));
+            }
+        };
+        return Some(match coordinator.bindings_for_instance(&apps.instance_id) {
+            Ok(bindings) => json_response(
+                StatusCode::OK,
+                json!({
+                    "instance_id": apps.instance_id,
+                    "bindings": bindings
+                }),
+            ),
+            Err(error) => error_response(error),
+        });
+    }
+    let invoke_prefix = "/__ato/data-ports/";
+    if method == Method::POST && path.starts_with(&invoke_prefix) {
+        let rest = path.trim_start_matches(&invoke_prefix);
+        let Some((port, "invoke")) = rest.split_once('/') else {
+            return Some(json_response(
+                StatusCode::NOT_FOUND,
+                json!({ "error": "not_found" }),
+            ));
+        };
+        let input: Value = match serde_json::from_slice(body) {
+            Ok(value) => value,
+            Err(_) => {
+                return Some(json_response(
+                    StatusCode::BAD_REQUEST,
+                    json!({ "error": "invalid_json" }),
+                ));
+            }
+        };
+        let operation = input
+            .get("operation")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let idempotency_key = input
+            .get("idempotency_key")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let arguments = input.get("arguments").cloned().unwrap_or_else(|| json!({}));
+        let mut coordinator = match state.coordinator.lock() {
+            Ok(coordinator) => coordinator,
+            Err(_) => {
+                return Some(json_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    json!({ "error": "storage_error" }),
+                ));
+            }
+        };
+        let binding = match coordinator.bindings_for_instance(&apps.instance_id) {
+            Ok(bindings) => bindings
+                .into_iter()
+                .find(|binding| binding.port_name == port),
+            Err(error) => return Some(error_response(error)),
+        };
+        let Some(binding) = binding else {
+            return Some(json_response(
+                StatusCode::NOT_FOUND,
+                json!({ "error": "data_port_not_connected" }),
+            ));
+        };
+        let resource = match coordinator.read_resource("local", &binding.resource_id) {
+            Ok(resource) => resource,
+            Err(error) => return Some(error_response(error)),
+        };
+        return Some(
+            match coordinator.invoke_binding_handler(
+                &binding.binding_id,
+                operation,
+                &arguments,
+                idempotency_key,
+                resource.revision,
+                resource.generation,
+            ) {
+                Ok(outcome) => json_response(StatusCode::OK, json!(outcome)),
+                Err(error) => error_response(error),
+            },
+        );
+    }
+    let file = apps::resolve(&apps.dir, path)?;
+    let content_type = apps::content_type(&file);
+    Some(match std::fs::read_to_string(&file) {
+        Ok(text) if content_type.starts_with("text/html") => Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", content_type)
+            .header("cache-control", "no-store")
+            .body(Full::new(Bytes::from(apps::inject_runtime_with_prefix(
+                &text, base,
+            ))))
+            .expect("static response"),
+        Ok(text) => Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", content_type)
+            .header("cache-control", "no-store")
+            .body(Full::new(Bytes::from(text)))
+            .expect("static response"),
+        Err(_) => json_response(StatusCode::NOT_FOUND, json!({ "error": "not_found" })),
+    })
+}
+
 pub async fn handle_request(
     state: &ApiState,
     method: &Method,
@@ -106,134 +261,22 @@ pub async fn handle_request(
             json!({ "status": "ok", "schema_version": crate::SCHEMA_VERSION, "resources": resources }),
         );
     }
-    if method == Method::GET
-        && path == apps::RUNTIME_CONTEXT_PATH
-        && let Some(apps) = &state.apps
+    for workspace_app in &state.workspace {
+        let base = format!("/apps/{}", workspace_app.prefix);
+        if path == base || path.starts_with(&format!("{base}/")) {
+            let rest = &path[base.len()..];
+            let rest = if rest.is_empty() { "/" } else { rest };
+            if let Some(response) =
+                serve_served_app(state, &workspace_app.app, method, rest, body, &base)
+            {
+                return response;
+            }
+        }
+    }
+    if let Some(apps) = &state.apps
+        && let Some(response) = serve_served_app(state, apps, method, path, body, "")
     {
-        {
-            let script = apps::runtime_context_js(&apps.port);
-            return Response::builder()
-                .status(StatusCode::OK)
-                .header("content-type", "text/javascript; charset=utf-8")
-                .header("cache-control", "no-store")
-                .body(Full::new(Bytes::from(script)))
-                .expect("static response");
-        }
-    }
-    if method == Method::GET && path == DATA_PORTS_BRIDGE_PATH {
-        return Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "text/javascript; charset=utf-8")
-            .header("cache-control", "no-store")
-            .body(Full::new(Bytes::from(DATA_PORTS_BRIDGE_JS)))
-            .expect("static response");
-    }
-    // The bridge is same-origin and holds no secret: it is the served page
-    // calling the local Coordinator. It exists only when an app is served.
-    if let Some(apps) = &state.apps {
-        if method == Method::GET && path == "/__ato/data-ports" {
-            let coordinator = match state.coordinator.lock() {
-                Ok(coordinator) => coordinator,
-                Err(_) => {
-                    return json_response(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        json!({ "error": "storage_error" }),
-                    );
-                }
-            };
-            return match coordinator.bindings_for_instance(&apps.instance_id) {
-                Ok(bindings) => json_response(
-                    StatusCode::OK,
-                    json!({
-                        "instance_id": apps.instance_id,
-                        "bindings": bindings
-                    }),
-                ),
-                Err(error) => error_response(error),
-            };
-        }
-        if method == Method::POST && path.starts_with("/__ato/data-ports/") {
-            let rest = path.trim_start_matches("/__ato/data-ports/");
-            let Some((port, "invoke")) = rest.split_once('/') else {
-                return json_response(StatusCode::NOT_FOUND, json!({ "error": "not_found" }));
-            };
-            let input: Value = match serde_json::from_slice(body) {
-                Ok(value) => value,
-                Err(_) => {
-                    return json_response(
-                        StatusCode::BAD_REQUEST,
-                        json!({ "error": "invalid_json" }),
-                    );
-                }
-            };
-            let operation = input
-                .get("operation")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let idempotency_key = input
-                .get("idempotency_key")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let arguments = input.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            let mut coordinator = match state.coordinator.lock() {
-                Ok(coordinator) => coordinator,
-                Err(_) => {
-                    return json_response(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        json!({ "error": "storage_error" }),
-                    );
-                }
-            };
-            let binding = match coordinator.bindings_for_instance(&apps.instance_id) {
-                Ok(bindings) => bindings
-                    .into_iter()
-                    .find(|binding| binding.port_name == port),
-                Err(error) => return error_response(error),
-            };
-            let Some(binding) = binding else {
-                return json_response(
-                    StatusCode::NOT_FOUND,
-                    json!({ "error": "data_port_not_connected" }),
-                );
-            };
-            let resource = match coordinator.read_resource("local", &binding.resource_id) {
-                Ok(resource) => resource,
-                Err(error) => return error_response(error),
-            };
-            return match coordinator.invoke_binding_handler(
-                &binding.binding_id,
-                operation,
-                &arguments,
-                idempotency_key,
-                resource.revision,
-                resource.generation,
-            ) {
-                Ok(outcome) => json_response(StatusCode::OK, json!(outcome)),
-                Err(error) => error_response(error),
-            };
-        }
-    }
-    // The served app's own files are public on this local origin.
-    if method == Method::GET
-        && let Some(apps) = &state.apps
-        && let Some(file) = apps::resolve(&apps.dir, path)
-    {
-        let content_type = apps::content_type(&file);
-        return match std::fs::read_to_string(&file) {
-            Ok(text) if content_type.starts_with("text/html") => Response::builder()
-                .status(StatusCode::OK)
-                .header("content-type", content_type)
-                .header("cache-control", "no-store")
-                .body(Full::new(Bytes::from(apps::inject_runtime(&text))))
-                .expect("static response"),
-            Ok(text) => Response::builder()
-                .status(StatusCode::OK)
-                .header("content-type", content_type)
-                .header("cache-control", "no-store")
-                .body(Full::new(Bytes::from(text)))
-                .expect("static response"),
-            Err(_) => json_response(StatusCode::NOT_FOUND, json!({ "error": "not_found" })),
-        };
+        return response;
     }
     if !authorized(authorization, &state.token) {
         return json_response(StatusCode::UNAUTHORIZED, json!({ "error": "unauthorized" }));
@@ -914,6 +957,7 @@ mod tests {
             token: "test-token".to_owned(),
             shutdown,
             apps: None,
+            workspace: Vec::new(),
         }
     }
 
@@ -1414,6 +1458,117 @@ export function createTask({ arguments: args, state }) {
         assert_eq!(gc["deleted_results"], 0);
     }
 
+    #[tokio::test]
+    async fn workspace_apps_are_served_under_prefixes_with_instance_bindings() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        std::fs::write(
+            first.path().join("index.html"),
+            "<html><body>first</body></html>",
+        )
+        .unwrap();
+        std::fs::write(
+            second.path().join("index.html"),
+            "<html><body>second</body></html>",
+        )
+        .unwrap();
+        let (shutdown, _receiver) = watch::channel(false);
+        let state = ApiState {
+            coordinator: Mutex::new(Coordinator::open_in_memory().unwrap()),
+            token: "test-token".to_owned(),
+            shutdown,
+            apps: None,
+            workspace: vec![
+                WorkspaceApp {
+                    prefix: "todo".to_owned(),
+                    app: AppsConfig {
+                        dir: first.path().to_path_buf(),
+                        instance_id: "pane-todo".to_owned(),
+                        port: "tasks".to_owned(),
+                    },
+                },
+                WorkspaceApp {
+                    prefix: "calendar".to_owned(),
+                    app: AppsConfig {
+                        dir: second.path().to_path_buf(),
+                        instance_id: "pane-calendar".to_owned(),
+                        port: "tasks".to_owned(),
+                    },
+                },
+            ],
+        };
+        let (status, _content_type, body) = call_raw(
+            &state,
+            Method::GET,
+            "/apps/todo/index.html",
+            None,
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("/apps/todo/__ato/data-ports/bridge-v1.js"),
+            "body={body}"
+        );
+        let (status, _content_type, body) = call_raw(
+            &state,
+            Method::GET,
+            "/apps/calendar/index.html",
+            None,
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("/apps/calendar/__ato/runtime-context.js"));
+
+        let (status, _content_type, created) = call_raw(
+            &state,
+            Method::POST,
+            "/v1/data-resources",
+            Some("Bearer test-token"),
+            json!({"protocol": "todo.board@1", "document": {}}),
+        )
+        .await;
+        assert!(status.is_success(), "{created}");
+        let created: Value = serde_json::from_str(&created).unwrap();
+        let resource_id = created["resource_id"].as_str().unwrap();
+        let (status, _content_type, bound) = call_raw(
+            &state,
+            Method::POST,
+            &format!("/v1/data-resources/{resource_id}/bindings"),
+            Some("Bearer test-token"),
+            json!({
+                "port": "tasks",
+                "protocol": "todo.board@1",
+                "access": "read",
+                "instance_id": "pane-todo",
+            }),
+        )
+        .await;
+        assert!(status.is_success(), "{bound}");
+
+        let (_status, _content_type, todo_bridge) = call_raw(
+            &state,
+            Method::GET,
+            "/apps/todo/__ato/data-ports",
+            None,
+            json!({}),
+        )
+        .await;
+        assert!(todo_bridge.contains("pane-todo"));
+        assert!(todo_bridge.contains("binding_id"));
+        let (_status, _content_type, calendar_bridge) = call_raw(
+            &state,
+            Method::GET,
+            "/apps/calendar/__ato/data-ports",
+            None,
+            json!({}),
+        )
+        .await;
+        assert!(calendar_bridge.contains("pane-calendar"));
+        assert!(!calendar_bridge.contains("binding_id"));
+    }
+
     async fn call_raw(
         state: &ApiState,
         method: Method,
@@ -1452,6 +1607,7 @@ export function createTask({ arguments: args, state }) {
                 instance_id: "app-1".to_owned(),
                 port: "tasks".to_owned(),
             }),
+            workspace: Vec::new(),
         };
         let module = r#"
 export function createTask({ arguments: args, state }) {
