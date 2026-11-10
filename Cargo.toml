@@ -49,6 +49,7 @@ members = [
     "lib/ipc",
     "lib/host-control",
     "services/netd",
+    "services/coordinator",
 ]
 
 # `desktop` (and its xtask) are kept OUT of the workspace so they keep their own
