@@ -711,3 +711,132 @@ fn a_windows_native_route_is_fail_closed_on_windows_and_only_a_platform_mismatch
     assert_eq!(failure.code, "native_platform_mismatch");
     assert!(admit(&bundle, web, scratch.path(), &windows_host).is_none());
 }
+
+fn tiny_bundle_artifact() -> Vec<u8> {
+    let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    let mut builder = tar::Builder::new(encoder);
+    let bytes = b"#!/bin/sh\nexit 0\n";
+    let mut header = tar::Header::new_gnu();
+    header.set_size(bytes.len() as u64);
+    header.set_mode(0o755);
+    header.set_entry_type(tar::EntryType::Regular);
+    header.set_cksum();
+    builder
+        .append_data(
+            &mut header,
+            "MyApp.app/Contents/MacOS/MyApp",
+            std::io::Cursor::new(bytes),
+        )
+        .unwrap();
+    builder.into_inner().unwrap().finish().unwrap()
+}
+
+fn write_bundle_source(root: &Path, signature_target: Option<&str>) {
+    std::fs::create_dir_all(root.join("artifacts")).unwrap();
+    std::fs::write(root.join("proof.txt"), b"proof\n").unwrap();
+    std::fs::write(root.join("artifacts/App.tar.gz"), tiny_bundle_artifact()).unwrap();
+    let target = signature_target
+        .map(|value| format!("signature_target = \"{value}\"\n"))
+        .unwrap_or_default();
+    std::fs::write(
+        root.join("capsule.toml"),
+        format!(
+            r#"schema = "ato.capsule/2"
+
+[application]
+title = "Native bundle target"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "proof"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/proof.txt"
+status = 200
+
+[[derivation]]
+id = "native"
+use = "ato.native@1"
+runtimes = {{}}
+guest_port = 18080
+artifact = "artifacts/App.tar.gz"
+os = "macos"
+arch = "aarch64"
+entry = "MyApp.app/Contents/MacOS/MyApp"
+signature = "require-valid-or-local-override"
+{target}
+[effects]
+default = "pure"
+"#
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_bundle_signature_target_is_carried_through_authoring_and_changes_only_its_own_route() {
+    let scratch = tempfile::tempdir().unwrap();
+    let default_root = scratch.path().join("default");
+    let explicit_root = scratch.path().join("explicit");
+    let bundle_root = scratch.path().join("bundle");
+    write_bundle_source(&default_root, None);
+    write_bundle_source(&explicit_root, Some("executable"));
+    write_bundle_source(&bundle_root, Some("bundle"));
+
+    let build = |root: &Path| {
+        let (bytes, _) = crate::build_authored_bundle_v2(root).expect("the source builds");
+        let (_, validated) = validate_bytes_all(&bytes).expect("the bundle validates");
+        let route = validated
+            .iter()
+            .find(|route| route.realization == PortableRealizationKind::NativeDesktop)
+            .unwrap()
+            .clone();
+        (bytes, route)
+    };
+    let (_, default_route) = build(&default_root);
+    let (_, explicit_route) = build(&explicit_root);
+    let (_, bundle_route) = build(&bundle_root);
+
+    // `executable` is the default, so declaring it changes nothing.
+    assert_eq!(
+        default_route
+            .native
+            .as_ref()
+            .unwrap()
+            .descriptor
+            .signature_target,
+        ato_formation::native_desktop::NativeSignatureTarget::Executable
+    );
+    assert_eq!(default_route.derivation_ref, explicit_route.derivation_ref);
+    assert_eq!(default_route.contract_ref, bundle_route.contract_ref);
+    assert_ne!(default_route.derivation_ref, bundle_route.derivation_ref);
+
+    let native = bundle_route.native.as_ref().unwrap();
+    assert_eq!(
+        native.descriptor.signature_target,
+        ato_formation::native_desktop::NativeSignatureTarget::Bundle
+    );
+    assert_eq!(
+        bundle_route.derivation.steps[0]
+            .runtimes
+            .get(ato_formation::native_desktop::NATIVE_SIGNATURE_TARGET_RUNTIME)
+            .map(String::as_str),
+        Some("bundle")
+    );
+    // The artifact still enters the verified closure.
+    assert!(
+        bundle_route
+            .derivation
+            .inputs
+            .iter()
+            .all(|input| input.protocol == ato_formation::authoring::WORKSPACE_PROTOCOL)
+    );
+}

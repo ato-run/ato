@@ -489,6 +489,8 @@ pub struct PortableNativeRouteSpec {
     pub artifact: Vec<u8>,
     pub format: Option<String>,
     pub signature: Option<String>,
+    /// `executable` (default, omitted) or `bundle`.
+    pub signature_target: Option<String>,
 }
 
 /// One serving step of a service group (OCI or native process).
@@ -1609,6 +1611,7 @@ fn authored_bundle_spec_v2(
                         artifact: bytes,
                         format: native.format,
                         signature: native.signature,
+                        signature_target: native.signature_target,
                     })
                 }
             };
@@ -2299,6 +2302,7 @@ fn bind_native_descriptor(
 ) -> Result<ato_formation::native_desktop::NativeDescriptor, PortableApplicationError> {
     use ato_formation::native_desktop::{
         NativeArch, NativeArtifactFormat, NativeDescriptor, NativeOs, NativeSignaturePolicy,
+        NativeSignatureTarget, native_bundle_root,
     };
     let os = NativeOs::parse(&native.os)
         .ok_or_else(|| profile("a native route declares os = macos or windows"))?;
@@ -2314,6 +2318,17 @@ fn bind_native_descriptor(
         Some(value) => NativeSignaturePolicy::parse(value)
             .ok_or_else(|| profile("a native route declares a defined signature policy"))?,
     };
+    let signature_target = match native.signature_target.as_deref() {
+        None => NativeSignatureTarget::Executable,
+        Some(value) => NativeSignatureTarget::parse(value).ok_or_else(|| {
+            profile("a native route declares signature_target = executable or bundle")
+        })?,
+    };
+    if signature_target.is_bundle() && native_bundle_root(&native.entry).is_none() {
+        return Err(profile(
+            "a bundle signature target requires the entry to be inside an `.app` bundle",
+        ));
+    }
     let reference = add_blob(objects, &native.artifact)?;
     Ok(NativeDescriptor {
         os,
@@ -2322,6 +2337,7 @@ fn bind_native_descriptor(
         entry: native.entry.clone(),
         format,
         signature,
+        signature_target,
     })
 }
 
