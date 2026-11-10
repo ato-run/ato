@@ -141,3 +141,40 @@ runs them locally; the workspace does not create a new D or a new identity.
   file or a directory of `InstanceSnapshotV1` plus a view-state record.
 - Whether the workspace file pins capsules by `ContractRef` in addition to the
   transport SHA-256 (identity vs transport evidence).
+
+## v0 implementation notes (2026-11-10)
+
+The first increment exists in `apps/cli/src/workspace.rs` (PR #1740). It keeps
+the boundary above and makes these concrete choices, which the next increment
+must either keep or explicitly revise:
+
+- **Panes are separate origins.** Each pane's verified tree is served by its own
+  loopback static server on its own port; the shell is another origin with one
+  iframe per pane. This preserves per-app `localStorage` isolation without
+  inventing path-scoped storage. A same-origin path-prefix layout remains
+  possible later, but it would need a storage partition rule.
+- **The shell is local orchestration.** `ato.workspace/1` names panes, app
+  labels, digest-pinned capsules, an optional `derivation` and an optional
+  restore hint. `ato workspace inspect` validates every declared D and the
+  selected D; `ato workspace open` starts the pane servers and the shell. No
+  ContractRef is created or changed by the workspace.
+- **Checkpoint v0 captures browser state, not process state.** `capture()` reads
+  each pane's served `localStorage` map (through the static server's
+  state-bridge token) plus the shell's own view state (direction, split, active
+  pane), computes a `sha256` over canonicalised state, and records it as
+  `snapshot_ref`. Resume verifies the workspace file digest and injects the
+  saved state back into the pane servers. `instance_id` is `ephemeral-<pane>`
+  until durable Instances exist.
+- **Stop is Ctrl-C.** The CLI process owns the servers; dropping them closes
+  the listeners. `--checkpoint-out` writes the checkpoint atomically
+  (same-directory temp file, fsync, rename). On platforms where the signal flag
+  cannot be registered the stop signal is a line on stdin.
+- **View state is only what the shell declares.** Split ratio, direction and
+  active pane are restorable. Scroll/selection inside an app is not captured:
+  it is cross-origin and needs an app-declared, restorable state, which is the
+  same rule as D3's state compatibility.
+
+Open questions this increment does **not** settle: how a workspace checkpoint
+migrates from captured browser state to `InstanceSnapshotV1`; how the shell
+learns each pane's DataResource bindings; and how a stop that cannot finish
+keeps the pane's state recoverable. Those are tracked by D3/D5.
