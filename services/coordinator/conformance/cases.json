@@ -1,0 +1,182 @@
+{
+  "schema": "ato.data-resource-conformance/1",
+  "description": "Shared semantic cases for the Hosted D1 and Selfhost SQLite DataResource authorities. Each implementation maps the abstract expectations (committed/refused/conflict) to its own error codes; the case ids and order are the contract.",
+  "cases": [
+    {
+      "id": "create",
+      "action": "create",
+      "protocol": "todo.board@1",
+      "document": {},
+      "expect": {
+        "revision": 1
+      }
+    },
+    {
+      "id": "commit",
+      "action": "commit",
+      "operation_id": "op-1",
+      "expected_revision": 1,
+      "expected_generation": 0,
+      "document": {
+        "tasks": {
+          "t1": {
+            "id": "t1",
+            "title": "first",
+            "dueAt": "2026-11-20"
+          }
+        }
+      },
+      "expect": {
+        "revision": 2,
+        "replayed": false
+      }
+    },
+    {
+      "id": "replay",
+      "action": "commit",
+      "operation_id": "op-1",
+      "expected_revision": 1,
+      "expected_generation": 0,
+      "document": {
+        "tasks": {
+          "t1": {
+            "id": "t1",
+            "title": "first",
+            "dueAt": "2026-11-20"
+          }
+        }
+      },
+      "expect": {
+        "revision": 2,
+        "replayed": true
+      }
+    },
+    {
+      "id": "operation_id_conflict",
+      "action": "commit",
+      "operation_id": "op-1",
+      "expected_revision": 2,
+      "expected_generation": 0,
+      "document": {
+        "tasks": {}
+      },
+      "expect": "conflict"
+    },
+    {
+      "id": "stale_revision",
+      "action": "commit",
+      "operation_id": "op-2",
+      "expected_revision": 1,
+      "expected_generation": 0,
+      "document": {
+        "tasks": {}
+      },
+      "expect": "conflict"
+    },
+    {
+      "id": "register_due_dates",
+      "action": "register_operation",
+      "operation": "todo_list_due_dates",
+      "semantics": "observation",
+      "access": "read",
+      "implementation_digest": "sha256:due",
+      "publisher": "alice/app",
+      "expect": "registered"
+    },
+    {
+      "id": "register_create",
+      "action": "register_operation",
+      "operation": "todo_create",
+      "semantics": "evolution",
+      "access": "read_write",
+      "implementation_digest": "sha256:create",
+      "publisher": "alice/app",
+      "expect": "registered"
+    },
+    {
+      "id": "publisher_conflict",
+      "action": "register_operation",
+      "operation": "todo_list_due_dates",
+      "semantics": "observation",
+      "access": "read",
+      "implementation_digest": "sha256:other",
+      "publisher": "mallory/app",
+      "expect": "conflict"
+    },
+    {
+      "id": "bind_operations",
+      "action": "bind",
+      "port": "tasks",
+      "protocol": "todo.board@1",
+      "access": "operations",
+      "operations": [
+        "todo_list_due_dates"
+      ],
+      "expect": {
+        "access": "operations"
+      }
+    },
+    {
+      "id": "document_read_refused",
+      "action": "read_binding_document",
+      "expect": "refused"
+    },
+    {
+      "id": "ungranted_operation",
+      "action": "invoke",
+      "operation": "todo_create",
+      "operation_id": "op-create",
+      "expected_revision": 2,
+      "expected_generation": 0,
+      "document": {
+        "tasks": {}
+      },
+      "expect": "refused",
+      "access": "write"
+    },
+    {
+      "id": "granted_operation",
+      "action": "invoke",
+      "operation": "todo_list_due_dates",
+      "operation_id": "op-due",
+      "expected_revision": 2,
+      "expected_generation": 0,
+      "document": {
+        "tasks": {
+          "t1": {
+            "id": "t1",
+            "title": "first",
+            "dueAt": "2026-11-20"
+          }
+        }
+      },
+      "expect": {
+        "revision": 3
+      },
+      "access": "read"
+    },
+    {
+      "id": "revoke",
+      "action": "revoke",
+      "expect": {
+        "status": "revoked"
+      }
+    },
+    {
+      "id": "revoked_invoke",
+      "action": "invoke",
+      "operation": "todo_list_due_dates",
+      "operation_id": "op-due-2",
+      "expected_revision": 3,
+      "expected_generation": 0,
+      "document": {},
+      "expect": "refused",
+      "access": "read"
+    },
+    {
+      "id": "revoked_document",
+      "action": "read_binding_document",
+      "expect": "refused"
+    }
+  ]
+}
