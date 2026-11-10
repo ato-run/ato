@@ -47,6 +47,13 @@ enum Command {
         addr: String,
         #[arg(long, env = "ATO_COORDINATOR_TOKEN")]
         token: String,
+        /// Serve this static app directory at / together with the Data Ports
+        /// bridge.
+        #[arg(long)]
+        apps_dir: Option<PathBuf>,
+        /// The app instance the bridge answers for.
+        #[arg(long)]
+        app_instance: Option<String>,
     },
     /// Ask a running coordinator for its health.
     Health {
@@ -175,22 +182,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{body}");
             Ok(())
         }
-        Command::Serve { db, addr, token } => {
+        Command::Serve {
+            db,
+            addr,
+            token,
+            apps_dir,
+            app_instance,
+        } => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
-            runtime.block_on(serve(db, addr, token))
+            runtime.block_on(serve(db, addr, token, apps_dir, app_instance))
         }
     }
 }
 
-async fn serve(db: PathBuf, addr: String, token: String) -> Result<(), Box<dyn std::error::Error>> {
+async fn serve(
+    db: PathBuf,
+    addr: String,
+    token: String,
+    apps_dir: Option<PathBuf>,
+    app_instance: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let coordinator = Coordinator::open(&db)?;
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let state = Arc::new(ApiState {
         coordinator: Mutex::new(coordinator),
         token,
         shutdown: shutdown_tx,
+        apps: apps_dir.map(|dir| ato_coordinator::http::AppsConfig {
+            dir,
+            instance_id: app_instance.unwrap_or_default(),
+        }),
     });
     let listener = TcpListener::bind(&addr).await?;
     println!("listening on http://{}", listener.local_addr()?);

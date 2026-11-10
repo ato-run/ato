@@ -15,6 +15,7 @@
 //! conformance suite against the hosted D1 implementation are follow-up slices.
 //! Nothing here is wired into the CLI or Desktop yet.
 
+pub mod apps;
 pub mod handlers;
 pub mod http;
 pub mod relay;
@@ -130,7 +131,8 @@ CREATE TABLE IF NOT EXISTS bindings (
   operations_json TEXT NOT NULL DEFAULT '[]',
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
   binding_epoch INTEGER NOT NULL DEFAULT 0 CHECK (binding_epoch >= 0),
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  instance_id TEXT
 );
 "#;
 
@@ -206,6 +208,8 @@ pub struct Binding {
     pub operations: Vec<String>,
     pub status: String,
     pub binding_epoch: i64,
+    /// The app instance this binding serves, when the bridge created it.
+    pub instance_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -248,6 +252,7 @@ impl Coordinator {
             "ALTER TABLE operation_results ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0",
             [],
         );
+        let _ = conn.execute("ALTER TABLE bindings ADD COLUMN instance_id TEXT", []);
         let _ = conn.execute(
             "ALTER TABLE protocol_operations ADD COLUMN module_source TEXT",
             [],
@@ -626,6 +631,38 @@ impl Coordinator {
         access: &str,
         operations: Vec<String>,
     ) -> Result<Binding, CoordinatorError> {
+        self.bind_resource_inner(resource_id, port_name, protocol, access, operations, None)
+    }
+
+    /// Bind for an app instance so the served app's bridge can find it.
+    pub fn bind_resource_for_instance(
+        &mut self,
+        resource_id: &str,
+        port_name: &str,
+        protocol: &str,
+        access: &str,
+        operations: Vec<String>,
+        instance_id: &str,
+    ) -> Result<Binding, CoordinatorError> {
+        self.bind_resource_inner(
+            resource_id,
+            port_name,
+            protocol,
+            access,
+            operations,
+            Some(instance_id),
+        )
+    }
+
+    fn bind_resource_inner(
+        &mut self,
+        resource_id: &str,
+        port_name: &str,
+        protocol: &str,
+        access: &str,
+        operations: Vec<String>,
+        instance_id: Option<&str>,
+    ) -> Result<Binding, CoordinatorError> {
         if port_name.is_empty() || port_name.len() > 64 {
             return Err(CoordinatorError::Invalid("invalid_port"));
         }
@@ -660,8 +697,8 @@ impl Coordinator {
         }
         let binding_id = new_id("dbind");
         self.conn.execute(
-            "INSERT INTO bindings(id,resource_id,port_name,protocol_ref,access,operations_json,status,binding_epoch,created_at)
-             VALUES (?,?,?,?,?,?,'active',0,?)",
+            "INSERT INTO bindings(id,resource_id,port_name,protocol_ref,access,operations_json,status,binding_epoch,created_at,instance_id)
+             VALUES (?,?,?,?,?,?,'active',0,?,?)",
             params![
                 binding_id,
                 resource_id,
@@ -669,7 +706,8 @@ impl Coordinator {
                 protocol,
                 access,
                 serde_json::to_string(&operations)?,
-                now()
+                now(),
+                instance_id
             ],
         )?;
         self.read_binding(&binding_id)
@@ -678,7 +716,7 @@ impl Coordinator {
     pub fn read_binding(&self, binding_id: &str) -> Result<Binding, CoordinatorError> {
         self.conn
             .query_row(
-                "SELECT id,resource_id,port_name,protocol_ref,access,operations_json,status,binding_epoch
+                "SELECT id,resource_id,port_name,protocol_ref,access,operations_json,status,binding_epoch,instance_id
                  FROM bindings WHERE id=?",
                 params![binding_id],
                 |row| {
@@ -698,6 +736,7 @@ impl Coordinator {
                         })?,
                         status: row.get(6)?,
                         binding_epoch: row.get(7)?,
+                        instance_id: row.get(8)?,
                     })
                 },
             )
@@ -960,6 +999,24 @@ impl Coordinator {
             receipt: Some(outcome.receipt),
             replayed: outcome.replayed,
         })
+    }
+
+    /// Active bindings serving one app instance, for the bridge's requirements.
+    pub fn bindings_for_instance(
+        &self,
+        instance_id: &str,
+    ) -> Result<Vec<Binding>, CoordinatorError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id FROM bindings WHERE instance_id=? AND status='active' ORDER BY port_name",
+        )?;
+        let ids = statement
+            .query_map(params![instance_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut bindings = Vec::new();
+        for id in ids {
+            bindings.push(self.read_binding(&id)?);
+        }
+        Ok(bindings)
     }
 
     /// Invoke a registered handler through a binding after the binding's own

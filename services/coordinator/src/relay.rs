@@ -81,6 +81,7 @@ impl Origin {
                 coordinator: Mutex::new(coordinator),
                 token,
                 shutdown,
+                apps: None,
             },
         }
     }

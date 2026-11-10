@@ -26,14 +26,23 @@ use hyper::{Method, Response, StatusCode};
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
+use crate::apps::{self, DATA_PORTS_BRIDGE_JS, DATA_PORTS_BRIDGE_PATH};
 use crate::{CommitInput, Coordinator, CoordinatorError};
 
 pub type Body = Full<Bytes>;
+
+/// When set, the Coordinator serves a static app and its Data Ports bridge.
+#[derive(Debug, Clone)]
+pub struct AppsConfig {
+    pub dir: std::path::PathBuf,
+    pub instance_id: String,
+}
 
 pub struct ApiState {
     pub coordinator: Mutex<Coordinator>,
     pub token: String,
     pub shutdown: watch::Sender<bool>,
+    pub apps: Option<AppsConfig>,
 }
 
 fn json_response(status: StatusCode, value: Value) -> Response<Body> {
@@ -89,6 +98,115 @@ pub async fn handle_request(
             StatusCode::OK,
             json!({ "status": "ok", "schema_version": crate::SCHEMA_VERSION, "resources": resources }),
         );
+    }
+    if method == Method::GET && path == DATA_PORTS_BRIDGE_PATH {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/javascript; charset=utf-8")
+            .header("cache-control", "no-store")
+            .body(Full::new(Bytes::from(DATA_PORTS_BRIDGE_JS)))
+            .expect("static response");
+    }
+    // The bridge is same-origin and holds no secret: it is the served page
+    // calling the local Coordinator. It exists only when an app is served.
+    if let Some(apps) = &state.apps {
+        if method == Method::GET && path == "/__ato/data-ports" {
+            let coordinator = match state.coordinator.lock() {
+                Ok(coordinator) => coordinator,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({ "error": "storage_error" }),
+                    );
+                }
+            };
+            return match coordinator.bindings_for_instance(&apps.instance_id) {
+                Ok(bindings) => json_response(
+                    StatusCode::OK,
+                    json!({
+                        "instance_id": apps.instance_id,
+                        "bindings": bindings
+                    }),
+                ),
+                Err(error) => error_response(error),
+            };
+        }
+        if method == Method::POST && path.starts_with("/__ato/data-ports/") {
+            let rest = path.trim_start_matches("/__ato/data-ports/");
+            let Some((port, "invoke")) = rest.split_once('/') else {
+                return json_response(StatusCode::NOT_FOUND, json!({ "error": "not_found" }));
+            };
+            let input: Value = match serde_json::from_slice(body) {
+                Ok(value) => value,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::BAD_REQUEST,
+                        json!({ "error": "invalid_json" }),
+                    );
+                }
+            };
+            let operation = input
+                .get("operation")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let idempotency_key = input
+                .get("idempotency_key")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let arguments = input.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let mut coordinator = match state.coordinator.lock() {
+                Ok(coordinator) => coordinator,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({ "error": "storage_error" }),
+                    );
+                }
+            };
+            let binding = match coordinator.bindings_for_instance(&apps.instance_id) {
+                Ok(bindings) => bindings
+                    .into_iter()
+                    .find(|binding| binding.port_name == port),
+                Err(error) => return error_response(error),
+            };
+            let Some(binding) = binding else {
+                return json_response(
+                    StatusCode::NOT_FOUND,
+                    json!({ "error": "data_port_not_connected" }),
+                );
+            };
+            let resource = match coordinator.read_resource("local", &binding.resource_id) {
+                Ok(resource) => resource,
+                Err(error) => return error_response(error),
+            };
+            return match coordinator.invoke_binding_handler(
+                &binding.binding_id,
+                operation,
+                &arguments,
+                idempotency_key,
+                resource.revision,
+                resource.generation,
+            ) {
+                Ok(outcome) => json_response(StatusCode::OK, json!(outcome)),
+                Err(error) => error_response(error),
+            };
+        }
+    }
+    // The served app's own files are public on this local origin.
+    if method == Method::GET {
+        if let Some(apps) = &state.apps {
+            if let Some(file) = apps::resolve(&apps.dir, path) {
+                return match std::fs::read(&file) {
+                    Ok(bytes) => Response::builder()
+                        .status(StatusCode::OK)
+                        .header("content-type", apps::content_type(&file))
+                        .header("cache-control", "no-store")
+                        .body(Full::new(Bytes::from(bytes)))
+                        .expect("static response"),
+                    Err(_) => json_response(StatusCode::NOT_FOUND, json!({ "error": "not_found" })),
+                };
+            }
+        }
     }
     if !authorized(authorization, &state.token) {
         return json_response(StatusCode::UNAUTHORIZED, json!({ "error": "unauthorized" }));
@@ -319,7 +437,19 @@ pub async fn handle_request(
                     );
                 }
             };
-            match coordinator.bind_resource(id, port, protocol, access, operations) {
+            let instance_id = input.get("instance_id").and_then(Value::as_str);
+            let bound = match instance_id {
+                Some(instance_id) => coordinator.bind_resource_for_instance(
+                    id,
+                    port,
+                    protocol,
+                    access,
+                    operations,
+                    instance_id,
+                ),
+                None => coordinator.bind_resource(id, port, protocol, access, operations),
+            };
+            match bound {
                 Ok(binding) => json_response(StatusCode::CREATED, json!(binding)),
                 Err(error) => error_response(error),
             }
@@ -441,6 +571,7 @@ pub async fn handle_request(
             let _ = state.shutdown.send(true);
             json_response(StatusCode::OK, json!({ "status": "stopping" }))
         }
+        (&Method::GET, _) => json_response(StatusCode::NOT_FOUND, json!({ "error": "not_found" })),
         _ => json_response(StatusCode::NOT_FOUND, json!({ "error": "not_found" })),
     }
 }
@@ -457,6 +588,7 @@ mod tests {
             coordinator: Mutex::new(Coordinator::open_in_memory().unwrap()),
             token: "test-token".to_owned(),
             shutdown,
+            apps: None,
         }
     }
 
@@ -955,5 +1087,117 @@ export function createTask({ arguments: args, state }) {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(gc["deleted_results"], 0);
+    }
+
+    async fn call_raw(
+        state: &ApiState,
+        method: Method,
+        path: &str,
+        authorization: Option<&str>,
+        body: Value,
+    ) -> (StatusCode, String, String) {
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let response = handle_request(state, &method, path, authorization, &bytes).await;
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            content_type,
+            String::from_utf8_lossy(&body).into_owned(),
+        )
+    }
+
+    #[tokio::test]
+    async fn serves_an_app_and_its_data_ports_bridge() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("index.html"), "<h1>served app</h1>").unwrap();
+        let (shutdown, _receiver) = watch::channel(false);
+        let state = ApiState {
+            coordinator: Mutex::new(Coordinator::open_in_memory().unwrap()),
+            token: "test-token".to_owned(),
+            shutdown,
+            apps: Some(crate::http::AppsConfig {
+                dir: directory.path().to_path_buf(),
+                instance_id: "app-1".to_owned(),
+            }),
+        };
+        let module = r#"
+export function createTask({ arguments: args, state }) {
+  const board = state && state.document ? state.document : {};
+  const tasks = Object.assign({}, board.tasks || {});
+  tasks["task-1"] = { id: "task-1", title: String(args.title), dueAt: null, completed: false };
+  return { operations: [{ kind: "replace", value: { tasks } }], result: { task_id: "task-1" } };
+}
+"#;
+        {
+            let mut coordinator = state.coordinator.lock().unwrap();
+            coordinator
+                .register_handler_operation(
+                    "todo.board@1",
+                    "todo_create",
+                    "evolution",
+                    "read_write",
+                    module,
+                    "createTask",
+                    "alice/app",
+                )
+                .unwrap();
+            let created = coordinator
+                .create_resource("local", "todo.board@1", None, json!({"tasks": {}}))
+                .unwrap();
+            coordinator
+                .bind_resource_for_instance(
+                    &created.resource_id,
+                    "tasks",
+                    "todo.board@1",
+                    "operations",
+                    vec!["todo_create".into()],
+                    "app-1",
+                )
+                .unwrap();
+        }
+
+        let (status, content_type, body) =
+            call_raw(&state, Method::GET, "/", None, json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(content_type.starts_with("text/html"));
+        assert!(body.contains("served app"));
+
+        let (status, _, bridge) =
+            call_raw(&state, Method::GET, "/__ato/data-ports", None, json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        let bridge: Value = serde_json::from_str(&bridge).unwrap();
+        assert_eq!(bridge["instance_id"], "app-1");
+        assert_eq!(bridge["bindings"][0]["port_name"], "tasks");
+        assert_eq!(bridge["bindings"][0]["access"], "operations");
+
+        let (status, _, outcome) = call_raw(
+            &state,
+            Method::POST,
+            "/__ato/data-ports/tasks/invoke",
+            None,
+            json!({
+                "operation": "todo_create",
+                "arguments": {"title": "From the served app"},
+                "idempotency_key": "ui-1"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{outcome}");
+        let outcome: Value = serde_json::from_str(&outcome).unwrap();
+        assert_eq!(outcome["revision"], 2);
+        assert_eq!(outcome["result"]["task_id"], "task-1");
+
+        // A path outside the app directory is not served.
+        let (status, _, _) = call_raw(&state, Method::GET, "/../secret", None, json!({})).await;
+        // Not served; the request falls through to the authenticated API and
+        // is refused there.
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 }
