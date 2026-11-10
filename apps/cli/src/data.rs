@@ -170,6 +170,13 @@ pub enum BindingCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum ProtocolCommand {
+    /// List registered operations (all protocols, or one).
+    List {
+        #[arg(long)]
+        protocol: Option<String>,
+        #[command(flatten)]
+        coordinator: CoordinatorArgs,
+    },
     /// Register one operation of a Protocol (publisher-owned).
     Register {
         protocol: String,
@@ -255,6 +262,10 @@ pub fn run(args: DataArgs) -> Result<()> {
             } => binding_revoke(&coordinator, &binding_id),
         },
         DataCommand::Protocol { command } => match command {
+            ProtocolCommand::List {
+                protocol,
+                coordinator,
+            } => protocol_list(&coordinator, protocol.as_deref()),
             ProtocolCommand::Register {
                 protocol,
                 operation,
@@ -778,6 +789,62 @@ fn binding_revoke(coordinator: &CoordinatorArgs, binding_id: &str) -> Result<()>
             .and_then(Value::as_str)
             .unwrap_or("unknown")
     );
+    Ok(())
+}
+
+fn protocol_list(coordinator: &CoordinatorArgs, protocol: Option<&str>) -> Result<()> {
+    let path = match protocol {
+        Some(protocol) => format!("/v1/protocols/{}/operations", protocol.replace('/', "%2F")),
+        None => "/v1/operations".to_owned(),
+    };
+    let value = request(coordinator, reqwest::Method::GET, &path, None)?;
+    if coordinator.json {
+        return print_json(&value);
+    }
+    let operations = value
+        .get("operations")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for operation in operations {
+        let digest = operation
+            .get("implementation_digest")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        println!(
+            "{}  {}  {}  {}  {}  {}",
+            operation
+                .get("protocol")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+            operation
+                .get("operation")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+            operation
+                .get("semantics")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+            operation
+                .get("access")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+            if digest.len() > 19 {
+                &digest[..19]
+            } else {
+                digest
+            },
+            if operation
+                .get("expose_mcp")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                "mcp"
+            } else {
+                "-"
+            },
+        );
+    }
     Ok(())
 }
 

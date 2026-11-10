@@ -418,6 +418,37 @@ fn binding_list_prints_scopes_and_filters_by_instance() {
 }
 
 #[test]
+fn protocol_list_prints_the_registry_view() {
+    let body = r#"{"operations":[{"protocol":"todo.board@1","operation":"todo_create","semantics":"evolution","access":"read_write","publisher":"alice/app","implementation_digest":"sha256:abcdef0123456789abcdef","expose_mcp":true}]}"#;
+    let (port, requests, handle) = capturing_stub(vec![(200, body)]);
+    let output = ato()
+        .args([
+            "data",
+            "protocol",
+            "list",
+            "--protocol",
+            "todo.board@1",
+            "--coordinator",
+            &format!("http://127.0.0.1:{port}"),
+            "--token",
+            "test-token",
+        ])
+        .output()
+        .expect("run ato data protocol list");
+    handle.join().expect("stub");
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("todo_create"), "{stdout}");
+    assert!(stdout.contains("evolution"), "{stdout}");
+    assert!(stdout.contains("mcp"), "{stdout}");
+    let request = requests.lock().unwrap()[0].clone();
+    assert!(
+        request.contains("/v1/protocols/todo.board@1/operations"),
+        "{request}"
+    );
+}
+
+#[test]
 fn quota_prints_usage_and_limit() {
     let (port, handle) = stub(vec![(
         200,
