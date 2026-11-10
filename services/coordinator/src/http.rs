@@ -52,6 +52,7 @@ fn error_response(error: CoordinatorError) -> Response<Body> {
         CoordinatorError::Conflict(code) => (StatusCode::CONFLICT, *code),
         CoordinatorError::Invalid(code) => (StatusCode::UNPROCESSABLE_ENTITY, *code),
         CoordinatorError::Forbidden(code) => (StatusCode::FORBIDDEN, *code),
+        CoordinatorError::QuotaExceeded => (StatusCode::PAYLOAD_TOO_LARGE, "quota_exceeded"),
         CoordinatorError::Storage(_) | CoordinatorError::Json(_) => {
             (StatusCode::SERVICE_UNAVAILABLE, "storage_error")
         }
@@ -136,6 +137,21 @@ pub async fn handle_request(
             };
             match coordinator.list_resources("local") {
                 Ok(resources) => json_response(StatusCode::OK, json!({ "resources": resources })),
+                Err(error) => error_response(error),
+            }
+        }
+        (&Method::GET, ["v1", "data-resources", "quota"]) => {
+            let coordinator = match state.coordinator.lock() {
+                Ok(coordinator) => coordinator,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({ "error": "storage_error" }),
+                    );
+                }
+            };
+            match coordinator.quota("local") {
+                Ok(quota) => json_response(StatusCode::OK, json!(quota)),
                 Err(error) => error_response(error),
             }
         }
@@ -378,6 +394,21 @@ pub async fn handle_request(
             };
             match coordinator.revoke_binding(id) {
                 Ok(binding) => json_response(StatusCode::OK, json!(binding)),
+                Err(error) => error_response(error),
+            }
+        }
+        (&Method::POST, ["control", "gc"]) => {
+            let mut coordinator = match state.coordinator.lock() {
+                Ok(coordinator) => coordinator,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({ "error": "storage_error" }),
+                    );
+                }
+            };
+            match coordinator.gc_expired_results() {
+                Ok(deleted) => json_response(StatusCode::OK, json!({ "deleted_results": deleted })),
                 Err(error) => error_response(error),
             }
         }
@@ -788,5 +819,42 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["error"], "binding_read_only");
+    }
+
+    #[tokio::test]
+    async fn reports_quota_and_runs_gc() {
+        let state = state();
+        let (status, created) = call(
+            &state,
+            Method::POST,
+            "/v1/data-resources",
+            Some("Bearer test-token"),
+            json!({"protocol": "todo.board@1", "document": {"tasks": {}}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, quota) = call(
+            &state,
+            Method::GET,
+            "/v1/data-resources/quota",
+            Some("Bearer test-token"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(quota["resources"], 1);
+        assert_eq!(quota["used_bytes"], created["byte_size"]);
+        assert!(quota["limit_bytes"].as_i64().unwrap() > 0);
+
+        let (status, gc) = call(
+            &state,
+            Method::POST,
+            "/control/gc",
+            Some("Bearer test-token"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(gc["deleted_results"], 0);
     }
 }
