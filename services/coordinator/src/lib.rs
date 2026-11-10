@@ -11,9 +11,11 @@
 //! - a receipt written in the same transaction as the revision;
 //! - restart persistence (the database file is the authority).
 //!
-//! HTTP, Ports/Bindings, operation grants and the conformance suite against the
-//! hosted D1 implementation are follow-up slices. Nothing here is wired into
-//! the CLI or Desktop yet.
+//! The HTTP surface lives in [`http`]; Ports/Bindings, operation grants and the
+//! conformance suite against the hosted D1 implementation are follow-up slices.
+//! Nothing here is wired into the CLI or Desktop yet.
+
+pub mod http;
 
 use std::path::Path;
 
