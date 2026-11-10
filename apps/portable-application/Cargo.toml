@@ -31,6 +31,7 @@ ato-tls-observe = { path = "../../lib/tls-observe", version = "0.1.0" }
 netd = { path = "../../services/netd" }
 base64 = "0.22"
 anyhow = "1"
+flate2 = "1"
 clap = { version = "4.5", features = ["derive", "env"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
@@ -43,4 +44,3 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
 
 [dev-dependencies]
-flate2 = "1"

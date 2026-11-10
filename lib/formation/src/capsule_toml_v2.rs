@@ -11,11 +11,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 
 use crate::authoring::{
-    ClientAddressTransport, EffectClass, PROCESS_PROTOCOL, SCENARIO_CONTRACT_VERIFIER,
-    STATE_FILESYSTEM_PROTOCOL, StateSaveDeclaration, TCP_EGRESS_PROTOCOL, TLS_CONTRACT_VERIFIER,
-    TlsStart, WORKSPACE_PROTOCOL, validate_tls_server_name,
+    BROWSER_PROTOCOL, ClientAddressTransport, EffectClass, PROCESS_PROTOCOL,
+    SCENARIO_CONTRACT_VERIFIER, STATE_FILESYSTEM_PROTOCOL, StateSaveDeclaration, TCP_EGRESS_PROTOCOL,
+    TLS_CONTRACT_VERIFIER, TlsStart, WORKSPACE_PROTOCOL, validate_tls_server_name,
 };
 use crate::model_set::MODEL_SET_PROTOCOL;
+use crate::native_desktop::{
+    NATIVE_PROTOCOL, NativeArch, NativeArtifactFormat, NativeOs, NativeSignaturePolicy,
+    NativeSignatureTarget, native_bundle_root, valid_native_entry,
+};
 use crate::requirements::HostRequirement;
 
 pub const CAPSULE_SCHEMA_V2: &str = "ato.capsule/2";
@@ -125,6 +129,29 @@ pub enum PortableDerivationKindV2 {
     /// supervisor. Authoring-only classification: the bound route is the same
     /// `BoundStep`/`BoundPort` shape, plus each consumer step's `peer_ports`.
     ProcessServiceGroup,
+    /// One `ato.browser@1` step serving the workspace tree as files. The
+    /// bound route is the same single-step static profile the v1 frontend
+    /// builds; this kind only lets one source declare it next to other routes.
+    StaticWeb,
+    /// One `ato.native@1` serving step: a digest-pinned desktop executable for
+    /// exactly one operating system and architecture.
+    Native,
+}
+
+/// A native route as authored: the source-relative artifact file and the
+/// logical facts that become the step's `ato.native.*` runtimes entries. The
+/// bundle builder reads the artifact and replaces `artifact_path` with the
+/// blob digest; the path itself is never bundled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortableNativeDraftV2 {
+    pub os: String,
+    pub arch: String,
+    pub entry: String,
+    pub artifact_path: String,
+    pub format: Option<String>,
+    pub signature: Option<String>,
+    /// `executable` (default, omitted) or `bundle`.
+    pub signature_target: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +170,12 @@ pub struct PortableDerivationDraftV2 {
     /// Derivation. Validated; absent means no host condition.
     pub host: Option<HostRequirement>,
     pub startup: Option<crate::requirements::StartupRequirement>,
+    /// `ato.browser@1` only: the entry document inside the workspace tree.
+    pub entry: Option<String>,
+    /// `ato.browser@1` only: whether an unknown path falls back to `entry`.
+    pub spa_fallback: bool,
+    /// `ato.native@1` only: the artifact and its platform facts.
+    pub native: Option<PortableNativeDraftV2>,
 }
 
 /// One serving step of a service group (OCI or native process). Authoring
@@ -319,6 +352,29 @@ struct Derivation {
     host: Option<HostRequirement>,
     #[serde(default)]
     startup: Option<crate::requirements::StartupRequirement>,
+    // ── `ato.browser@1` only ─────────────────────────────────────────
+    /// The entry document inside the workspace tree.
+    #[serde(default)]
+    entry: Option<String>,
+    /// Whether an unknown path is served from `entry`.
+    #[serde(default)]
+    spa_fallback: Option<bool>,
+    // ── `ato.native@1` only ──────────────────────────────────────────
+    /// Source-relative artifact file. It is bundled as a payload blob, never
+    /// fetched at run time, and excluded from the workspace tree.
+    #[serde(default)]
+    artifact: Option<String>,
+    #[serde(default)]
+    os: Option<String>,
+    #[serde(default)]
+    arch: Option<String>,
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    signature: Option<String>,
+    /// `executable` (default) or `bundle`: what the signature verdict covers.
+    #[serde(default)]
+    signature_target: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -877,11 +933,11 @@ fn parse_capsule_toml_v2_impl(
                 }
                 if !matches!(
                     derivation.protocol.as_str(),
-                    PROCESS_PROTOCOL | OCI_PROTOCOL
+                    PROCESS_PROTOCOL | OCI_PROTOCOL | NATIVE_PROTOCOL
                 ) {
                     return Err(invalid(
                         "derivation.startup",
-                        "startup is supported only by a process route or a single OCI route",
+                        "startup is supported only by a process, native or single OCI route",
                     ));
                 }
                 // A single route declares exactly one Port, `app.http`. Naming
@@ -896,6 +952,15 @@ fn parse_capsule_toml_v2_impl(
             if let Some(host) = &host {
                 host.validate()
                     .map_err(|e| invalid("derivation.host", e.0))?;
+                // A native route's platform is pinned by its own descriptor
+                // (`os`/`arch`). Two declarations could disagree, and the
+                // admission probe reads the descriptor, so refuse the second.
+                if derivation.protocol == NATIVE_PROTOCOL {
+                    return Err(invalid(
+                        "derivation.host",
+                        "a native route declares its platform as os/arch, not as a host condition",
+                    ));
+                }
             }
             let route = if derivation.service.is_empty() {
                 parse_single_route(derivation)
@@ -958,23 +1023,199 @@ fn validate_oci_platform(field: &str, platform: Option<&String>) -> Result<(), C
 fn parse_single_route(
     derivation: Derivation,
 ) -> Result<PortableDerivationDraftV2, CapsuleTomlV2Error> {
-    let argv = derivation.argv.unwrap_or_default();
-    let cwd = derivation.cwd.unwrap_or_default();
-    let env = derivation.env.unwrap_or_default();
-    let guest_port = derivation.guest_port.unwrap_or(0);
-    validate_argv("derivation.argv", &argv)?;
-    if guest_port == 0 {
-        return Err(invalid(
-            "derivation.guest_port",
-            "must be between 1 and 65535",
-        ));
-    }
-    validate_relative(&cwd, "derivation.cwd")?;
-    validate_env("derivation.env", &env)?;
-    let kind = match derivation.protocol.as_str() {
+    let Derivation {
+        id,
+        protocol,
+        runtimes,
+        argv,
+        cwd,
+        env,
+        guest_port,
+        entry,
+        spa_fallback,
+        artifact,
+        os,
+        arch,
+        format,
+        signature,
+        signature_target,
+        ..
+    } = derivation;
+    let argv = argv.unwrap_or_default();
+    let cwd = cwd.unwrap_or_default();
+    let env = env.unwrap_or_default();
+    // Each single-route Adapter owns a disjoint slice of the grammar. A field
+    // another Adapter defines is refused rather than ignored, so a declaration
+    // cannot mean two things.
+    let has_native_fields = artifact.is_some()
+        || os.is_some()
+        || arch.is_some()
+        || format.is_some()
+        || signature.is_some()
+        || signature_target.is_some();
+    let has_web_fields = entry.is_some() || spa_fallback.is_some();
+    let mut static_entry = None;
+    let mut static_spa_fallback = false;
+    let mut native = None;
+    let kind = match protocol.as_str() {
+        BROWSER_PROTOCOL => {
+            if !runtimes.is_empty()
+                || !argv.is_empty()
+                || !cwd.is_empty()
+                || !env.is_empty()
+                || guest_port.is_some()
+                || has_native_fields
+            {
+                return Err(invalid(
+                    "derivation",
+                    "a static-web route declares only its entry document",
+                ));
+            }
+            let Some(entry) = entry else {
+                return Err(invalid(
+                    "derivation.entry",
+                    "a static-web route names its entry document",
+                ));
+            };
+            validate_relative(&entry, "derivation.entry")?;
+            if entry == "." {
+                return Err(invalid(
+                    "derivation.entry",
+                    "must name an entry document, not the source root",
+                ));
+            }
+            static_entry = Some(entry);
+            static_spa_fallback = spa_fallback.unwrap_or(false);
+            PortableDerivationKindV2::StaticWeb
+        }
+        NATIVE_PROTOCOL => {
+            if !runtimes.is_empty() || !argv.is_empty() || !cwd.is_empty() || !env.is_empty() {
+                return Err(invalid(
+                    "derivation",
+                    "a native route declares no runtimes, argv, cwd or env; its facts are \
+                     artifact, os, arch, entry and signature",
+                ));
+            }
+            if spa_fallback.is_some() {
+                return Err(invalid(
+                    "derivation.spa_fallback",
+                    "spa_fallback is not a native fact; entry names the executable",
+                ));
+            }
+            let guest_port = guest_port.ok_or_else(|| {
+                invalid(
+                    "derivation.guest_port",
+                    "a native route declares the loopback port its app serves",
+                )
+            })?;
+            if guest_port == 0 {
+                return Err(invalid(
+                    "derivation.guest_port",
+                    "must be between 1 and 65535",
+                ));
+            }
+            let os = os
+                .as_deref()
+                .and_then(NativeOs::parse)
+                .ok_or_else(|| invalid("derivation.os", "must be `macos` or `windows`"))?;
+            let arch = arch
+                .as_deref()
+                .and_then(NativeArch::parse)
+                .ok_or_else(|| invalid("derivation.arch", "must be `aarch64` or `x86_64`"))?;
+            let artifact = artifact.ok_or_else(|| {
+                invalid(
+                    "derivation.artifact",
+                    "a native route names the source-relative artifact file",
+                )
+            })?;
+            validate_relative(&artifact, "derivation.artifact")?;
+            if artifact == "." || !artifact.ends_with(".tar.gz") {
+                return Err(invalid(
+                    "derivation.artifact",
+                    "must be a .tar.gz file relative to the source root",
+                ));
+            }
+            let entry = entry.ok_or_else(|| {
+                invalid(
+                    "derivation.entry",
+                    "a native route names the executable inside its artifact",
+                )
+            })?;
+            if !valid_native_entry(&entry) {
+                return Err(invalid(
+                    "derivation.entry",
+                    "must be a traversal-free path relative to the artifact root",
+                ));
+            }
+            let format = match format.as_deref() {
+                None => None,
+                Some(value) => Some(
+                    NativeArtifactFormat::parse(value)
+                        .ok_or_else(|| invalid("derivation.format", "must be `tar.gz`"))?
+                        .as_str()
+                        .to_owned(),
+                ),
+            };
+            let signature = match signature.as_deref() {
+                None => None,
+                Some(value) => Some(
+                    NativeSignaturePolicy::parse(value)
+                        .ok_or_else(|| {
+                            invalid(
+                                "derivation.signature",
+                                "must be `require-valid` or `require-valid-or-local-override`",
+                            )
+                        })?
+                        .as_str()
+                        .to_owned(),
+                ),
+            };
+            let signature_target = match signature_target.as_deref() {
+                None => None,
+                Some(value) => {
+                    let target = NativeSignatureTarget::parse(value).ok_or_else(|| {
+                        invalid(
+                            "derivation.signature_target",
+                            "must be `executable` or `bundle`",
+                        )
+                    })?;
+                    if target.is_bundle() && native_bundle_root(&entry).is_none() {
+                        return Err(invalid(
+                            "derivation.signature_target",
+                            "`bundle` requires the entry to be inside an `.app` bundle in the artifact",
+                        ));
+                    }
+                    Some(target.as_str().to_owned())
+                }
+            };
+            native = Some(PortableNativeDraftV2 {
+                os: os.as_str().to_owned(),
+                arch: arch.as_str().to_owned(),
+                entry,
+                artifact_path: artifact,
+                format,
+                signature,
+                signature_target,
+            });
+            PortableDerivationKindV2::Native
+        }
         PROCESS_PROTOCOL => {
-            if derivation
-                .runtimes
+            if has_native_fields || has_web_fields {
+                return Err(invalid(
+                    "derivation",
+                    "entry, artifact, os, arch, format and signature are not process facts",
+                ));
+            }
+            validate_argv("derivation.argv", &argv)?;
+            if !matches!(guest_port, Some(1..=u16::MAX)) {
+                return Err(invalid(
+                    "derivation.guest_port",
+                    "must be between 1 and 65535",
+                ));
+            }
+            validate_relative(&cwd, "derivation.cwd")?;
+            validate_env("derivation.env", &env)?;
+            if runtimes
                 .get("python")
                 .is_none_or(|value| value.trim().is_empty())
             {
@@ -986,12 +1227,24 @@ fn parse_single_route(
             PortableDerivationKindV2::Process
         }
         OCI_PROTOCOL => {
-            validate_oci_image("derivation.runtimes", derivation.runtimes.get("oci.image"))
+            if has_native_fields || has_web_fields {
+                return Err(invalid(
+                    "derivation",
+                    "entry, artifact, os, arch, format and signature are not OCI facts",
+                ));
+            }
+            validate_argv("derivation.argv", &argv)?;
+            if !matches!(guest_port, Some(1..=u16::MAX)) {
+                return Err(invalid(
+                    "derivation.guest_port",
+                    "must be between 1 and 65535",
+                ));
+            }
+            validate_relative(&cwd, "derivation.cwd")?;
+            validate_env("derivation.env", &env)?;
+            validate_oci_image("derivation.runtimes", runtimes.get("oci.image"))
                 .and_then(|()| {
-                    validate_oci_platform(
-                        "derivation.runtimes",
-                        derivation.runtimes.get("oci.platform"),
-                    )
+                    validate_oci_platform("derivation.runtimes", runtimes.get("oci.platform"))
                 })
                 .map_err(|_| {
                     invalid(
@@ -1004,21 +1257,27 @@ fn parse_single_route(
         other => {
             return Err(invalid(
                 "derivation.use",
-                format!("{other:?} is unsupported; use {PROCESS_PROTOCOL:?} or {OCI_PROTOCOL:?}"),
+                format!(
+                    "{other:?} is unsupported; use {PROCESS_PROTOCOL:?}, {OCI_PROTOCOL:?}, \
+                     {BROWSER_PROTOCOL:?} or {NATIVE_PROTOCOL:?}"
+                ),
             ));
         }
     };
     Ok(PortableDerivationDraftV2 {
-        label: derivation.id,
+        label: id,
         kind,
-        runtimes: derivation.runtimes,
+        runtimes,
         argv,
         cwd,
         env,
-        guest_port,
+        guest_port: guest_port.unwrap_or(0),
         services: Vec::new(),
         host: None,
         startup: None,
+        entry: static_entry,
+        spa_fallback: static_spa_fallback,
+        native,
     })
 }
 
@@ -1140,6 +1399,20 @@ fn parse_service_group(
             "a native process service group declares every runtime per service",
         ));
     }
+    if derivation.entry.is_some()
+        || derivation.spa_fallback.is_some()
+        || derivation.artifact.is_some()
+        || derivation.os.is_some()
+        || derivation.arch.is_some()
+        || derivation.format.is_some()
+        || derivation.signature.is_some()
+        || derivation.signature_target.is_some()
+    {
+        return Err(invalid(
+            "derivation",
+            "entry, artifact, os, arch, format and signature belong to a single serving route",
+        ));
+    }
     let services = compile_services(derivation.service, state_ids, binding_ids, adapter)?;
     Ok(PortableDerivationDraftV2 {
         label: derivation.id,
@@ -1155,6 +1428,9 @@ fn parse_service_group(
         services,
         host: None,
         startup: None,
+        entry: None,
+        spa_fallback: false,
+        native: None,
     })
 }
 
@@ -2351,5 +2627,289 @@ timeout_ms = 60000
             "timeout_ms = 120000\nexpect_status = 200\nmax_body_bytes = 4096",
         );
         assert!(parse_capsule_toml_v2(&bounded).is_ok());
+    }
+
+    const NATIVE_MIXED: &str = r#"
+schema = "ato.capsule/2"
+
+[application]
+title = "Native mixed"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "proof"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/proof.txt"
+status = 200
+
+[[derivation]]
+id = "web"
+use = "ato.browser@1"
+runtimes = {}
+entry = "index.html"
+
+[[derivation]]
+id = "native-macos"
+use = "ato.native@1"
+runtimes = {}
+guest_port = 18080
+artifact = "dist/app-macos.tar.gz"
+os = "macos"
+arch = "aarch64"
+entry = "app/run.sh"
+signature = "require-valid-or-local-override"
+
+[[derivation]]
+id = "native-windows"
+use = "ato.native@1"
+runtimes = {}
+guest_port = 18080
+artifact = "dist/app-windows.tar.gz"
+os = "windows"
+arch = "x86_64"
+entry = "app/run.bat"
+format = "tar.gz"
+
+[effects]
+default = "pure"
+"#;
+
+    #[test]
+    fn one_source_can_declare_a_static_and_two_native_routes() {
+        let draft = parse_capsule_toml_v2(NATIVE_MIXED).unwrap();
+        assert_eq!(draft.derivations.len(), 3);
+        let web = &draft.derivations[0];
+        assert_eq!(web.kind, PortableDerivationKindV2::StaticWeb);
+        assert_eq!(web.entry.as_deref(), Some("index.html"));
+        assert!(!web.spa_fallback);
+        assert!(web.native.is_none());
+        let macos = &draft.derivations[1];
+        assert_eq!(macos.kind, PortableDerivationKindV2::Native);
+        assert_eq!(macos.guest_port, 18080);
+        let native = macos.native.as_ref().unwrap();
+        assert_eq!(native.os, "macos");
+        assert_eq!(native.arch, "aarch64");
+        assert_eq!(native.artifact_path, "dist/app-macos.tar.gz");
+        assert_eq!(native.entry, "app/run.sh");
+        assert_eq!(
+            native.signature.as_deref(),
+            Some("require-valid-or-local-override")
+        );
+        assert!(native.format.is_none());
+        let windows = draft.derivations[2].native.as_ref().unwrap();
+        assert_eq!(windows.format.as_deref(), Some("tar.gz"));
+        assert!(windows.signature.is_none());
+    }
+
+    #[test]
+    fn native_authoring_refuses_a_descriptor_it_cannot_honour() {
+        for (what, mutation) in [
+            (
+                "unknown use",
+                NATIVE_MIXED.replace("use = \"ato.native@1\"", "use = \"ato.native@2\""),
+            ),
+            (
+                "missing artifact",
+                NATIVE_MIXED.replace("artifact = \"dist/app-macos.tar.gz\"\n", ""),
+            ),
+            (
+                "absolute artifact",
+                NATIVE_MIXED.replace(
+                    "artifact = \"dist/app-macos.tar.gz\"",
+                    "artifact = \"/etc/app.tar.gz\"",
+                ),
+            ),
+            (
+                "traversing artifact",
+                NATIVE_MIXED.replace(
+                    "artifact = \"dist/app-macos.tar.gz\"",
+                    "artifact = \"../app.tar.gz\"",
+                ),
+            ),
+            (
+                "not tar.gz",
+                NATIVE_MIXED.replace(
+                    "artifact = \"dist/app-macos.tar.gz\"",
+                    "artifact = \"dist/app.zip\"",
+                ),
+            ),
+            (
+                "absolute entry",
+                NATIVE_MIXED.replace("entry = \"app/run.sh\"", "entry = \"/app/run.sh\""),
+            ),
+            (
+                "traversing entry",
+                NATIVE_MIXED.replace("entry = \"app/run.sh\"", "entry = \"../run.sh\""),
+            ),
+            (
+                "unknown os",
+                NATIVE_MIXED.replace("os = \"macos\"", "os = \"linux\""),
+            ),
+            (
+                "unknown arch",
+                NATIVE_MIXED.replace("arch = \"aarch64\"", "arch = \"amd64\""),
+            ),
+            (
+                "unknown format",
+                NATIVE_MIXED.replace("format = \"tar.gz\"", "format = \"zip\""),
+            ),
+            (
+                "unknown signature policy",
+                NATIVE_MIXED.replace(
+                    "signature = \"require-valid-or-local-override\"",
+                    "signature = \"verify-and-record\"",
+                ),
+            ),
+            (
+                "missing guest port",
+                NATIVE_MIXED.replace("guest_port = 18080\nartifact", "artifact"),
+            ),
+            (
+                "zero guest port",
+                NATIVE_MIXED.replace("guest_port = 18080", "guest_port = 0"),
+            ),
+            (
+                "native runtime fact",
+                NATIVE_MIXED.replace(
+                    "use = \"ato.native@1\"\nruntimes = {}",
+                    "use = \"ato.native@1\"\nruntimes = { python = \"3.12\" }",
+                ),
+            ),
+            (
+                "host condition on a native route",
+                NATIVE_MIXED.replace(
+                    "os = \"macos\"\narch = \"aarch64\"",
+                    "os = \"macos\"\narch = \"aarch64\"\nhost = { os = \"macos\", arch = \"aarch64\" }",
+                ),
+            ),
+            (
+                "process field on a native route",
+                NATIVE_MIXED.replace(
+                    "entry = \"app/run.bat\"",
+                    "entry = \"app/run.bat\"\nargv = [\"run\"]",
+                ),
+            ),
+        ] {
+            let result = parse_capsule_toml_v2(&mutation);
+            // One case replaces a protocol the mixed source does not contain;
+            // it must still be refused (as a syntax/shape error or a route
+            // error), never silently accepted.
+            assert!(result.is_err(), "{what} was accepted");
+        }
+    }
+
+    #[test]
+    fn a_static_route_without_an_entry_is_refused() {
+        let text = NATIVE_MIXED.replace(
+            "use = \"ato.browser@1\"\nruntimes = {}\nentry = \"index.html\"",
+            "use = \"ato.browser@1\"\nruntimes = {}",
+        );
+        assert!(parse_capsule_toml_v2(&text).is_err());
+    }
+
+    const NATIVE_BUNDLE_TARGET: &str = r#"
+schema = "ato.capsule/2"
+
+[application]
+title = "Native bundle target"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "proof"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/proof.txt"
+status = 200
+
+[[derivation]]
+id = "native-macos"
+use = "ato.native@1"
+runtimes = {}
+guest_port = 18080
+artifact = "artifacts/app-macos.tar.gz"
+os = "macos"
+arch = "aarch64"
+entry = "MyApp.app/Contents/MacOS/MyApp"
+signature = "require-valid-or-local-override"
+signature_target = "bundle"
+
+[effects]
+default = "pure"
+"#;
+
+    #[test]
+    fn a_native_route_can_declare_a_bundle_signature_target() {
+        let draft = parse_capsule_toml_v2(NATIVE_BUNDLE_TARGET).unwrap();
+        let native = draft.derivations[0].native.as_ref().unwrap();
+        assert_eq!(native.signature_target.as_deref(), Some("bundle"));
+        assert_eq!(native.entry, "MyApp.app/Contents/MacOS/MyApp");
+
+        // Omitting the key keeps the pre-existing declaration and byte form.
+        let without = NATIVE_BUNDLE_TARGET.replace("signature_target = \"bundle\"\n", "");
+        let draft = parse_capsule_toml_v2(&without).unwrap();
+        assert!(
+            draft.derivations[0]
+                .native
+                .as_ref()
+                .unwrap()
+                .signature_target
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_bundle_signature_target_is_refused_where_it_cannot_hold() {
+        for (what, text) in [
+            (
+                "unknown target",
+                NATIVE_BUNDLE_TARGET.replace(
+                    "signature_target = \"bundle\"",
+                    "signature_target = \"codesign\"",
+                ),
+            ),
+            (
+                "bundle without an app ancestor",
+                NATIVE_BUNDLE_TARGET.replace(
+                    "entry = \"MyApp.app/Contents/MacOS/MyApp\"",
+                    "entry = \"app/run.sh\"",
+                ),
+            ),
+            (
+                "bundle needs an entry inside it",
+                NATIVE_BUNDLE_TARGET.replace(
+                    "entry = \"MyApp.app/Contents/MacOS/MyApp\"",
+                    "entry = \"MyApp.app\"",
+                ),
+            ),
+            (
+                "target on a static-web route",
+                NATIVE_BUNDLE_TARGET.replace(
+                    "use = \"ato.native@1\"",
+                    "use = \"ato.browser@1\"",
+                ).replace(
+                    "artifact = \"artifacts/app-macos.tar.gz\"\nos = \"macos\"\narch = \"aarch64\"\n",
+                    "",
+                ),
+            ),
+        ] {
+            assert!(parse_capsule_toml_v2(&text).is_err(), "{what}");
+        }
     }
 }
