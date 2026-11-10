@@ -75,7 +75,8 @@ merged implementation are separate states.
   [VM_SNAPSHOT_MATERIALIZATION](draft/VM_SNAPSHOT_MATERIALIZATION.md)
 - App surfaces (draft):
   [ACTIVITY_OPERATION_ADAPTER_V0](draft/ACTIVITY_OPERATION_ADAPTER_V0.md),
-  [TAURI_DESKTOP_MIGRATION](draft/TAURI_DESKTOP_MIGRATION.md)
+  [TAURI_DESKTOP_MIGRATION](draft/TAURI_DESKTOP_MIGRATION.md),
+  [WORKSPACE_COMPOSITION](draft/WORKSPACE_COMPOSITION.md)
 
 Files not listed above are likewise non-normative drafts; check each file and
 the merged implementation before relying on it.
