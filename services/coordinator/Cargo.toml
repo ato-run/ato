@@ -1,0 +1,32 @@
+[package]
+name = "ato-coordinator"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MPL-2.0"
+description = "Selfhost JSON-first SQLite Coordinator for DataResources (G3 slice 1: storage, CAS, receipts)."
+repository = "https://github.com/ato-run/ato"
+homepage = "https://ato.run"
+authors = ["Koh0920"]
+publish = false
+
+[package.metadata.dist]
+dist = false
+
+[package.metadata.ato-architecture]
+layer = "service"
+
+[lib]
+name = "ato_coordinator"
+path = "src/lib.rs"
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+hex = "0.4"
+thiserror = "1.0"
+
+[dev-dependencies]
+tempfile = "3.8"
