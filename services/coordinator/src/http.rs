@@ -940,6 +940,104 @@ pub async fn handle_request(
             json_response(StatusCode::OK, json!({ "status": "stopping" }))
         }
         (&Method::GET, _) => json_response(StatusCode::NOT_FOUND, json!({ "error": "not_found" })),
+        (&Method::POST, ["v1", "workspaces", workspace_id, "lease"]) => {
+            let input: Value = match serde_json::from_slice(body) {
+                Ok(value) => value,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::BAD_REQUEST,
+                        json!({ "error": "invalid_json" }),
+                    );
+                }
+            };
+            let holder = input
+                .get("holder")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let ttl_seconds = input
+                .get("ttl_seconds")
+                .and_then(Value::as_i64)
+                .unwrap_or(300);
+            let mut coordinator = match state.coordinator.lock() {
+                Ok(coordinator) => coordinator,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({ "error": "storage_error" }),
+                    );
+                }
+            };
+            match coordinator.acquire_workspace_lease(workspace_id, holder, ttl_seconds) {
+                Ok(lease) => json_response(
+                    StatusCode::OK,
+                    json!({
+                        "schema": "ato.workspace-lease/1",
+                        "workspace_id": lease.workspace_id,
+                        "holder": lease.holder,
+                        "epoch": lease.epoch,
+                        "expires_at": lease.expires_at,
+                    }),
+                ),
+                Err(error) => error_response(error),
+            }
+        }
+        (&Method::DELETE, ["v1", "workspaces", workspace_id, "lease"]) => {
+            let input: Value = match serde_json::from_slice(body) {
+                Ok(value) => value,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::BAD_REQUEST,
+                        json!({ "error": "invalid_json" }),
+                    );
+                }
+            };
+            let holder = input
+                .get("holder")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let epoch = input
+                .get("epoch")
+                .and_then(Value::as_i64)
+                .unwrap_or_default();
+            let mut coordinator = match state.coordinator.lock() {
+                Ok(coordinator) => coordinator,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({ "error": "storage_error" }),
+                    );
+                }
+            };
+            match coordinator.release_workspace_lease(workspace_id, holder, epoch) {
+                Ok(()) => json_response(StatusCode::OK, json!({ "released": true })),
+                Err(error) => error_response(error),
+            }
+        }
+        (&Method::GET, ["v1", "workspaces", workspace_id, "lease"]) => {
+            let coordinator = match state.coordinator.lock() {
+                Ok(coordinator) => coordinator,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({ "error": "storage_error" }),
+                    );
+                }
+            };
+            match coordinator.workspace_lease(workspace_id) {
+                Ok(Some(lease)) => json_response(
+                    StatusCode::OK,
+                    json!({
+                        "schema": "ato.workspace-lease/1",
+                        "workspace_id": lease.workspace_id,
+                        "holder": lease.holder,
+                        "epoch": lease.epoch,
+                        "expires_at": lease.expires_at,
+                    }),
+                ),
+                Ok(None) => json_response(StatusCode::NOT_FOUND, json!({ "error": "no_lease" })),
+                Err(error) => error_response(error),
+            }
+        }
         _ => json_response(StatusCode::NOT_FOUND, json!({ "error": "not_found" })),
     }
 }
@@ -1591,6 +1689,70 @@ export function createTask({ arguments: args, state }) {
             content_type,
             String::from_utf8_lossy(&body).into_owned(),
         )
+    }
+
+    #[tokio::test]
+    async fn a_workspace_lease_is_single_writer_and_fences_by_epoch() {
+        let state = state();
+        let (status, _content_type, acquired) = call_raw(
+            &state,
+            Method::POST,
+            "/v1/workspaces/ws-1/lease",
+            Some("Bearer test-token"),
+            json!({"holder": "host-a", "ttl_seconds": 60}),
+        )
+        .await;
+        assert!(status.is_success(), "{acquired}");
+        let leased: Value = serde_json::from_str(&acquired).unwrap();
+        assert_eq!(leased["epoch"], 1);
+
+        let (status, _content_type, refreshed) = call_raw(
+            &state,
+            Method::POST,
+            "/v1/workspaces/ws-1/lease",
+            Some("Bearer test-token"),
+            json!({"holder": "host-a", "ttl_seconds": 60}),
+        )
+        .await;
+        assert!(status.is_success(), "{refreshed}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&refreshed).unwrap()["epoch"],
+            1
+        );
+
+        let (status, _content_type, busy) = call_raw(
+            &state,
+            Method::POST,
+            "/v1/workspaces/ws-1/lease",
+            Some("Bearer test-token"),
+            json!({"holder": "host-b", "ttl_seconds": 60}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{busy}");
+
+        let (status, _content_type, released) = call_raw(
+            &state,
+            Method::DELETE,
+            "/v1/workspaces/ws-1/lease",
+            Some("Bearer test-token"),
+            json!({"holder": "host-a", "epoch": 1}),
+        )
+        .await;
+        assert!(status.is_success(), "{released}");
+
+        let (status, _content_type, handed_over) = call_raw(
+            &state,
+            Method::POST,
+            "/v1/workspaces/ws-1/lease",
+            Some("Bearer test-token"),
+            json!({"holder": "host-b", "ttl_seconds": 60}),
+        )
+        .await;
+        assert!(status.is_success(), "{handed_over}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&handed_over).unwrap()["epoch"],
+            2
+        );
     }
 
     #[tokio::test]

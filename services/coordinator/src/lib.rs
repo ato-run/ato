@@ -97,6 +97,12 @@ CREATE TABLE IF NOT EXISTS operation_results (
   expires_at INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (resource_id, operation_id)
 );
+CREATE TABLE IF NOT EXISTS workspace_leases (
+  workspace_id TEXT PRIMARY KEY,
+  holder TEXT NOT NULL,
+  epoch INTEGER NOT NULL CHECK (epoch >= 1),
+  expires_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS outbox (
   resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
   revision INTEGER NOT NULL,
@@ -264,6 +270,15 @@ pub struct Quota {
     pub used_bytes: i64,
     pub limit_bytes: i64,
     pub resources: i64,
+}
+
+/// A single-writer lease over a workspace's Resources.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceLease {
+    pub workspace_id: String,
+    pub holder: String,
+    pub epoch: i64,
+    pub expires_at: i64,
 }
 
 pub struct Coordinator {
@@ -1167,6 +1182,115 @@ impl Coordinator {
     }
 
     /// Active bindings serving one app instance, for the bridge's requirements.
+    /// Acquire (or refresh) the single-writer lease for a workspace.
+    ///
+    /// A different live holder is refused; an expired lease or the same holder
+    /// succeeds, and a hand-over to a new holder always increments the epoch so
+    /// a stale writer can be fenced.
+    pub fn acquire_workspace_lease(
+        &mut self,
+        workspace_id: &str,
+        holder: &str,
+        ttl_seconds: i64,
+    ) -> Result<WorkspaceLease, CoordinatorError> {
+        if workspace_id.is_empty() || holder.is_empty() {
+            return Err(CoordinatorError::Invalid("invalid_lease"));
+        }
+        let now = now();
+        let ttl = ttl_seconds.clamp(1, 86_400);
+        let transaction = self.conn.transaction()?;
+        let existing: Option<(String, i64, i64)> = transaction
+            .query_row(
+                "SELECT holder, epoch, expires_at FROM workspace_leases WHERE workspace_id=?",
+                params![workspace_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let (epoch, expires_at) = match existing {
+            Some((current_holder, epoch, _expires_at))
+                if !current_holder.is_empty() && current_holder == holder =>
+            {
+                let expires_at = now + ttl;
+                transaction.execute(
+                    "UPDATE workspace_leases SET expires_at=? WHERE workspace_id=?",
+                    params![expires_at, workspace_id],
+                )?;
+                (epoch, expires_at)
+            }
+            Some((current_holder, _epoch, expires_at))
+                if !current_holder.is_empty() && expires_at > now =>
+            {
+                return Err(CoordinatorError::Conflict("workspace_lease_busy"));
+            }
+            Some((_, epoch, _)) => {
+                let expires_at = now + ttl;
+                transaction.execute(
+                    "UPDATE workspace_leases SET holder=?, epoch=?, expires_at=? WHERE workspace_id=?",
+                    params![holder, epoch + 1, expires_at, workspace_id],
+                )?;
+                (epoch + 1, expires_at)
+            }
+            None => {
+                let expires_at = now + ttl;
+                transaction.execute(
+                    "INSERT INTO workspace_leases (workspace_id, holder, epoch, expires_at) VALUES (?,?,?,?)",
+                    params![workspace_id, holder, 1_i64, expires_at],
+                )?;
+                (1, expires_at)
+            }
+        };
+        transaction.commit()?;
+        Ok(WorkspaceLease {
+            workspace_id: workspace_id.to_owned(),
+            holder: holder.to_owned(),
+            epoch,
+            expires_at,
+        })
+    }
+
+    /// Release the lease only if this holder still owns that epoch.
+    pub fn release_workspace_lease(
+        &mut self,
+        workspace_id: &str,
+        holder: &str,
+        epoch: i64,
+    ) -> Result<(), CoordinatorError> {
+        // Releasing keeps the row (holder empty, expired) so the next holder
+        // always receives a higher epoch; a deleted row would restart at 1 and
+        // let a stale writer look current.
+        let released = self.conn.execute(
+            "UPDATE workspace_leases SET holder='', expires_at=0 WHERE workspace_id=? AND holder=? AND epoch=?",
+            params![workspace_id, holder, epoch],
+        )?;
+        if released == 0 {
+            return Err(CoordinatorError::Forbidden("workspace_lease_not_held"));
+        }
+        Ok(())
+    }
+
+    /// Read the current lease, if one is recorded.
+    pub fn workspace_lease(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspaceLease>, CoordinatorError> {
+        let row: Option<(String, i64, i64)> = self
+            .conn
+            .query_row(
+                "SELECT holder, epoch, expires_at FROM workspace_leases WHERE workspace_id=?",
+                params![workspace_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        Ok(row
+            .filter(|(holder, _, _)| !holder.is_empty())
+            .map(|(holder, epoch, expires_at)| WorkspaceLease {
+                workspace_id: workspace_id.to_owned(),
+                holder,
+                epoch,
+                expires_at,
+            }))
+    }
+
     pub fn bindings_for_instance(
         &self,
         instance_id: &str,
