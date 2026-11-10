@@ -60,8 +60,11 @@ The Coordinator owns a single-writer lease: a second live writer is refused
 
 ## Current limitations
 
-- The shell has no Checkpoint button yet; Ctrl-C is the stop/checkpoint action.
-- Window/split layout is restored; in-pane scroll or selection is not (it needs
-  an app-declared state).
-- Windows Ctrl-C is handled through the console handler; the shell Stop button
-  works there as well.
+- The shell has **Checkpoint** (save while it keeps running) and **Stop and
+  save** buttons; Ctrl-C is the same stop action from the terminal.
+- Window/split layout and the active pane are restored; in-pane scroll or
+  selection is not (it needs an app-declared state).
+- The local Coordinator uses port `18788`; if it is busy, pass
+  `--local-data-port <port>`.
+- Windows Ctrl-C is handled through the console handler; the shell buttons work
+  there as well.

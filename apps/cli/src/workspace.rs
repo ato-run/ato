@@ -972,7 +972,14 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
                     workspace,
                 })
                 .map_err(|error| {
-                    anyhow::anyhow!("failed to start the local Coordinator: {error}")
+                    if error.kind() == std::io::ErrorKind::AddrInUse {
+                        anyhow::anyhow!(
+                            "port {} is already in use; pass --local-data-port <port>",
+                            args.local_data_port
+                        )
+                    } else {
+                        anyhow::anyhow!("failed to start the local Coordinator: {error}")
+                    }
                 })?;
                 let generated = crate::data::CoordinatorArgs {
                     coordinator: pane_base.clone().expect("local data has a pane base"),
