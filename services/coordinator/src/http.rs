@@ -47,6 +47,7 @@ fn error_response(error: CoordinatorError) -> Response<Body> {
         CoordinatorError::NotFound => (StatusCode::NOT_FOUND, "resource_not_found"),
         CoordinatorError::Conflict(code) => (StatusCode::CONFLICT, *code),
         CoordinatorError::Invalid(code) => (StatusCode::UNPROCESSABLE_ENTITY, *code),
+        CoordinatorError::Forbidden(code) => (StatusCode::FORBIDDEN, *code),
         CoordinatorError::Storage(_) | CoordinatorError::Json(_) => {
             (StatusCode::SERVICE_UNAVAILABLE, "storage_error")
         }
@@ -193,6 +194,186 @@ pub async fn handle_request(
                 },
             ) {
                 Ok(outcome) => json_response(StatusCode::OK, json!(outcome)),
+                Err(error) => error_response(error),
+            }
+        }
+        (&Method::POST, ["v1", "protocols", protocol, "operations"]) => {
+            let input: Value = match serde_json::from_slice(body) {
+                Ok(value) => value,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::BAD_REQUEST,
+                        json!({ "error": "invalid_json" }),
+                    );
+                }
+            };
+            let operation = input
+                .get("operation")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let semantics = input
+                .get("semantics")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let access = input
+                .get("access")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let implementation_digest = input
+                .get("implementation_digest")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let publisher = input
+                .get("publisher")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let mut coordinator = match state.coordinator.lock() {
+                Ok(coordinator) => coordinator,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({ "error": "storage_error" }),
+                    );
+                }
+            };
+            match coordinator.register_operation(
+                protocol,
+                operation,
+                semantics,
+                access,
+                implementation_digest,
+                publisher,
+            ) {
+                Ok(()) => json_response(StatusCode::CREATED, json!({ "status": "registered" })),
+                Err(error) => error_response(error),
+            }
+        }
+        (&Method::POST, ["v1", "data-resources", id, "bindings"]) => {
+            let input: Value = match serde_json::from_slice(body) {
+                Ok(value) => value,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::BAD_REQUEST,
+                        json!({ "error": "invalid_json" }),
+                    );
+                }
+            };
+            let port = input
+                .get("port")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let protocol = input
+                .get("protocol")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let access = input
+                .get("access")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let operations = input
+                .get("operations")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut coordinator = match state.coordinator.lock() {
+                Ok(coordinator) => coordinator,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({ "error": "storage_error" }),
+                    );
+                }
+            };
+            match coordinator.bind_resource(id, port, protocol, access, operations) {
+                Ok(binding) => json_response(StatusCode::CREATED, json!(binding)),
+                Err(error) => error_response(error),
+            }
+        }
+        (&Method::GET, ["v1", "bindings", id, "document"]) => {
+            let coordinator = match state.coordinator.lock() {
+                Ok(coordinator) => coordinator,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({ "error": "storage_error" }),
+                    );
+                }
+            };
+            match coordinator.read_binding_document(id) {
+                Ok(snapshot) => json_response(StatusCode::OK, json!(snapshot)),
+                Err(error) => error_response(error),
+            }
+        }
+        (&Method::POST, ["v1", "bindings", id, "operations"]) => {
+            let input: Value = match serde_json::from_slice(body) {
+                Ok(value) => value,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::BAD_REQUEST,
+                        json!({ "error": "invalid_json" }),
+                    );
+                }
+            };
+            let operation = input
+                .get("operation")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let operation_id = input
+                .get("operation_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let expected_revision = input
+                .get("expected_revision")
+                .and_then(Value::as_i64)
+                .unwrap_or(-1);
+            let expected_generation = input
+                .get("expected_generation")
+                .and_then(Value::as_i64)
+                .unwrap_or(-1);
+            let document = input.get("document").cloned().unwrap_or_else(|| json!({}));
+            let mut coordinator = match state.coordinator.lock() {
+                Ok(coordinator) => coordinator,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({ "error": "storage_error" }),
+                    );
+                }
+            };
+            match coordinator.invoke_binding_operation(
+                id,
+                &operation,
+                CommitInput {
+                    operation_id,
+                    expected_revision,
+                    expected_generation,
+                    document,
+                },
+            ) {
+                Ok(outcome) => json_response(StatusCode::OK, json!(outcome)),
+                Err(error) => error_response(error),
+            }
+        }
+        (&Method::DELETE, ["v1", "bindings", id]) => {
+            let mut coordinator = match state.coordinator.lock() {
+                Ok(coordinator) => coordinator,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({ "error": "storage_error" }),
+                    );
+                }
+            };
+            match coordinator.revoke_binding(id) {
+                Ok(binding) => json_response(StatusCode::OK, json!(binding)),
                 Err(error) => error_response(error),
             }
         }
@@ -395,5 +576,213 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body["error"], "resource_not_found");
+    }
+
+    async fn register_due_dates(state: &ApiState) {
+        let (status, _) = call(
+            state,
+            Method::POST,
+            "/v1/protocols/todo.board@1/operations",
+            Some("Bearer test-token"),
+            json!({
+                "operation": "todo_list_due_dates",
+                "semantics": "observation",
+                "access": "read",
+                "implementation_digest": "sha256:due",
+                "publisher": "alice/app"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, _) = call(
+            state,
+            Method::POST,
+            "/v1/protocols/todo.board@1/operations",
+            Some("Bearer test-token"),
+            json!({
+                "operation": "todo_create",
+                "semantics": "evolution",
+                "access": "read_write",
+                "implementation_digest": "sha256:create",
+                "publisher": "alice/app"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn refuses_a_conflicting_protocol_publisher() {
+        let state = state();
+        register_due_dates(&state).await;
+        let (status, body) = call(
+            &state,
+            Method::POST,
+            "/v1/protocols/todo.board@1/operations",
+            Some("Bearer test-token"),
+            json!({
+                "operation": "todo_list_due_dates",
+                "semantics": "observation",
+                "access": "read",
+                "implementation_digest": "sha256:other",
+                "publisher": "mallory/app"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"], "protocol_operation_publisher_conflict");
+    }
+
+    #[tokio::test]
+    async fn operation_only_binding_cannot_read_the_document() {
+        let state = state();
+        register_due_dates(&state).await;
+        let (_, created) = call(
+            &state,
+            Method::POST,
+            "/v1/data-resources",
+            Some("Bearer test-token"),
+            json!({"protocol": "todo.board@1", "document": {"tasks": {"t1": {"id": "t1", "dueAt": "2026-11-20"}}}}),
+        )
+        .await;
+        let resource_id = created["resource_id"].as_str().unwrap().to_owned();
+        let (status, binding) = call(
+            &state,
+            Method::POST,
+            &format!("/v1/data-resources/{resource_id}/bindings"),
+            Some("Bearer test-token"),
+            json!({
+                "port": "tasks",
+                "protocol": "todo.board@1",
+                "access": "operations",
+                "operations": ["todo_list_due_dates"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let binding_id = binding["binding_id"].as_str().unwrap().to_owned();
+
+        let (status, body) = call(
+            &state,
+            Method::GET,
+            &format!("/v1/bindings/{binding_id}/document"),
+            Some("Bearer test-token"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"], "operation_only_binding");
+
+        let (status, body) = call(
+            &state,
+            Method::POST,
+            &format!("/v1/bindings/{binding_id}/operations"),
+            Some("Bearer test-token"),
+            json!({
+                "operation": "todo_create",
+                "operation_id": "op-create",
+                "expected_revision": 1,
+                "expected_generation": 0,
+                "document": {"tasks": {}}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"], "operation_not_granted");
+
+        let (status, outcome) = call(
+            &state,
+            Method::POST,
+            &format!("/v1/bindings/{binding_id}/operations"),
+            Some("Bearer test-token"),
+            json!({
+                "operation": "todo_list_due_dates",
+                "operation_id": "op-due",
+                "expected_revision": 1,
+                "expected_generation": 0,
+                "document": {"tasks": {"t1": {"id": "t1", "dueAt": "2026-11-20"}}}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(outcome["revision"], 2);
+
+        let (status, _) = call(
+            &state,
+            Method::DELETE,
+            &format!("/v1/bindings/{binding_id}"),
+            Some("Bearer test-token"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = call(
+            &state,
+            Method::POST,
+            &format!("/v1/bindings/{binding_id}/operations"),
+            Some("Bearer test-token"),
+            json!({
+                "operation": "todo_list_due_dates",
+                "operation_id": "op-due-2",
+                "expected_revision": 2,
+                "expected_generation": 0,
+                "document": {}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"], "binding_revoked");
+    }
+
+    #[tokio::test]
+    async fn document_binding_can_read_but_not_write_through_a_read_binding() {
+        let state = state();
+        register_due_dates(&state).await;
+        let (_, created) = call(
+            &state,
+            Method::POST,
+            "/v1/data-resources",
+            Some("Bearer test-token"),
+            json!({"protocol": "todo.board@1", "document": {"tasks": {}}}),
+        )
+        .await;
+        let resource_id = created["resource_id"].as_str().unwrap().to_owned();
+        let (status, binding) = call(
+            &state,
+            Method::POST,
+            &format!("/v1/data-resources/{resource_id}/bindings"),
+            Some("Bearer test-token"),
+            json!({"port": "tasks", "protocol": "todo.board@1", "access": "read"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let binding_id = binding["binding_id"].as_str().unwrap().to_owned();
+        let (status, document) = call(
+            &state,
+            Method::GET,
+            &format!("/v1/bindings/{binding_id}/document"),
+            Some("Bearer test-token"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(document["document"], json!({"tasks": {}}));
+
+        let (status, body) = call(
+            &state,
+            Method::POST,
+            &format!("/v1/bindings/{binding_id}/operations"),
+            Some("Bearer test-token"),
+            json!({
+                "operation": "todo_create",
+                "operation_id": "op-create",
+                "expected_revision": 1,
+                "expected_generation": 0,
+                "document": {"tasks": {}}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"], "binding_read_only");
     }
 }
