@@ -5,6 +5,7 @@
 //! it prints what the authority returned and never keeps a local copy, so a
 //! revision observed here is the authority's revision.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -73,6 +74,21 @@ pub enum ResourceCommand {
     /// Read one Resource, including its document.
     Inspect {
         resource_id: String,
+        #[command(flatten)]
+        coordinator: CoordinatorArgs,
+    },
+    /// Export one Resource's document with its digest to a JSON file.
+    Export {
+        resource_id: String,
+        #[arg(long)]
+        out: PathBuf,
+        #[command(flatten)]
+        coordinator: CoordinatorArgs,
+    },
+    /// Import an exported document as a NEW Resource.
+    Import {
+        #[arg(long)]
+        file: PathBuf,
         #[command(flatten)]
         coordinator: CoordinatorArgs,
     },
@@ -206,6 +222,12 @@ pub fn run(args: DataArgs) -> Result<()> {
                 resource_id,
                 coordinator,
             } => inspect(&coordinator, &resource_id),
+            ResourceCommand::Export {
+                resource_id,
+                out,
+                coordinator,
+            } => resource_export(&coordinator, &resource_id, &out),
+            ResourceCommand::Import { file, coordinator } => resource_import(&coordinator, &file),
             ResourceCommand::Create {
                 protocol,
                 display_name,
@@ -465,6 +487,94 @@ fn inspect(coordinator: &CoordinatorArgs, resource_id: &str) -> Result<()> {
     println!(
         "document: {}",
         serde_json::to_string_pretty(value.get("document").unwrap_or(&Value::Null))?
+    );
+    Ok(())
+}
+
+const EXPORT_SCHEMA: &str = "ato.data.export/v1";
+
+fn resource_export(coordinator: &CoordinatorArgs, resource_id: &str, out: &PathBuf) -> Result<()> {
+    let snapshot = request(
+        coordinator,
+        reqwest::Method::GET,
+        &format!("/v1/data-resources/{resource_id}/document"),
+        None,
+    )?;
+    let resource_id = snapshot
+        .get("resource_id")
+        .and_then(Value::as_str)
+        .context("Coordinator response has no resource_id")?;
+    let protocol = snapshot
+        .get("protocol")
+        .and_then(Value::as_str)
+        .context("Coordinator response has no protocol")?;
+    let revision = snapshot
+        .get("revision")
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+    let digest = snapshot
+        .get("content_digest")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let document = snapshot
+        .get("document")
+        .cloned()
+        .context("Coordinator response has no document")?;
+    let export = json!({
+        "schema": EXPORT_SCHEMA,
+        "resource_id": resource_id,
+        "protocol": protocol,
+        "revision": revision,
+        "content_digest": digest,
+        "document": document,
+    });
+    std::fs::write(out, serde_json::to_vec_pretty(&export)?)
+        .with_context(|| format!("write export {}", out.display()))?;
+    println!(
+        "exported {} revision {} ({}) -> {}",
+        resource_id,
+        revision,
+        digest,
+        out.display()
+    );
+    Ok(())
+}
+
+fn resource_import(coordinator: &CoordinatorArgs, file: &PathBuf) -> Result<()> {
+    let bytes = std::fs::read(file).with_context(|| format!("read export {}", file.display()))?;
+    let export: Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse export {}", file.display()))?;
+    if export.get("schema").and_then(Value::as_str) != Some(EXPORT_SCHEMA) {
+        bail!("export schema must be {EXPORT_SCHEMA}");
+    }
+    let protocol = export
+        .get("protocol")
+        .and_then(Value::as_str)
+        .context("export has no protocol")?;
+    let document = export
+        .get("document")
+        .cloned()
+        .context("export has no document")?;
+    let created = request(
+        coordinator,
+        reqwest::Method::POST,
+        "/v1/data-resources",
+        Some(json!({
+            "protocol": protocol,
+            "display_name": export.get("resource_id").and_then(Value::as_str),
+            "document": document,
+        })),
+    )?;
+    println!(
+        "imported as {} revision {}",
+        created
+            .get("resource_id")
+            .and_then(Value::as_str)
+            .unwrap_or("-"),
+        created
+            .get("revision")
+            .and_then(Value::as_i64)
+            .unwrap_or_default()
     );
     Ok(())
 }
