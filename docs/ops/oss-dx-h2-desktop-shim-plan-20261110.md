@@ -97,3 +97,21 @@ destination URLs agree; the archive README lives at the repository root.
 Remaining before the real move: the owner creates the public repository (and
 states its licence), then the same commands run against it, followed by the 24
 reference updates and the desktop-shim checklist below.
+
+## Live references to `docs/archive` (11 files; edit with the move)
+
+| File | Line | Today | Action |
+|---|---|---|---|
+| `README.md` | 107 | links the archived roadmap | point at the archive repo URL |
+| `README.ja.md` | 64 | same, Japanese | same URL |
+| `CONTRIBUTING.md` | 17 | links the archived roadmap | same URL |
+| `AGENTS.md` | 208 | says the roadmap path is historical | keep the sentence, new URL |
+| `.github/workflows/docs-ci.yml` | 23 | `--allow-historical-from docs/archive/…/link-audit.json` | copy the allowlist to `docs/ops/archive-link-audit.json` and use it; the archive tree leaves the repo |
+| `apps/desktop/docs/DESKTOP_TAB_SPEC.md` | 17 | relative archive link | follow the shim: move with `apps/desktop`, or point at the archive URL |
+| `docs/ops/agent-native-formation-reuse-20261028.md` | 103 | cites an archive path in prose | point at the archive URL (historical evidence) |
+| `docs/ops/dev-consolidation-20261026/inventory-evidence.json` | many | historical inventory of archive paths | leave: it is a record of that audit, not a live link |
+| archive-internal refs | — | files inside the moved tree | leave: they move together |
+
+After the move, the docs audit should report zero *unexpected* failures with the
+copied allowlist; links into the archive become external URLs and are no longer
+checked as local paths.
