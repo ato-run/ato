@@ -15,6 +15,7 @@ pub struct ControlHandle {
     url: String,
     token: String,
     stop: Arc<AtomicBool>,
+    checkpoint: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -26,15 +27,24 @@ impl ControlHandle {
         let address = listener.local_addr()?;
         let token = random_token()?;
         let stop = Arc::new(AtomicBool::new(false));
+        let checkpoint = Arc::new(AtomicBool::new(false));
         let shutdown = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
+        let thread_checkpoint = Arc::clone(&checkpoint);
         let thread_shutdown = Arc::clone(&shutdown);
-        let expected = format!("/stop?token={token}");
+        let stop_path = format!("/stop?token={token}");
+        let checkpoint_path = format!("/checkpoint?token={token}");
         let thread = thread::spawn(move || {
             while !thread_shutdown.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((stream, _)) => {
-                        let _ = answer(stream, &expected, &thread_stop);
+                        let _ = answer(
+                            stream,
+                            &stop_path,
+                            &checkpoint_path,
+                            &thread_stop,
+                            &thread_checkpoint,
+                        );
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(50));
@@ -47,6 +57,7 @@ impl ControlHandle {
             url: format!("http://{address}"),
             token,
             stop,
+            checkpoint,
             shutdown,
             thread: Some(thread),
         })
@@ -62,6 +73,11 @@ impl ControlHandle {
 
     pub fn stop_requested(&self) -> bool {
         self.stop.load(Ordering::Acquire)
+    }
+
+    /// Consume one checkpoint request, so a held page button saves once.
+    pub fn take_checkpoint_requested(&self) -> bool {
+        self.checkpoint.swap(false, Ordering::AcqRel)
     }
 }
 
@@ -84,14 +100,23 @@ impl Drop for ControlHandle {
     }
 }
 
-fn answer(mut stream: TcpStream, expected: &str, stop: &AtomicBool) -> std::io::Result<()> {
+fn answer(
+    mut stream: TcpStream,
+    stop_path: &str,
+    checkpoint_path: &str,
+    stop: &AtomicBool,
+    checkpoint: &AtomicBool,
+) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     let mut request = [0u8; 4096];
     let read = stream.read(&mut request)?;
     let head = String::from_utf8_lossy(&request[..read]);
     let action = head.split_whitespace().nth(1).unwrap_or_default();
-    let status = if action == expected {
+    let status = if action == stop_path {
         stop.store(true, Ordering::Release);
+        "200 OK"
+    } else if action == checkpoint_path {
+        checkpoint.store(true, Ordering::Release);
         "200 OK"
     } else {
         "404 Not Found"

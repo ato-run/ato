@@ -918,7 +918,9 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
                 checkpoint.as_ref(),
                 coordinator.as_ref(),
                 pane_base.as_deref(),
-                control.as_ref(),
+                control
+                    .as_ref()
+                    .map(|control| (control, args.checkpoint_out.is_some())),
             )?;
             let _local_data = if args.local_data {
                 let database = tempfile::tempdir()
@@ -1013,56 +1015,47 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
                 println!("press Ctrl-C to stop (no --checkpoint-out was given)");
             }
             let signal = install_signal_flag()?;
-            while !signal.load(std::sync::atomic::Ordering::Relaxed)
-                && !control
-                    .as_ref()
-                    .is_some_and(|control| control.stop_requested())
-            {
+            let local_credentials = _local_data
+                .as_ref()
+                .map(|(_, _, token, _)| (pane_base.as_deref().unwrap_or(""), token.as_str()));
+            loop {
+                if signal.load(std::sync::atomic::Ordering::Relaxed)
+                    || control
+                        .as_ref()
+                        .is_some_and(|control| control.stop_requested())
+                {
+                    break;
+                }
+                if let Some(control) = control.as_ref()
+                    && control.take_checkpoint_requested()
+                {
+                    if let Some(path) = args.checkpoint_out.as_deref() {
+                        let checkpoint = save_workspace_now(
+                            path,
+                            &running,
+                            &args.file,
+                            local_credentials,
+                            lease.as_ref(),
+                        )?;
+                        println!(
+                            "checkpoint: {} ({} panes)",
+                            path.display(),
+                            checkpoint.pane.len()
+                        );
+                    } else {
+                        println!("workspace: no --checkpoint-out was given; nothing to write");
+                    }
+                }
                 std::thread::sleep(Duration::from_millis(100));
             }
             if let Some(path) = args.checkpoint_out.as_deref() {
-                let data = if let (Some((_, _, token, _)), Some(base)) =
-                    (_local_data.as_ref(), pane_base.as_ref())
-                {
-                    let export = crate::data::CoordinatorArgs {
-                        coordinator: base.clone(),
-                        token: Some(token.clone()),
-                        origin: None,
-                        json: false,
-                    };
-                    let mut exported = crate::data::export_resources(&export)?;
-                    let workspace_name = args
-                        .file
-                        .file_stem()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| "workspace".to_owned());
-                    if let Some(resources) = exported
-                        .get_mut("resources")
-                        .and_then(serde_json::Value::as_array_mut)
-                    {
-                        for resource in resources.iter_mut() {
-                            if let Some(protocol) =
-                                resource.get("protocol").and_then(serde_json::Value::as_str)
-                            {
-                                resource["display_name"] = serde_json::Value::String(format!(
-                                    "workspace:{workspace_name}:{protocol}"
-                                ));
-                            }
-                        }
-                    }
-                    Some(json!({
-                        "schema": "ato.workspace-data/1",
-                        "resources": exported.get("resources").cloned().unwrap_or_else(|| json!([])),
-                    }))
-                } else {
-                    None
-                };
-                let writer = lease.as_ref().map(|lease| WorkspaceWriterV1 {
-                    workspace_id: lease.workspace_id.clone(),
-                    holder: lease.holder.clone(),
-                    epoch: lease.epoch,
-                });
-                let checkpoint = save_workspace_checkpoint(path, &running, data, writer)?;
+                let checkpoint = save_workspace_now(
+                    path,
+                    &running,
+                    &args.file,
+                    local_credentials,
+                    lease.as_ref(),
+                )?;
                 println!(
                     "checkpoint: {} ({} panes)",
                     path.display(),
@@ -1297,7 +1290,7 @@ fn shell_html(
     manifest: &WorkspaceManifestV1,
     pane_urls: &BTreeMap<String, String>,
     view: &ShellViewState,
-    control: Option<(&str, &str)>,
+    control: Option<(&str, &str, bool)>,
 ) -> Result<String> {
     let direction = match view.direction {
         Direction::Horizontal => "row",
@@ -1343,12 +1336,21 @@ fn shell_html(
         }
     }
     let control_button = match control {
+        Some((_, _, checkpoint_enabled)) if checkpoint_enabled => r#" <button type="button" id="checkpoint-button">Checkpoint</button> <button type="button" id="stop-button">Stop and save</button>"#.to_owned(),
         Some(_) => r#" <button type="button" id="stop-button">Stop and save</button>"#.to_owned(),
         None => String::new(),
     };
     let control_js = match control {
-        Some((url, token)) => format!(
+        Some((url, token, checkpoint_enabled)) => format!(
             r#"
+  var checkpoint = document.getElementById("checkpoint-button");
+  if (checkpoint && {checkpoint_enabled}) {{
+    checkpoint.addEventListener("click", function () {{
+      fetch("{url}/checkpoint?token={token}", {{ method: "POST", mode: "no-cors" }}).catch(function () {{}});
+      checkpoint.textContent = "Checkpointed";
+      window.setTimeout(function () {{ checkpoint.textContent = "Checkpoint"; }}, 1500);
+    }});
+  }}
   var stop = document.getElementById("stop-button");
   if (stop) {{
     stop.addEventListener("click", function () {{
@@ -1359,6 +1361,7 @@ fn shell_html(
   }}"#,
             url = url,
             token = token,
+            checkpoint_enabled = checkpoint_enabled,
         ),
         None => String::new(),
     };
@@ -1516,6 +1519,52 @@ fn read_pane_provisions(pane_id: &str, destination: &Path) -> Result<PaneProvisi
     })
 }
 
+fn save_workspace_now(
+    path: &Path,
+    running: &RunningWorkspace,
+    file: &Path,
+    local_credentials: Option<(&str, &str)>,
+    lease: Option<&crate::data::WorkspaceLease>,
+) -> Result<WorkspaceCheckpointV1> {
+    let data = if let Some((base, token)) = local_credentials {
+        let export = crate::data::CoordinatorArgs {
+            coordinator: base.to_owned(),
+            token: Some(token.to_owned()),
+            origin: None,
+            json: false,
+        };
+        let mut exported = crate::data::export_resources(&export)?;
+        let workspace_name = file
+            .file_stem()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "workspace".to_owned());
+        if let Some(resources) = exported
+            .get_mut("resources")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for resource in resources.iter_mut() {
+                if let Some(protocol) = resource.get("protocol").and_then(serde_json::Value::as_str)
+                {
+                    resource["display_name"] =
+                        serde_json::Value::String(format!("workspace:{workspace_name}:{protocol}"));
+                }
+            }
+        }
+        Some(json!({
+            "schema": "ato.workspace-data/1",
+            "resources": exported.get("resources").cloned().unwrap_or_else(|| json!([])),
+        }))
+    } else {
+        None
+    };
+    let writer = lease.map(|lease| WorkspaceWriterV1 {
+        workspace_id: lease.workspace_id.clone(),
+        holder: lease.holder.clone(),
+        epoch: lease.epoch,
+    });
+    save_workspace_checkpoint(path, running, data, writer)
+}
+
 fn provision_panes(
     file: &Path,
     coordinator: &crate::data::CoordinatorArgs,
@@ -1586,7 +1635,7 @@ pub fn start(
     checkpoint: Option<&LoadedWorkspaceCheckpoint>,
     coordinator: Option<&crate::data::CoordinatorArgs>,
     pane_base: Option<&str>,
-    control: Option<&crate::workspace_control::ControlHandle>,
+    control: Option<(&crate::workspace_control::ControlHandle, bool)>,
 ) -> Result<RunningWorkspace> {
     let text = std::fs::read_to_string(file)
         .with_context(|| format!("failed to read workspace {}", file.display()))?;
@@ -1664,7 +1713,9 @@ pub fn start(
             &manifest,
             &pane_urls,
             &view,
-            control.map(|control| (control.url(), control.token())),
+            control.map(|(control, checkpoint_enabled)| {
+                (control.url(), control.token(), checkpoint_enabled)
+            }),
         )?,
     )
     .context("failed to write the workspace shell")?;
