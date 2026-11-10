@@ -102,6 +102,32 @@ try {
     assert.equal(Object.values(detail.body.document.tasks)[0].title, "Travels");
     console.log("PASS: saved state imported with the same digest", sourceDigest);
 
+    // The imported state must be live for every entry point, not just a file
+    // on disk: register the handler on this authority, expose it to MCP, bind
+    // the imported Resource, invoke through MCP, then read the same revision
+    // through the CLI.
+    const importedId = listed.body.resources[0].resource_id;
+    assert.equal((await call(8792, "/v1/protocols/todo.board@1/operations", {
+      operation: "todo_create", semantics: "evolution", access: "read_write",
+      module_source: source, module_export: "createTodo", publisher: "alice/app",
+    })).status, 201);
+    assert.equal((await call(8792, "/v1/protocols/todo.board@1/operations/todo_create/expose", { mcp: true })).status, 200);
+    assert.equal((await call(8792, `/v1/data-resources/${importedId}/bindings`, {
+      port: "tasks", protocol: "todo.board@1", access: "operations",
+      operations: ["todo_create"], instance_id: "mcp",
+    })).status, 201);
+    const mcp = await call(8792, "/mcp", {
+      jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: { name: "todo_create", arguments: { title: "After restore", due_at: "2026-12-21", at: "2026-11-10T00:00:00.000Z" } },
+    });
+    assert.equal(mcp.body.result.isError, false, JSON.stringify(mcp.body));
+    const mcpRevision = JSON.parse(mcp.body.result.content[0].text).revision;
+    assert.equal(mcpRevision, 2, "MCP must commit on top of the imported revision 1");
+    const inspected = await run(ato, ["data", "resource", "inspect", importedId, "--coordinator", "http://127.0.0.1:8792", "--token", token]);
+    assert.equal(inspected.code, 0, inspected.stderr);
+    assert.match(inspected.stdout, new RegExp(`revision: ${mcpRevision}\\b`), inspected.stdout);
+    console.log("PASS: imported state is live for CLI and MCP on the same revision", mcpRevision);
+
     const taskId = Object.keys(envelope.resources[0].document.tasks)[0];
     envelope.resources[0].document.tasks[taskId].title = "Tampered";
     await writeFile(file, JSON.stringify(envelope, null, 2));
