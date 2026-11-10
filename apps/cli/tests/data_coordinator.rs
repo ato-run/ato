@@ -279,3 +279,48 @@ fn binding_invoke_and_revoke_print_the_authority_result() {
     let stdout = String::from_utf8_lossy(&revoke.stdout);
     assert!(stdout.contains("binding dbind_1: revoked"), "{stdout}");
 }
+
+#[test]
+fn quota_prints_usage_and_limit() {
+    let (port, handle) = stub(vec![(
+        200,
+        r#"{"used_bytes":12,"limit_bytes":67108864,"resources":1}"#,
+    )]);
+    let output = ato()
+        .args([
+            "data",
+            "quota",
+            "--coordinator",
+            &format!("http://127.0.0.1:{port}"),
+            "--token",
+            "test-token",
+        ])
+        .output()
+        .expect("run ato data quota");
+    handle.join().expect("stub");
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("used_bytes: 12"), "{stdout}");
+    assert!(stdout.contains("limit_bytes: 67108864"), "{stdout}");
+    assert!(stdout.contains("resources: 1"), "{stdout}");
+}
+
+#[test]
+fn gc_prints_the_deleted_result_count() {
+    let (port, handle) = stub(vec![(200, r#"{"deleted_results":2}"#)]);
+    let output = ato()
+        .args([
+            "data",
+            "gc",
+            "--coordinator",
+            &format!("http://127.0.0.1:{port}"),
+            "--token",
+            "test-token",
+        ])
+        .output()
+        .expect("run ato data gc");
+    handle.join().expect("stub");
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("deleted_results: 2"), "{stdout}");
+}
