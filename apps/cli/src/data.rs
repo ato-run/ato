@@ -236,8 +236,18 @@ pub enum ProtocolCommand {
         semantics: String,
         #[arg(long)]
         access: String,
+        /// Digest of the operation implementation (used without `--module`).
         #[arg(long)]
-        implementation_digest: String,
+        implementation_digest: Option<String>,
+        /// JavaScript module source that implements the operation.
+        ///
+        /// With `--module`, the Coordinator stores the module and runs it for
+        /// the operation; `--implementation-digest` is then optional.
+        #[arg(long)]
+        module: Option<PathBuf>,
+        /// Export name in `--module` (e.g. `listDueDates`).
+        #[arg(long)]
+        export: Option<String>,
         #[arg(long)]
         publisher: String,
         #[command(flatten)]
@@ -341,17 +351,21 @@ pub fn run(args: DataArgs) -> Result<()> {
                 semantics,
                 access,
                 implementation_digest,
+                module,
+                export,
                 publisher,
                 coordinator,
-            } => protocol_register(
-                &coordinator,
-                &protocol,
-                &operation,
-                &semantics,
-                &access,
-                &implementation_digest,
-                &publisher,
-            ),
+            } => protocol_register(ProtocolRegistration {
+                coordinator: &coordinator,
+                protocol: &protocol,
+                operation: &operation,
+                semantics: &semantics,
+                access: &access,
+                implementation_digest: implementation_digest.as_deref(),
+                module: module.as_deref(),
+                export: export.as_deref(),
+                publisher: &publisher,
+            }),
         },
         DataCommand::Operation { command } => match command {
             OperationCommand::Invoke {
@@ -1265,30 +1279,187 @@ fn protocol_list(coordinator: &CoordinatorArgs, protocol: Option<&str>) -> Resul
     Ok(())
 }
 
-fn protocol_register(
-    coordinator: &CoordinatorArgs,
-    protocol: &str,
+/// The body for one protocol-operation registration.
+///
+/// A module-backed operation sends its source and export name; the Coordinator
+/// stores the module and runs it. Without a module the digest is the only
+/// implementation evidence, so it is required.
+fn protocol_registration_body(
     operation: &str,
     semantics: &str,
     access: &str,
-    implementation_digest: &str,
+    implementation_digest: Option<&str>,
+    module_source: Option<&str>,
+    module_export: Option<&str>,
     publisher: &str,
-) -> Result<()> {
+) -> Result<Value> {
+    match (module_source, module_export) {
+        (Some(source), Some(export)) => {
+            if source.is_empty() || export.is_empty() {
+                bail!("--module and --export must both be non-empty");
+            }
+            if source.len() > 2 * 1024 * 1024 {
+                bail!("--module source is larger than 2 MiB");
+            }
+            Ok(json!({
+                "operation": operation,
+                "semantics": semantics,
+                "access": access,
+                "module_source": source,
+                "module_export": export,
+                "publisher": publisher,
+            }))
+        }
+        (None, None) => {
+            let digest = implementation_digest
+                .context("pass --implementation-digest, or --module with --export")?;
+            Ok(json!({
+                "operation": operation,
+                "semantics": semantics,
+                "access": access,
+                "implementation_digest": digest,
+                "publisher": publisher,
+            }))
+        }
+        _ => bail!("--module and --export must be passed together"),
+    }
+}
+
+struct ProtocolRegistration<'a> {
+    coordinator: &'a CoordinatorArgs,
+    protocol: &'a str,
+    operation: &'a str,
+    semantics: &'a str,
+    access: &'a str,
+    implementation_digest: Option<&'a str>,
+    module: Option<&'a std::path::Path>,
+    export: Option<&'a str>,
+    publisher: &'a str,
+}
+
+fn protocol_register(registration: ProtocolRegistration<'_>) -> Result<()> {
+    let ProtocolRegistration {
+        coordinator,
+        protocol,
+        operation,
+        semantics,
+        access,
+        implementation_digest,
+        module,
+        export,
+        publisher,
+    } = registration;
+    let module_source =
+        match module {
+            Some(path) => Some(std::fs::read_to_string(path).with_context(|| {
+                format!("failed to read the operation module {}", path.display())
+            })?),
+            None => None,
+        };
+    let body = protocol_registration_body(
+        operation,
+        semantics,
+        access,
+        implementation_digest,
+        module_source.as_deref(),
+        export,
+        publisher,
+    )?;
     let value = request(
         coordinator,
         reqwest::Method::POST,
         &format!("/v1/protocols/{protocol}/operations"),
-        Some(json!({
-            "operation": operation,
-            "semantics": semantics,
-            "access": access,
-            "implementation_digest": implementation_digest,
-            "publisher": publisher,
-        })),
+        Some(body),
     )?;
     if coordinator.json {
         return print_json(&value);
     }
     println!("registered {} on {}", operation, protocol);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::protocol_registration_body;
+
+    #[test]
+    fn a_module_operation_sends_source_and_export_without_a_digest() {
+        let body = protocol_registration_body(
+            "todo_list_due_dates",
+            "observation",
+            "read",
+            None,
+            Some("export function listDueDates() {}"),
+            Some("listDueDates"),
+            "todo",
+        )
+        .unwrap();
+        assert_eq!(body["module_export"], "listDueDates");
+        assert!(
+            body["module_source"]
+                .as_str()
+                .unwrap()
+                .contains("listDueDates")
+        );
+        assert!(body.get("implementation_digest").is_none());
+    }
+
+    #[test]
+    fn a_digest_operation_still_works_without_a_module() {
+        let body = protocol_registration_body(
+            "todo_list",
+            "observation",
+            "read",
+            Some("sha256:abc"),
+            None,
+            None,
+            "todo",
+        )
+        .unwrap();
+        assert_eq!(body["implementation_digest"], "sha256:abc");
+        assert!(body.get("module_source").is_none());
+    }
+
+    #[test]
+    fn incomplete_or_oversized_module_registrations_are_refused() {
+        let no_implementation =
+            protocol_registration_body("op", "observation", "read", None, None, None, "publisher");
+        assert!(
+            no_implementation
+                .unwrap_err()
+                .to_string()
+                .contains("implementation-digest")
+        );
+        let only_module = protocol_registration_body(
+            "op",
+            "observation",
+            "read",
+            None,
+            Some("x"),
+            None,
+            "publisher",
+        );
+        assert!(only_module.unwrap_err().to_string().contains("together"));
+        let empty_export = protocol_registration_body(
+            "op",
+            "observation",
+            "read",
+            None,
+            Some("x"),
+            Some(""),
+            "publisher",
+        );
+        assert!(empty_export.unwrap_err().to_string().contains("non-empty"));
+        let oversized = "x".repeat(2 * 1024 * 1024 + 1);
+        let too_large = protocol_registration_body(
+            "op",
+            "observation",
+            "read",
+            None,
+            Some(&oversized),
+            Some("run"),
+            "publisher",
+        );
+        assert!(too_large.unwrap_err().to_string().contains("2 MiB"));
+    }
 }
