@@ -155,8 +155,8 @@ fn serve_served_app(
         });
     }
     let invoke_prefix = "/__ato/data-ports/";
-    if method == Method::POST && path.starts_with(&invoke_prefix) {
-        let rest = path.trim_start_matches(&invoke_prefix);
+    if method == Method::POST && path.starts_with(invoke_prefix) {
+        let rest = path.trim_start_matches(invoke_prefix);
         let Some((port, "invoke")) = rest.split_once('/') else {
             return Some(json_response(
                 StatusCode::NOT_FOUND,
