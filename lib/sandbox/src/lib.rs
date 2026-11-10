@@ -533,6 +533,27 @@ pub fn apply_sandbox(_policy: &SandboxPolicy) -> Result<SandboxResult> {
     ))
 }
 
+/// Render the SBPL profile a caller would launch a workload with.
+///
+/// The profile is data: the caller writes it and starts the workload through
+/// `sandbox-exec -f <profile>`, so a Run can state exactly which rules it
+/// applied. Building a profile is not applying it, and this function makes no
+/// claim that this process is allowed to apply one.
+#[cfg(target_os = "macos")]
+pub fn render_seatbelt_profile(policy: &SandboxPolicy) -> Result<String> {
+    anyhow::ensure!(
+        policy.file_write_paths.is_empty(),
+        "existing-file-only write policies require Linux Landlock"
+    );
+    Ok(macos::generate_sbpl_profile(policy))
+}
+
+/// A native desktop sandbox is only defined for macOS Seatbelt in this build.
+#[cfg(not(target_os = "macos"))]
+pub fn render_seatbelt_profile(_policy: &SandboxPolicy) -> Result<String> {
+    anyhow::bail!("a Seatbelt profile is only available on macOS")
+}
+
 /// Check if the current platform supports sandboxing
 pub fn is_sandbox_supported() -> bool {
     #[cfg(target_os = "linux")]

@@ -22,7 +22,8 @@ use crate::scenario::is_scenario_ref;
 use crate::verify::{
     CONTRACT_VERIFICATION_RECEIPT_SCHEMA, CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2,
     CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V3, CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V4,
-    ContractVerificationReceipt, ReceiptObservation, ReceiptOutcome,
+    CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V5, ContractVerificationReceipt, ReceiptObservation,
+    ReceiptOutcome,
 };
 
 /// What the receiver assigned: the attempt a receipt must be about.
@@ -83,6 +84,7 @@ pub fn accept_receipt(
         CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2,
         CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V3,
         CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V4,
+        CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V5,
     ];
     if !known.contains(&schema) {
         return Err(reject("receipt_schema_unknown", receipt.schema.clone()));
@@ -98,10 +100,11 @@ pub fn accept_receipt(
     if carries_tls
         && schema != CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V3
         && schema != CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V4
+        && schema != CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V5
     {
         return Err(reject(
             "receipt_tls_evidence_schema",
-            "certificate evidence requires ato.contract-verification-receipt/3 or /4",
+            "certificate evidence requires ato.contract-verification-receipt/3, /4 or /5",
         ));
     }
     // Connector evidence is exactly what /4 exists for. An older schema that
@@ -112,10 +115,24 @@ pub fn accept_receipt(
             || execution.relay_container_id.is_some()
             || execution.platform_emulated.is_some()
     });
-    if carries_connector && schema != CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V4 {
+    if carries_connector
+        && schema != CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V4
+        && schema != CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V5
+    {
         return Err(reject(
             "receipt_connector_evidence_schema",
-            "connector evidence requires ato.contract-verification-receipt/4",
+            "connector evidence requires ato.contract-verification-receipt/4 or /5",
+        ));
+    }
+    // Native execution evidence is exactly what /5 exists for.
+    let carries_native = receipt
+        .execution
+        .as_ref()
+        .is_some_and(|execution| execution.native.is_some());
+    if carries_native && schema != CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V5 {
+        return Err(reject(
+            "receipt_native_evidence_schema",
+            "native execution evidence requires ato.contract-verification-receipt/5",
         ));
     }
     if receipt.contract_ref != assignment.contract_ref {
@@ -535,6 +552,7 @@ pub fn accept_verified_route(
 mod tests {
     use super::*;
     use crate::authoring::BoundRequirement;
+    use crate::verify::VerificationNativeEvidence;
     use crate::verify::{RuntimeHttpObservation, RuntimeObservation, verify_runtime};
 
     fn contract() -> BoundContract {
@@ -922,5 +940,47 @@ mod tests {
             check_scenario(&missing_transcript).unwrap_err().code,
             "receipt_evidence_inconsistent"
         );
+    }
+
+    fn native_evidence(receipt: &mut ContractVerificationReceipt) {
+        receipt.execution.as_mut().unwrap().native = Some(VerificationNativeEvidence {
+            artifact_ref: format!("sha256:{}", "a".repeat(64)),
+            materialized_tree_digest: format!("sha256:{}", "b".repeat(64)),
+            entry: "app/run.sh".to_owned(),
+            signature_policy: "require-valid-or-local-override".to_owned(),
+            signature_target: "executable".to_owned(),
+            verified_target: "app/run.sh".to_owned(),
+            codesign_verify: "valid".to_owned(),
+            signature_kind: "adhoc".to_owned(),
+            codesign_detail: None,
+            gatekeeper: "rejected".to_owned(),
+            gatekeeper_detail: Some("rejected".to_owned()),
+            local_override: true,
+            sandbox: "seatbelt".to_owned(),
+            enforced_read_only: vec!["/run/artifact".to_owned()],
+            enforced_read_write: vec!["/run/state/data".to_owned()],
+            enforced_inbound_ports: vec![18080],
+            process_group: Some(4242),
+            window_containment: "not enforced in this increment".to_owned(),
+        });
+    }
+
+    #[test]
+    fn a_native_receipt_is_v5_and_accepted_without_changing_the_verdict() {
+        let baseline = issued(200);
+        let mut receipt = baseline.clone();
+        native_evidence(&mut receipt);
+        receipt.schema = crate::verify::CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V5.to_owned();
+        assert_eq!(check(&receipt), Ok(()));
+        // Execution evidence is additional: it never changes a verdict.
+        assert_eq!(receipt.fully_satisfied, baseline.fully_satisfied);
+        assert_eq!(receipt.observations, baseline.observations);
+    }
+
+    #[test]
+    fn native_evidence_in_an_older_schema_is_refused() {
+        let mut receipt = issued(200);
+        native_evidence(&mut receipt);
+        assert_eq!(code(&receipt), "receipt_native_evidence_schema");
     }
 }

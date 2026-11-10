@@ -12,6 +12,20 @@ use crate::reason::{CapabilityState, CapabilityStatus, Reason, ReasonCode};
 
 use serde::Serialize;
 
+/// The only absolute paths the macOS native adapter may run for its
+/// security-boundary tools.
+///
+/// These decide whether a sandbox is applied and whether a signature is valid,
+/// so they are never resolved through `PATH`: an executable earlier on `PATH`
+/// could fake both. A missing absolute path is a missing capability (fail
+/// closed), not a reason to search somewhere else.
+pub const SEATBELT_LAUNCHER_PATH: &str = "/usr/bin/sandbox-exec";
+pub const CODESIGN_PATH: &str = "/usr/bin/codesign";
+pub const SPCTL_PATH: &str = "/usr/sbin/spctl";
+/// The tools that prove which process owns a listening port.
+pub const LSOF_PATH: &str = "/usr/sbin/lsof";
+pub const PS_PATH: &str = "/bin/ps";
+
 /// What a route needs from the host. Read from the Derivation, never guessed
 /// from the argv.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -109,8 +123,14 @@ pub struct HostFacts {
 /// would not satisfy the mandatory condition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NativeFacts {
-    /// The containment tool (macOS Seatbelt's `sandbox-exec`).
+    /// Whether Seatbelt could actually be applied here. Finding
+    /// `sandbox-exec` is not enough: a process that is already sandboxed (for
+    /// example one started by a runner that applies its own profile) cannot
+    /// nest a second profile, and `sandbox_apply` fails with EPERM.
     pub sandbox_tool: bool,
+    /// Why the sandbox probe failed, when it did. Never a claim of containment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_detail: Option<String>,
     /// The tooling that produces a signature verdict (macOS `codesign` and
     /// `spctl`). Windows Authenticode is an OS API, not a CLI tool.
     pub signature_tools: bool,
@@ -120,9 +140,12 @@ impl NativeFacts {
     pub fn probe() -> Self {
         #[cfg(target_os = "macos")]
         {
+            let (sandbox_tool, sandbox_detail) = probe_seatbelt();
             Self {
-                sandbox_tool: std::path::Path::new("/usr/bin/sandbox-exec").is_file(),
-                signature_tools: path_tool("codesign") && path_tool("spctl"),
+                sandbox_tool,
+                sandbox_detail,
+                signature_tools: trusted_tool(&[CODESIGN_PATH]).is_some()
+                    && trusted_tool(&[SPCTL_PATH]).is_some(),
             }
         }
         #[cfg(target_os = "windows")]
@@ -131,6 +154,9 @@ impl NativeFacts {
                 // AppContainer/filesystem policy is not implemented yet, so the
                 // mandatory set is not enforceable here.
                 sandbox_tool: false,
+                sandbox_detail: Some(
+                    "no Windows native adapter can enforce the mandatory policies yet".to_owned(),
+                ),
                 // WinVerifyTrust is part of the OS.
                 signature_tools: true,
             }
@@ -139,6 +165,7 @@ impl NativeFacts {
         {
             Self {
                 sandbox_tool: false,
+                sandbox_detail: Some("this platform has no native desktop Adapter".to_owned()),
                 signature_tools: false,
             }
         }
@@ -151,14 +178,76 @@ impl Default for NativeFacts {
     }
 }
 
+/// Resolve a security-boundary tool from an explicit list of absolute paths.
+///
+/// No `PATH` search: the caller names the one OS path it trusts. The first
+/// existing absolute path wins; a relative entry is refused rather than
+/// resolved against the working directory.
+pub fn trusted_tool(paths: &[&str]) -> Option<std::path::PathBuf> {
+    trusted_tool_with_path(paths, std::env::var_os("PATH").as_deref())
+}
+
+/// The testable form of [`trusted_tool`].
+///
+/// `path` is accepted only so a test can prove it is ignored: resolution must
+/// not change when a directory earlier on `PATH` contains a fake tool.
+pub fn trusted_tool_with_path(
+    paths: &[&str],
+    path: Option<&std::ffi::OsStr>,
+) -> Option<std::path::PathBuf> {
+    let _ = path;
+    paths
+        .iter()
+        .map(std::path::PathBuf::from)
+        .filter(|candidate| candidate.is_absolute())
+        .find(|candidate| candidate.is_file())
+}
+
+/// Run a trivial Seatbelt application to learn whether this process may apply
+/// a profile at all. Finding the binary is not the capability.
 #[cfg(target_os = "macos")]
-fn path_tool(name: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|paths| {
-        std::env::split_paths(&paths).any(|directory| {
-            let candidate = directory.join(name);
-            candidate.is_file()
+fn probe_seatbelt() -> (bool, Option<String>) {
+    use std::sync::OnceLock;
+    static PROBE: OnceLock<(bool, Option<String>)> = OnceLock::new();
+    PROBE
+        .get_or_init(|| {
+            let Some(launcher) = trusted_tool(&[SEATBELT_LAUNCHER_PATH]) else {
+                return (
+                    false,
+                    Some(format!(
+                        "{SEATBELT_LAUNCHER_PATH} is not present; the mandatory sandbox cannot be applied"
+                    )),
+                );
+            };
+            match std::process::Command::new(launcher)
+                .args([
+                    "-p",
+                    // A deny-by-default profile that still lets a trivial
+                    // dynamic binary run: the point is whether this process may
+                    // apply a profile at all (a nested sandbox fails with
+                    // EPERM), not how strict the profile is. The earlier
+                    // `(deny default)(allow process-exec)` aborted `true` even
+                    // on an unsandboxed host because dyld needs file reads.
+                    "(version 1)(deny default)(allow file-read*)(allow process-exec)(allow sysctl-read)",
+                    "/usr/bin/true",
+                ])
+                .output()
+            {
+                Ok(output) if output.status.success() => (true, None),
+                Ok(output) => (
+                    false,
+                    Some(
+                        String::from_utf8_lossy(&output.stderr)
+                            .trim()
+                            .chars()
+                            .take(300)
+                            .collect(),
+                    ),
+                ),
+                Err(error) => (false, Some(format!("could not run sandbox-exec: {error}"))),
+            }
         })
-    })
+        .clone()
 }
 
 /// `arm64`/`amd64` are the same architectures under different spellings; a
@@ -349,10 +438,17 @@ pub fn execution_status(
         } else {
             if !host.native.sandbox_tool {
                 state = CapabilityState::Unavailable;
+                let detail = host
+                    .native
+                    .sandbox_detail
+                    .as_deref()
+                    .unwrap_or("the sandbox could not be applied");
                 reasons.push(Reason::new(
                     ReasonCode::NativeSandboxUnavailable,
-                    "the native route's mandatory filesystem/state/egress/lifecycle policy \
-                     cannot be enforced on this host, so it is not launched",
+                    format!(
+                        "the native route's mandatory filesystem/state/egress/lifecycle policy \
+                         cannot be enforced on this host ({detail}), so it is not launched"
+                    ),
                 ));
             }
             if !host.native.signature_tools {
@@ -403,6 +499,7 @@ mod tests {
             linux_sandbox: false,
             native: NativeFacts {
                 sandbox_tool: true,
+                sandbox_detail: None,
                 signature_tools: true,
             },
         }
@@ -556,5 +653,80 @@ mod tests {
                 reason.code == ReasonCode::NativeSignatureVerificationUnavailable
             })
         );
+    }
+
+    #[test]
+    fn security_boundary_tools_resolve_only_from_absolute_paths() {
+        // The platform-independent invariant: given one absolute path that
+        // exists, a same-named fake in a directory earlier on PATH is never
+        // selected. This uses only host-created files, so it holds on every
+        // target without depending on any OS-specific tool location.
+        let scratch = tempfile::tempdir().unwrap();
+        let tools = scratch.path().join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        let name = if cfg!(windows) { "tool.exe" } else { "tool" };
+        let real = tools.join(name);
+        std::fs::write(&real, b"real").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let fake_dir = tempfile::tempdir().unwrap();
+        let fake = fake_dir.path().join(name);
+        std::fs::write(&fake, b"fake").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // PATH whose first element is the directory holding the fake. The path
+        // separator differs per platform, so it is built with join_paths.
+        let mut entries = vec![fake_dir.path().to_path_buf()];
+        if let Some(current) = std::env::var_os("PATH") {
+            entries.extend(std::env::split_paths(&current));
+        }
+        let fake_path = std::env::join_paths(entries).unwrap();
+
+        let absolute = real.to_string_lossy().into_owned();
+        let resolved = trusted_tool_with_path(&[absolute.as_str()], Some(fake_path.as_os_str()))
+            .expect("the absolute path that exists is resolved");
+        assert_eq!(resolved, real);
+        assert!(
+            !resolved.starts_with(fake_dir.path()),
+            "the PATH entry was selected instead of the absolute path"
+        );
+
+        // A missing absolute path is a missing capability, not a reason to
+        // search PATH: the fake earlier on PATH must not be accepted.
+        let missing = tools.join("missing").join(name);
+        assert!(
+            trusted_tool_with_path(
+                &[missing.to_string_lossy().as_ref()],
+                Some(fake_path.as_os_str())
+            )
+            .is_none()
+        );
+        // Relative paths are refused rather than resolved from the cwd.
+        assert!(trusted_tool_with_path(&[name], Some(fake_path.as_os_str())).is_none());
+
+        // The macOS security boundary itself: these five are the only absolute
+        // paths the adapter may run for sandbox/signature/ownership decisions.
+        // They exist only on macOS; the assertion is that they are the paths
+        // this build hands to `trusted_tool`, not a PATH lookup.
+        #[cfg(target_os = "macos")]
+        for (label, absolute) in [
+            ("sandbox-exec", SEATBELT_LAUNCHER_PATH),
+            ("codesign", CODESIGN_PATH),
+            ("spctl", SPCTL_PATH),
+            ("lsof", LSOF_PATH),
+            ("ps", PS_PATH),
+        ] {
+            let resolved = trusted_tool_with_path(&[absolute], Some(fake_path.as_os_str()))
+                .unwrap_or_else(|| panic!("{label}: {absolute} is missing on this macOS host"));
+            assert_eq!(resolved, std::path::PathBuf::from(absolute), "{label}");
+            assert!(!resolved.starts_with(fake_dir.path()));
+        }
     }
 }
