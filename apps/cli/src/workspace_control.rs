@@ -136,3 +136,57 @@ fn random_token() -> std::io::Result<String> {
         .map_err(|error| std::io::Error::other(format!("entropy unavailable: {error}")))?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    use super::ControlHandle;
+
+    fn post(control: &ControlHandle, action: &str) -> String {
+        let address = control.url().trim_start_matches("http://").to_owned();
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .write_all(
+                format!(
+                    "POST /{action}?token={} HTTP/1.1\r\nhost: localhost\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                    control.token()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    }
+
+    #[test]
+    fn a_checkpoint_request_is_consumed_once_and_stop_sets_the_stop_flag() {
+        let control = ControlHandle::start().unwrap();
+        let response = post(&control, "checkpoint");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(control.take_checkpoint_requested());
+        assert!(!control.take_checkpoint_requested());
+        assert!(!control.stop_requested());
+        let response = post(&control, "stop");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(control.stop_requested());
+    }
+
+    #[test]
+    fn a_wrong_token_is_refused() {
+        let control = ControlHandle::start().unwrap();
+        let address = control.url().trim_start_matches("http://").to_owned();
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .write_all(
+                b"POST /stop?token=wrong HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n",
+            )
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+        assert!(!control.stop_requested());
+    }
+}

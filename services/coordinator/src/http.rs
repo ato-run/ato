@@ -1731,6 +1731,34 @@ export function createTask({ arguments: args, state }) {
     }
 
     #[tokio::test]
+    async fn an_expired_lease_can_be_taken_over() {
+        let state = state();
+        let (status, _content_type, first) = call_raw(
+            &state,
+            Method::POST,
+            "/v1/workspaces/ws-expiry/lease",
+            Some("Bearer test-token"),
+            json!({"holder": "host-a", "ttl_seconds": 1}),
+        )
+        .await;
+        assert!(status.is_success(), "{first}");
+        assert_eq!(serde_json::from_str::<Value>(&first).unwrap()["epoch"], 1);
+
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+
+        let (status, _content_type, second) = call_raw(
+            &state,
+            Method::POST,
+            "/v1/workspaces/ws-expiry/lease",
+            Some("Bearer test-token"),
+            json!({"holder": "host-b", "ttl_seconds": 60}),
+        )
+        .await;
+        assert!(status.is_success(), "{second}");
+        assert_eq!(serde_json::from_str::<Value>(&second).unwrap()["epoch"], 2);
+    }
+
+    #[tokio::test]
     async fn serves_an_app_and_its_data_ports_bridge() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("index.html"), "<h1>served app</h1>").unwrap();
