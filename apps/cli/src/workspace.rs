@@ -8,8 +8,9 @@
 //! wiring and the per-app Instances are added by the follow-up increment;
 //! this module owns the manifest and checkpoint model they share.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
@@ -42,6 +43,27 @@ pub enum WorkspaceCommand {
     Inspect(InspectArgs),
     /// Validate a workspace checkpoint file (no runtime is started).
     Checkpoint(CheckpointArgs),
+    /// Start the workspace shell and its pane servers on loopback.
+    ///
+    /// Ctrl-C stops the workspace; with `--checkpoint-out` the pane state and
+    /// the shell view state are captured first. `--checkpoint` resumes a
+    /// previous capture (same workspace file required).
+    Open(OpenArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct OpenArgs {
+    /// Workspace file (`ato.workspace/1`).
+    pub file: PathBuf,
+    /// Resume from this workspace checkpoint.
+    #[arg(long)]
+    pub checkpoint: Option<PathBuf>,
+    /// Write the next checkpoint here on stop.
+    #[arg(long)]
+    pub checkpoint_out: Option<PathBuf>,
+    /// Print the shell URL without opening a browser.
+    #[arg(long)]
+    pub no_open: bool,
 }
 
 #[derive(Debug, Args)]
@@ -150,6 +172,10 @@ pub struct WorkspaceCheckpointPaneV1 {
     /// Optional receipt of the Run that produced the checkpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt_ref: Option<String>,
+    /// Captured, app-opaque local state (a browser `localStorage` map in the
+    /// v0 shell). This is local orchestration data, never K or a Receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<serde_json::Value>,
 }
 
 /// One validated pane of an inspected workspace.
@@ -236,6 +262,9 @@ impl WorkspaceCheckpointV1 {
             if let Some(receipt) = &pane.receipt_ref {
                 validate_sha256(receipt, "checkpoint receipt_ref")?;
             }
+            if let Some(state) = &pane.state {
+                validate_captured_state(state)?;
+            }
         }
         let mut previous_view: Option<&str> = None;
         for view in &self.view.pane {
@@ -317,6 +346,19 @@ fn validate_instance_id(value: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_captured_state(state: &serde_json::Value) -> Result<()> {
+    let Some(object) = state.as_object() else {
+        bail!("checkpoint pane state must be a JSON object of string values");
+    };
+    if object.len() > 4096 {
+        bail!("checkpoint pane state has too many entries");
+    }
+    if object.values().any(|value| !value.is_string()) {
+        bail!("checkpoint pane state values must be strings");
+    }
+    Ok(())
+}
+
 fn validate_sha256(value: &str, field: &str) -> Result<()> {
     let Some(hex) = value.strip_prefix("sha256:") else {
         bail!("{field} must be `sha256:<64 lowercase hex>`");
@@ -379,60 +421,16 @@ pub fn inspect(file: &Path) -> Result<InspectedWorkspace> {
 
     let mut panes = Vec::with_capacity(manifest.pane.len());
     for pane in &manifest.pane {
-        let capsule_path = base.join(&pane.capsule);
-        let bytes = std::fs::read(&capsule_path).with_context(|| {
-            format!(
-                "pane `{}` capsule {} is not readable",
-                pane.id,
-                capsule_path.display()
-            )
-        })?;
-        let capsule_sha256 = sha256_hex(&bytes);
-        if let Some(expected) = &pane.digest
-            && *expected != capsule_sha256
-        {
-            bail!(
-                "pane `{}` capsule digest mismatch: the workspace pins {expected}, the file is {capsule_sha256}",
-                pane.id
-            );
-        }
-        match ato_objects::decode_capsule_bundle_document(&bytes) {
-            Ok(ato_objects::CapsuleBundleDocument::PortableApplicationV3(_))
-            | Ok(ato_objects::CapsuleBundleDocument::PortableApplicationV4(_)) => {}
-            Ok(ato_objects::CapsuleBundleDocument::ComputationV2(_)) => bail!(
-                "pane `{}` is computation-root wire v2; a workspace pane must be a contract-root v3/v4 Capsule",
-                pane.id
-            ),
-            Err(error) => bail!("pane `{}` is not a valid Capsule bundle: {error}", pane.id),
-        }
-        let (_, validated) = ato_portable_application::validate_bytes_all(&bytes)
-            .with_context(|| format!("pane `{}` failed all-Derivation validation", pane.id))?;
-        let selected = match pane.derivation.as_deref() {
-            Some(reference) => {
-                ato_portable_application::validate_bytes_for_derivation(&bytes, reference)
-                    .with_context(|| format!("pane `{}` selected Derivation was refused", pane.id))?
-                    .1
-            }
-            None => {
-                if validated.len() != 1 {
-                    bail!(
-                        "pane `{}` declares {} Derivations; set `derivation` to select one",
-                        pane.id,
-                        validated.len()
-                    );
-                }
-                validated.into_iter().next().expect("one validated route")
-            }
-        };
+        let loaded = load_pane_capsule(base, pane)?;
         panes.push(InspectedPane {
             pane_id: pane.id.clone(),
             app: pane.app.clone(),
-            capsule: capsule_path,
-            capsule_sha256,
-            contract_ref: selected.contract_ref.to_string(),
-            derivation_ref: selected.derivation_ref.to_string(),
-            realization: realization_label(selected.realization).to_owned(),
-            tree_ref: selected.tree_ref.to_string(),
+            capsule: loaded.capsule_path,
+            capsule_sha256: loaded.capsule_sha256,
+            contract_ref: loaded.selected.contract_ref.to_string(),
+            derivation_ref: loaded.selected.derivation_ref.to_string(),
+            realization: realization_label(loaded.selected.realization).to_owned(),
+            tree_ref: loaded.selected.tree_ref.to_string(),
         });
     }
     Ok(InspectedWorkspace {
@@ -459,6 +457,29 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
+fn wait_for_shutdown() -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let flag = Arc::new(AtomicBool::new(false));
+        signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&flag))?;
+        signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&flag))?;
+        while !flag.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        // v0: a line on stdin is the stop signal on platforms where the
+        // signal flag cannot be registered yet.
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        Ok(())
+    }
+}
+
 /// Read and validate a checkpoint file.
 pub fn read_checkpoint(path: &Path) -> Result<WorkspaceCheckpointV1> {
     let text = std::fs::read_to_string(path)
@@ -469,8 +490,6 @@ pub fn read_checkpoint(path: &Path) -> Result<WorkspaceCheckpointV1> {
 /// Write a checkpoint atomically: same-directory temporary file, fsync, rename.
 /// A failed write never leaves a partial checkpoint at the destination.
 ///
-/// Used by the runtime wiring (next increment) and by the tests here.
-#[allow(dead_code)]
 pub fn write_checkpoint_atomic(path: &Path, checkpoint: &WorkspaceCheckpointV1) -> Result<()> {
     checkpoint.validate()?;
     let parent = path
@@ -548,6 +567,31 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
             }
             Ok(())
         }
+        WorkspaceCommand::Open(args) => {
+            let checkpoint = args
+                .checkpoint
+                .as_deref()
+                .map(read_checkpoint)
+                .transpose()?;
+            let running = start(&args.file, checkpoint.as_ref())?;
+            println!("workspace: {}", running.shell_url);
+            if !args.no_open {
+                crate::open_browser(&running.shell_url)?;
+            }
+            if args.checkpoint_out.is_some() {
+                println!("edit the panes, then press Ctrl-C to checkpoint and stop");
+            } else {
+                println!("press Ctrl-C to stop (no --checkpoint-out was given)");
+            }
+            wait_for_shutdown()?;
+            if let Some(path) = args.checkpoint_out.as_deref() {
+                let checkpoint = running.capture()?;
+                write_checkpoint_atomic(path, &checkpoint)?;
+                println!("checkpoint: {}", path.display());
+            }
+            drop(running);
+            Ok(())
+        }
         WorkspaceCommand::Checkpoint(args) => {
             let checkpoint = read_checkpoint(&args.file)?;
             if args.json {
@@ -576,6 +620,439 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
             }
             Ok(())
         }
+    }
+}
+
+const VIEW_STATE_KEY: &str = "ato.workspace.view";
+
+/// The shell's own view state: layout and which pane was active. It is stored
+/// in the shell origin's localStorage (through the static server's state
+/// bridge), never in a Capsule's K.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShellViewState {
+    pub direction: Direction,
+    pub split: Vec<f64>,
+    pub active_pane: String,
+}
+
+impl ShellViewState {
+    fn for_manifest(manifest: &WorkspaceManifestV1) -> Self {
+        Self {
+            direction: manifest.layout.direction,
+            split: manifest.layout.split.clone(),
+            active_pane: manifest.pane[0].id.clone(),
+        }
+    }
+}
+
+struct LoadedPaneCapsule {
+    capsule_path: PathBuf,
+    capsule_sha256: String,
+    bundle: ato_objects::PortableApplicationBundle,
+    selected: ato_portable_application::ValidatedPortableApplication,
+}
+
+fn load_pane_capsule(base: &Path, pane: &WorkspacePaneV1) -> Result<LoadedPaneCapsule> {
+    let capsule_path = base.join(&pane.capsule);
+    let bytes = std::fs::read(&capsule_path).with_context(|| {
+        format!(
+            "pane `{}` capsule {} is not readable",
+            pane.id,
+            capsule_path.display()
+        )
+    })?;
+    let capsule_sha256 = sha256_hex(&bytes);
+    if let Some(expected) = &pane.digest
+        && *expected != capsule_sha256
+    {
+        bail!(
+            "pane `{}` capsule digest mismatch: the workspace pins {expected}, the file is {capsule_sha256}",
+            pane.id
+        );
+    }
+    match ato_objects::decode_capsule_bundle_document(&bytes) {
+        Ok(ato_objects::CapsuleBundleDocument::PortableApplicationV3(_))
+        | Ok(ato_objects::CapsuleBundleDocument::PortableApplicationV4(_)) => {}
+        Ok(ato_objects::CapsuleBundleDocument::ComputationV2(_)) => bail!(
+            "pane `{}` is computation-root wire v2; a workspace pane must be a contract-root v3/v4 Capsule",
+            pane.id
+        ),
+        Err(error) => bail!("pane `{}` is not a valid Capsule bundle: {error}", pane.id),
+    }
+    let (_, validated) = ato_portable_application::validate_bytes_all(&bytes)
+        .with_context(|| format!("pane `{}` failed all-Derivation validation", pane.id))?;
+    let selected = match pane.derivation.as_deref() {
+        Some(reference) => {
+            ato_portable_application::validate_bytes_for_derivation(&bytes, reference)
+                .with_context(|| format!("pane `{}` selected Derivation was refused", pane.id))?
+                .1
+        }
+        None => {
+            if validated.len() != 1 {
+                bail!(
+                    "pane `{}` declares {} Derivations; set `derivation` to select one",
+                    pane.id,
+                    validated.len()
+                );
+            }
+            validated.into_iter().next().expect("one validated route")
+        }
+    };
+    let bundle = match ato_objects::decode_capsule_bundle_document(&bytes) {
+        Ok(ato_objects::CapsuleBundleDocument::PortableApplicationV3(bundle))
+        | Ok(ato_objects::CapsuleBundleDocument::PortableApplicationV4(bundle)) => bundle,
+        _ => unreachable!("the document was already dispatched"),
+    };
+    Ok(LoadedPaneCapsule {
+        capsule_path,
+        capsule_sha256,
+        bundle,
+        selected,
+    })
+}
+
+/// One running pane: its static server and the token the state bridge uses.
+pub struct WorkspacePaneRuntime {
+    pub pane_id: String,
+    pub server: ato_runtime_attempt::static_server::StaticApplicationServer,
+    persistence_token: String,
+}
+
+/// A running workspace shell and its pane servers.
+pub struct RunningWorkspace {
+    pub shell: ato_runtime_attempt::static_server::StaticApplicationServer,
+    pub panes: Vec<WorkspacePaneRuntime>,
+    pub shell_url: String,
+    pub workspace_digest: String,
+    manifest: WorkspaceManifestV1,
+    _runtime_root: tempfile::TempDir,
+}
+
+fn random_token() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).context("failed to generate a workspace state token")?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn pane_routes(
+    destination: &Path,
+    selected: &ato_portable_application::ValidatedPortableApplication,
+) -> Result<BTreeMap<String, (PathBuf, String)>> {
+    let mut routes = BTreeMap::new();
+    for entry in &selected.tree.entries {
+        routes.insert(
+            format!("/{}", entry.path),
+            (destination.join(&entry.path), entry.media_type.clone()),
+        );
+    }
+    if routes.is_empty() {
+        bail!("a pane's static tree is empty");
+    }
+    Ok(routes)
+}
+
+fn pane_entry_route(selected: &ato_portable_application::ValidatedPortableApplication) -> String {
+    selected
+        .application
+        .surfaces
+        .first()
+        .and_then(|surface| surface.entry.clone())
+        .map(|entry| format!("/{entry}"))
+        .unwrap_or_else(|| "/index.html".to_owned())
+}
+
+fn pane_spa_fallback(selected: &ato_portable_application::ValidatedPortableApplication) -> bool {
+    selected
+        .application
+        .surfaces
+        .first()
+        .and_then(|surface| surface.spa_fallback)
+        .unwrap_or(false)
+}
+
+/// Read a checkpoint's captured per-pane state as a localStorage map.
+fn pane_local_storage(
+    checkpoint: Option<&WorkspaceCheckpointV1>,
+    pane_id: &str,
+) -> Result<BTreeMap<String, String>> {
+    let Some(checkpoint) = checkpoint else {
+        return Ok(BTreeMap::new());
+    };
+    let Some(entry) = checkpoint.pane.iter().find(|pane| pane.pane_id == pane_id) else {
+        return Ok(BTreeMap::new());
+    };
+    let Some(state) = &entry.state else {
+        return Ok(BTreeMap::new());
+    };
+    let object = state
+        .as_object()
+        .context("checkpoint pane state must be a JSON object")?;
+    let mut map = BTreeMap::new();
+    for (key, value) in object {
+        let value = value
+            .as_str()
+            .context("checkpoint pane state values must be strings")?;
+        map.insert(key.clone(), value.to_owned());
+    }
+    Ok(map)
+}
+
+fn shell_html(
+    manifest: &WorkspaceManifestV1,
+    pane_urls: &BTreeMap<String, String>,
+    view: &ShellViewState,
+) -> Result<String> {
+    let columns = match view.direction {
+        Direction::Horizontal => format!(
+            "grid-template-columns: {};",
+            view.split
+                .iter()
+                .map(|weight| format!("{weight}fr"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        Direction::Vertical => format!(
+            "grid-template-rows: {};",
+            view.split
+                .iter()
+                .map(|weight| format!("{weight}fr"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+    };
+    let mut frames = String::new();
+    for pane in &manifest.pane {
+        let url = pane_urls
+            .get(&pane.id)
+            .with_context(|| format!("shell has no URL for pane `{}`", pane.id))?;
+        let title = pane.app.as_deref().unwrap_or(&pane.id);
+        let active = if view.active_pane == pane.id {
+            " active"
+        } else {
+            ""
+        };
+        frames.push_str(&format!(
+            r#"<section class="pane{active}" data-pane="{id}"><header>{title}</header><iframe title="{title}" src="{url}/"></iframe></section>"#,
+            id = html_escape(&pane.id),
+            title = html_escape(title),
+            url = html_escape(url),
+        ));
+    }
+    let view_json = serde_json::to_string(view).context("failed to encode the shell view state")?;
+    Ok(format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ato workspace</title>
+<style>
+html, body {{ height: 100%; margin: 0; font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }}
+body {{ display: flex; flex-direction: column; }}
+header.bar {{ padding: 0.5rem 0.8rem; border-bottom: 1px solid #e6e8ea; color: #4a4f54; }}
+main {{ flex: 1; min-height: 0; display: grid; {columns} gap: 6px; padding: 6px; background: #f2f4f6; }}
+section.pane {{ min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #fff; border: 1px solid #e0e3e6; border-radius: 8px; overflow: hidden; }}
+section.pane.active {{ border-color: #1f6feb; }}
+section.pane header {{ padding: 0.35rem 0.6rem; border-bottom: 1px solid #eef0f2; color: #6b7075; }}
+iframe {{ flex: 1; width: 100%; border: 0; }}
+</style>
+</head>
+<body>
+<header class="bar">ato workspace — edits are saved to this workspace's checkpoint when you stop it</header>
+<main>{frames}</main>
+<script>
+(function () {{
+  var key = "{key}";
+  var fallback = {view_json};
+  var current = fallback;
+  try {{
+    var stored = localStorage.getItem(key);
+    if (stored) {{
+      var parsed = JSON.parse(stored);
+      if (parsed && Array.isArray(parsed.split) && parsed.split.length === fallback.split.length) {{
+        current = parsed;
+      }}
+    }}
+  }} catch (_) {{}}
+  if (current.active_pane !== fallback.active_pane) current.active_pane = fallback.active_pane;
+  localStorage.setItem(key, JSON.stringify(current));
+  document.querySelectorAll("section.pane").forEach(function (pane) {{
+    pane.addEventListener("click", function () {{
+      current.active_pane = pane.dataset.pane;
+      localStorage.setItem(key, JSON.stringify(current));
+    }});
+  }});
+}})();
+</script>
+</body>
+</html>"#,
+        key = VIEW_STATE_KEY,
+    ))
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// Start every pane and the workspace shell on loopback.
+///
+/// Pure local orchestration: each pane is materialized from its own verified
+/// tree, served on its own origin (so its browser state is separate), and the
+/// shell is a page with one iframe per pane. No Capsule identity is created or
+/// changed.
+pub fn start(file: &Path, checkpoint: Option<&WorkspaceCheckpointV1>) -> Result<RunningWorkspace> {
+    let text = std::fs::read_to_string(file)
+        .with_context(|| format!("failed to read workspace {}", file.display()))?;
+    let manifest = parse_manifest(&text)?;
+    let base = file.parent().unwrap_or_else(|| Path::new("."));
+    let workspace_digest = sha256_hex(text.as_bytes());
+    if let Some(checkpoint) = checkpoint
+        && checkpoint.workspace_digest != workspace_digest
+    {
+        bail!(
+            "checkpoint was taken from a different workspace file ({} != {})",
+            checkpoint.workspace_digest,
+            workspace_digest
+        );
+    }
+    let view = checkpoint
+        .map(|checkpoint| ShellViewState {
+            direction: checkpoint.view.direction,
+            split: checkpoint.view.split.clone(),
+            active_pane: checkpoint.view.active_pane.clone(),
+        })
+        .unwrap_or_else(|| ShellViewState::for_manifest(&manifest));
+
+    let runtime_root = tempfile::Builder::new()
+        .prefix("ato-workspace-")
+        .tempdir()
+        .context("failed to create the workspace runtime directory")?;
+    let mut panes = Vec::with_capacity(manifest.pane.len());
+    let mut pane_urls = BTreeMap::new();
+    for pane in &manifest.pane {
+        let loaded = load_pane_capsule(base, pane)?;
+        let destination = runtime_root.path().join(&pane.id);
+        ato_portable_application::materialize_tree(&loaded.bundle, &loaded.selected, &destination)
+            .with_context(|| format!("pane `{}` tree could not be materialized", pane.id))?;
+        let routes = pane_routes(&destination, &loaded.selected)?;
+        let token = random_token()?;
+        let state = ato_runtime_attempt::static_server::StaticApplicationState {
+            persistence_token: token.clone(),
+            local_storage: pane_local_storage(checkpoint, &pane.id)?,
+            assets: Vec::new(),
+        };
+        let server = ato_runtime_attempt::static_server::StaticApplicationServer::listen(
+            routes,
+            pane_entry_route(&loaded.selected),
+            pane_spa_fallback(&loaded.selected),
+            Some(state),
+        )
+        .with_context(|| format!("pane `{}` server could not start", pane.id))?;
+        pane_urls.insert(pane.id.clone(), server.base_url());
+        panes.push(WorkspacePaneRuntime {
+            pane_id: pane.id.clone(),
+            server,
+            persistence_token: token,
+        });
+    }
+
+    let shell_directory = runtime_root.path().join("__workspace_shell");
+    std::fs::create_dir_all(&shell_directory)
+        .context("failed to create the workspace shell directory")?;
+    let shell_path = shell_directory.join("index.html");
+    std::fs::write(&shell_path, shell_html(&manifest, &pane_urls, &view)?)
+        .context("failed to write the workspace shell")?;
+    let shell_view_storage = BTreeMap::from([(
+        VIEW_STATE_KEY.to_owned(),
+        serde_json::to_string(&view).context("failed to encode the shell view state")?,
+    )]);
+    let shell = ato_runtime_attempt::static_server::StaticApplicationServer::listen(
+        BTreeMap::from([(
+            "/index.html".to_owned(),
+            (shell_path, "text/html; charset=utf-8".to_owned()),
+        )]),
+        "/index.html".to_owned(),
+        false,
+        Some(ato_runtime_attempt::static_server::StaticApplicationState {
+            persistence_token: random_token()?,
+            local_storage: shell_view_storage,
+            assets: Vec::new(),
+        }),
+    )
+    .context("the workspace shell server could not start")?;
+    let shell_url = format!("{}/", shell.base_url());
+    Ok(RunningWorkspace {
+        shell,
+        panes,
+        shell_url,
+        workspace_digest,
+        manifest,
+        _runtime_root: runtime_root,
+    })
+}
+
+impl RunningWorkspace {
+    /// Capture the state the panes actually hold and the shell view state.
+    pub fn capture(&self) -> Result<WorkspaceCheckpointV1> {
+        let view = self
+            .shell
+            .local_storage()?
+            .and_then(|mut storage| storage.remove(VIEW_STATE_KEY))
+            .and_then(|value| serde_json::from_str::<ShellViewState>(&value).ok())
+            .unwrap_or_else(|| ShellViewState::for_manifest(&self.manifest));
+        let mut pane = Vec::with_capacity(self.panes.len());
+        for runtime in &self.panes {
+            let storage = runtime.server.local_storage()?.unwrap_or_default();
+            let state = serde_json::to_value(&storage)
+                .context("failed to encode the captured pane state")?;
+            let bytes =
+                serde_jcs::to_vec(&state).context("failed to canonicalize the pane state")?;
+            pane.push(WorkspaceCheckpointPaneV1 {
+                pane_id: runtime.pane_id.clone(),
+                instance_id: format!("ephemeral-{}", runtime.pane_id),
+                snapshot_ref: sha256_hex(&bytes),
+                receipt_ref: None,
+                state: Some(state),
+            });
+        }
+        pane.sort_by(|left, right| left.pane_id.cmp(&right.pane_id));
+        let mut view_panes = Vec::new();
+        for manifest_pane in &self.manifest.pane {
+            view_panes.push(WorkspacePaneViewStateV1 {
+                pane_id: manifest_pane.id.clone(),
+                restore: manifest_pane.restore.clone(),
+                state: None,
+            });
+        }
+        view_panes.sort_by(|left, right| left.pane_id.cmp(&right.pane_id));
+        let checkpoint = WorkspaceCheckpointV1 {
+            schema: WORKSPACE_CHECKPOINT_SCHEMA.to_owned(),
+            workspace_digest: self.workspace_digest.clone(),
+            view: WorkspaceViewStateV1 {
+                direction: view.direction,
+                split: view.split,
+                active_pane: view.active_pane,
+                pane: view_panes,
+            },
+            pane,
+        };
+        checkpoint.validate()?;
+        Ok(checkpoint)
+    }
+
+    /// Tokens are exposed so a test can drive the state bridge as a browser
+    /// would; they are per-run loopback CSRF tokens, not secrets.
+    pub fn persistence_token(&self, pane_id: &str) -> Option<&str> {
+        self.panes
+            .iter()
+            .find(|pane| pane.pane_id == pane_id)
+            .map(|pane| pane.persistence_token.as_str())
     }
 }
 
@@ -706,12 +1183,14 @@ mod tests {
                     instance_id: "instance-1".to_owned(),
                     snapshot_ref: sha256_hex(b"snapshot"),
                     receipt_ref: None,
+                    state: None,
                 },
                 WorkspaceCheckpointPaneV1 {
                     pane_id: "todo".to_owned(),
                     instance_id: "instance-2".to_owned(),
                     snapshot_ref: sha256_hex(b"snapshot-2"),
                     receipt_ref: Some(sha256_hex(b"receipt")),
+                    state: None,
                 },
             ],
         };
