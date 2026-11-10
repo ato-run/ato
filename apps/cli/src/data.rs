@@ -112,6 +112,13 @@ pub enum OperationCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum BindingCommand {
+    /// List bindings (optionally only one app instance's).
+    List {
+        #[arg(long)]
+        instance: Option<String>,
+        #[command(flatten)]
+        coordinator: CoordinatorArgs,
+    },
     /// Bind a Resource to a Port. `--access operations` is operation-only.
     Create {
         resource_id: String,
@@ -200,6 +207,10 @@ pub fn run(args: DataArgs) -> Result<()> {
             } => create(&coordinator, &protocol, display_name, &document),
         },
         DataCommand::Binding { command } => match command {
+            BindingCommand::List {
+                instance,
+                coordinator,
+            } => binding_list(&coordinator, instance.as_deref()),
             BindingCommand::Create {
                 resource_id,
                 port,
@@ -570,6 +581,62 @@ fn gc(coordinator: &CoordinatorArgs) -> Result<()> {
             .and_then(Value::as_i64)
             .unwrap_or_default()
     );
+    Ok(())
+}
+
+fn binding_list(coordinator: &CoordinatorArgs, instance: Option<&str>) -> Result<()> {
+    let value = request(coordinator, reqwest::Method::GET, "/v1/bindings", None)?;
+    if coordinator.json {
+        return print_json(&value);
+    }
+    let bindings = value
+        .get("bindings")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut shown = 0;
+    for binding in bindings {
+        let binding_instance = binding.get("instance_id").and_then(Value::as_str);
+        if let Some(wanted) = instance {
+            if binding_instance != Some(wanted) {
+                continue;
+            }
+        }
+        shown += 1;
+        let operations = binding
+            .get("operations")
+            .and_then(Value::as_array)
+            .map(|operations| {
+                operations
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        println!(
+            "{}  {}  {}  {}  {}  {}",
+            binding
+                .get("binding_id")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+            binding
+                .get("port_name")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+            binding.get("access").and_then(Value::as_str).unwrap_or("-"),
+            if operations.is_empty() {
+                "-".to_owned()
+            } else {
+                operations
+            },
+            binding_instance.unwrap_or("owner"),
+            binding.get("status").and_then(Value::as_str).unwrap_or("-"),
+        );
+    }
+    if shown == 0 {
+        println!("no bindings");
+    }
     Ok(())
 }
 

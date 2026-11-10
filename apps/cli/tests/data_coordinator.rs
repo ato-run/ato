@@ -391,6 +391,33 @@ fn uses_the_stored_login_token_when_none_is_passed() {
 }
 
 #[test]
+fn binding_list_prints_scopes_and_filters_by_instance() {
+    let binding = r#"{"bindings":[{"binding_id":"dbind_1","resource_id":"dres_1","port_name":"tasks","protocol":"todo.board@1","access":"operations","operations":["todo_list_due_dates"],"status":"active","binding_epoch":0,"instance_id":"calendar-ui","last_used_at":null},{"binding_id":"dbind_2","resource_id":"dres_1","port_name":"tasks","protocol":"todo.board@1","access":"read","operations":[],"status":"active","binding_epoch":0,"instance_id":"todo-ui","last_used_at":"2026-11-10T01:00:00Z"}]}"#;
+    let (port, handle) = stub(vec![(200, binding)]);
+    let output = ato()
+        .args([
+            "data",
+            "binding",
+            "list",
+            "--instance",
+            "calendar-ui",
+            "--coordinator",
+            &format!("http://127.0.0.1:{port}"),
+            "--token",
+            "test-token",
+        ])
+        .output()
+        .expect("run ato data binding list");
+    handle.join().expect("stub");
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("dbind_1"), "{stdout}");
+    assert!(stdout.contains("todo_list_due_dates"), "{stdout}");
+    assert!(stdout.contains("calendar-ui"), "{stdout}");
+    assert!(!stdout.contains("dbind_2"), "{stdout}");
+}
+
+#[test]
 fn quota_prints_usage_and_limit() {
     let (port, handle) = stub(vec![(
         200,
