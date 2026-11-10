@@ -5,7 +5,7 @@
 //! it prints what the authority returned and never keeps a local copy, so a
 //! revision observed here is the authority's revision.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -181,6 +181,10 @@ pub enum BindingCommand {
         /// Operations an operation-only binding may invoke (comma separated).
         #[arg(long, value_delimiter = ',')]
         operations: Vec<String>,
+        /// App instance this binding answers for. Omit for an owner-level
+        /// binding; a served app's bridge only sees bindings for its instance.
+        #[arg(long)]
+        instance_id: Option<String>,
         #[command(flatten)]
         coordinator: CoordinatorArgs,
     },
@@ -236,8 +240,33 @@ pub enum ProtocolCommand {
         semantics: String,
         #[arg(long)]
         access: String,
+        /// Digest of the operation implementation (used without `--module`).
         #[arg(long)]
-        implementation_digest: String,
+        implementation_digest: Option<String>,
+        /// JavaScript module source that implements the operation.
+        ///
+        /// With `--module`, the Coordinator stores the module and runs it for
+        /// the operation; `--implementation-digest` is then optional.
+        #[arg(long)]
+        module: Option<PathBuf>,
+        /// Export name in `--module` (e.g. `listDueDates`).
+        #[arg(long)]
+        export: Option<String>,
+        #[arg(long)]
+        publisher: String,
+        #[command(flatten)]
+        coordinator: CoordinatorArgs,
+    },
+    /// Register every operation declared in an `ato.operations.yaml` file.
+    ///
+    /// The file stays the source of truth for the Port's operations: each
+    /// `operation` is registered with its module source and export name, and
+    /// re-running the command is a no-op when the module is unchanged.
+    RegisterAll {
+        file: PathBuf,
+        /// Port protocol the operations belong to (must match the declarations).
+        #[arg(long)]
+        protocol: String,
         #[arg(long)]
         publisher: String,
         #[command(flatten)]
@@ -291,6 +320,7 @@ pub fn run(args: DataArgs) -> Result<()> {
                 protocol,
                 access,
                 operations,
+                instance_id,
                 coordinator,
             } => binding_create(
                 &coordinator,
@@ -299,6 +329,7 @@ pub fn run(args: DataArgs) -> Result<()> {
                 &protocol,
                 &access,
                 operations,
+                instance_id.as_deref(),
             ),
             BindingCommand::Document {
                 binding_id,
@@ -341,17 +372,27 @@ pub fn run(args: DataArgs) -> Result<()> {
                 semantics,
                 access,
                 implementation_digest,
+                module,
+                export,
                 publisher,
                 coordinator,
-            } => protocol_register(
-                &coordinator,
-                &protocol,
-                &operation,
-                &semantics,
-                &access,
-                &implementation_digest,
-                &publisher,
-            ),
+            } => protocol_register(ProtocolRegistration {
+                coordinator: &coordinator,
+                protocol: &protocol,
+                operation: &operation,
+                semantics: &semantics,
+                access: &access,
+                implementation_digest: implementation_digest.as_deref(),
+                module: module.as_deref(),
+                export: export.as_deref(),
+                publisher: &publisher,
+            }),
+            ProtocolCommand::RegisterAll {
+                file,
+                protocol,
+                publisher,
+                coordinator,
+            } => protocol_register_all(&coordinator, &file, &protocol, &publisher),
         },
         DataCommand::Operation { command } => match command {
             OperationCommand::Invoke {
@@ -1074,17 +1115,22 @@ fn binding_create(
     protocol: &str,
     access: &str,
     operations: Vec<String>,
+    instance_id: Option<&str>,
 ) -> Result<()> {
+    let mut body = json!({
+        "port": port,
+        "protocol": protocol,
+        "access": access,
+        "operations": operations,
+    });
+    if let Some(instance_id) = instance_id {
+        body["instance_id"] = Value::String(instance_id.to_owned());
+    }
     let value = request(
         coordinator,
         reqwest::Method::POST,
         &format!("/v1/data-resources/{resource_id}/bindings"),
-        Some(json!({
-            "port": port,
-            "protocol": protocol,
-            "access": access,
-            "operations": operations,
-        })),
+        Some(body),
     )?;
     if coordinator.json {
         return print_json(&value);
@@ -1265,30 +1311,666 @@ fn protocol_list(coordinator: &CoordinatorArgs, protocol: Option<&str>) -> Resul
     Ok(())
 }
 
-fn protocol_register(
-    coordinator: &CoordinatorArgs,
-    protocol: &str,
+/// The body for one protocol-operation registration.
+///
+/// A module-backed operation sends its source and export name; the Coordinator
+/// stores the module and runs it. Without a module the digest is the only
+/// implementation evidence, so it is required.
+fn protocol_registration_body(
     operation: &str,
     semantics: &str,
     access: &str,
-    implementation_digest: &str,
+    implementation_digest: Option<&str>,
+    module_source: Option<&str>,
+    module_export: Option<&str>,
     publisher: &str,
-) -> Result<()> {
+) -> Result<Value> {
+    match (module_source, module_export) {
+        (Some(source), Some(export)) => {
+            if source.is_empty() || export.is_empty() {
+                bail!("--module and --export must both be non-empty");
+            }
+            if source.len() > 2 * 1024 * 1024 {
+                bail!("--module source is larger than 2 MiB");
+            }
+            Ok(json!({
+                "operation": operation,
+                "semantics": semantics,
+                "access": access,
+                "module_source": source,
+                "module_export": export,
+                "publisher": publisher,
+            }))
+        }
+        (None, None) => {
+            let digest = implementation_digest
+                .context("pass --implementation-digest, or --module with --export")?;
+            Ok(json!({
+                "operation": operation,
+                "semantics": semantics,
+                "access": access,
+                "implementation_digest": digest,
+                "publisher": publisher,
+            }))
+        }
+        _ => bail!("--module and --export must be passed together"),
+    }
+}
+
+struct ProtocolRegistration<'a> {
+    coordinator: &'a CoordinatorArgs,
+    protocol: &'a str,
+    operation: &'a str,
+    semantics: &'a str,
+    access: &'a str,
+    implementation_digest: Option<&'a str>,
+    module: Option<&'a std::path::Path>,
+    export: Option<&'a str>,
+    publisher: &'a str,
+}
+
+fn protocol_register(registration: ProtocolRegistration<'_>) -> Result<()> {
+    let ProtocolRegistration {
+        coordinator,
+        protocol,
+        operation,
+        semantics,
+        access,
+        implementation_digest,
+        module,
+        export,
+        publisher,
+    } = registration;
+    let module_source =
+        match module {
+            Some(path) => Some(std::fs::read_to_string(path).with_context(|| {
+                format!("failed to read the operation module {}", path.display())
+            })?),
+            None => None,
+        };
+    let body = protocol_registration_body(
+        operation,
+        semantics,
+        access,
+        implementation_digest,
+        module_source.as_deref(),
+        export,
+        publisher,
+    )?;
     let value = request(
         coordinator,
         reqwest::Method::POST,
         &format!("/v1/protocols/{protocol}/operations"),
-        Some(json!({
-            "operation": operation,
-            "semantics": semantics,
-            "access": access,
-            "implementation_digest": implementation_digest,
-            "publisher": publisher,
-        })),
+        Some(body),
     )?;
     if coordinator.json {
         return print_json(&value);
     }
     println!("registered {} on {}", operation, protocol);
     Ok(())
+}
+
+#[derive(Debug)]
+struct PlannedOperation {
+    id: String,
+    semantics: String,
+    access: String,
+    module: PathBuf,
+    export: String,
+}
+
+/// Read an `ato.operations.yaml` (`ato.operations/v2`) declaration and plan
+/// one registration per operation. The declaration is the source of truth: the
+/// module path is resolved next to the file and the Port protocol must match.
+fn plan_operations(file: &Path, protocol: &str) -> Result<Vec<PlannedOperation>> {
+    let text = std::fs::read_to_string(file)
+        .with_context(|| format!("failed to read the operations file {}", file.display()))?;
+    let value: Value = serde_yaml_ng::from_str(&text)
+        .with_context(|| format!("{} is not valid YAML", file.display()))?;
+    if value.get("schema").and_then(Value::as_str) != Some("ato.operations/v2") {
+        bail!(
+            "{} must declare `schema: ato.operations/v2` (v1 declarations have no data-port operations)",
+            file.display()
+        );
+    }
+    let operations = value
+        .get("operations")
+        .and_then(Value::as_array)
+        .with_context(|| format!("{} has no `operations` list", file.display()))?;
+    if operations.is_empty() {
+        bail!("{} declares no operations", file.display());
+    }
+    let base = file.parent().unwrap_or_else(|| Path::new("."));
+    let mut seen = std::collections::BTreeSet::new();
+    let mut planned = Vec::with_capacity(operations.len());
+    for (index, operation) in operations.iter().enumerate() {
+        let field = |name: &str| {
+            operation
+                .get(name)
+                .and_then(Value::as_str)
+                .with_context(|| format!("operation #{index} has no `{name}`"))
+        };
+        let id = field("id")?.to_owned();
+        if !seen.insert(id.clone()) {
+            bail!("operation `{id}` is declared more than once");
+        }
+        let semantics = field("semantics")?.to_owned();
+        if !matches!(semantics.as_str(), "observation" | "evolution") {
+            bail!("operation `{id}` has unsupported semantics `{semantics}`");
+        }
+        let execution = operation
+            .get("execution")
+            .and_then(Value::as_object)
+            .with_context(|| format!("operation `{id}` has no execution"))?;
+        if execution.get("kind").and_then(Value::as_str) != Some("state_transform") {
+            bail!("operation `{id}` is not a state_transform operation");
+        }
+        let module = execution
+            .get("module")
+            .and_then(Value::as_str)
+            .with_context(|| format!("operation `{id}` has no execution.module"))?;
+        let export = execution
+            .get("export")
+            .and_then(Value::as_str)
+            .with_context(|| format!("operation `{id}` has no execution.export"))?
+            .to_owned();
+        if export.is_empty()
+            || !export
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'))
+        {
+            bail!("operation `{id}` has an invalid export name");
+        }
+        let state = operation
+            .get("state")
+            .and_then(Value::as_object)
+            .with_context(|| format!("operation `{id}` has no state"))?;
+        if state.get("kind").and_then(Value::as_str) != Some("data_port") {
+            bail!("operation `{id}` does not operate on a data_port");
+        }
+        if let Some(declared) = state.get("protocol").and_then(Value::as_str)
+            && declared != protocol
+        {
+            bail!(
+                "operation `{id}` declares protocol `{declared}` but `--protocol {protocol}` was given"
+            );
+        }
+        let access = state
+            .get("access")
+            .and_then(Value::as_str)
+            .with_context(|| format!("operation `{id}` has no state.access"))?
+            .to_owned();
+        if !matches!(access.as_str(), "read" | "read_write" | "operations") {
+            bail!("operation `{id}` has unsupported access `{access}`");
+        }
+        planned.push(PlannedOperation {
+            id,
+            semantics,
+            access,
+            module: base.join(module),
+            export,
+        });
+    }
+    Ok(planned)
+}
+
+/// Register every operation an `ato.operations.yaml` declares (CLI-shared).
+pub(crate) fn register_all_declaration(
+    coordinator: &CoordinatorArgs,
+    file: &Path,
+    protocol: &str,
+    publisher: &str,
+) -> Result<()> {
+    protocol_register_all(coordinator, file, protocol, publisher)
+}
+
+/// The single-writer lease a workspace holds on its Coordinator.
+#[derive(Debug, Clone)]
+pub(crate) struct WorkspaceLease {
+    pub workspace_id: String,
+    pub holder: String,
+    pub epoch: i64,
+}
+
+pub(crate) fn acquire_workspace_lease(
+    coordinator: &CoordinatorArgs,
+    workspace_id: &str,
+    holder: &str,
+    ttl_seconds: i64,
+) -> Result<WorkspaceLease> {
+    let value = request(
+        coordinator,
+        reqwest::Method::POST,
+        &format!("/v1/workspaces/{}/lease", workspace_id.replace('/', "%2F")),
+        Some(json!({ "holder": holder, "ttl_seconds": ttl_seconds })),
+    )?;
+    Ok(WorkspaceLease {
+        workspace_id: value
+            .get("workspace_id")
+            .and_then(Value::as_str)
+            .unwrap_or(workspace_id)
+            .to_owned(),
+        holder: value
+            .get("holder")
+            .and_then(Value::as_str)
+            .unwrap_or(holder)
+            .to_owned(),
+        epoch: value
+            .get("epoch")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+    })
+}
+
+pub(crate) fn release_workspace_lease(
+    coordinator: &CoordinatorArgs,
+    lease: &WorkspaceLease,
+) -> Result<()> {
+    request(
+        coordinator,
+        reqwest::Method::DELETE,
+        &format!(
+            "/v1/workspaces/{}/lease",
+            lease.workspace_id.replace('/', "%2F")
+        ),
+        Some(json!({ "holder": lease.holder, "epoch": lease.epoch })),
+    )?;
+    Ok(())
+}
+
+/// Read the whole saved DataResource set from a Coordinator.
+pub(crate) fn export_resources(coordinator: &CoordinatorArgs) -> Result<Value> {
+    request(
+        coordinator,
+        reqwest::Method::GET,
+        "/v1/data-resources/export",
+        None,
+    )
+}
+
+/// Create one Resource with a document (used to restore a checkpoint).
+pub(crate) fn create_resource_with_document(
+    coordinator: &CoordinatorArgs,
+    protocol: &str,
+    display_name: &str,
+    document: &Value,
+) -> Result<String> {
+    // A shared Coordinator already holds the authoritative Resource; creating a
+    // second one would split the workspace's data. Reuse the matching one.
+    let listed = request(
+        coordinator,
+        reqwest::Method::GET,
+        "/v1/data-resources",
+        None,
+    )?;
+    if let Some(existing) = listed
+        .get("resources")
+        .and_then(Value::as_array)
+        .and_then(|resources| {
+            resources.iter().find(|resource| {
+                resource.get("protocol").and_then(Value::as_str) == Some(protocol)
+                    && resource.get("display_name").and_then(Value::as_str) == Some(display_name)
+            })
+        })
+        .and_then(|resource| resource.get("resource_id").and_then(Value::as_str))
+    {
+        return Ok(existing.to_owned());
+    }
+    let created = request(
+        coordinator,
+        reqwest::Method::POST,
+        "/v1/data-resources",
+        Some(json!({
+            "protocol": protocol,
+            "display_name": display_name,
+            "document": document,
+        })),
+    )?;
+    created
+        .get("resource_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .context("the Coordinator returned no resource_id")
+}
+
+/// Ensure one Resource exists for `protocol`/`display_name` and return its id.
+pub(crate) fn ensure_resource(
+    coordinator: &CoordinatorArgs,
+    protocol: &str,
+    display_name: &str,
+) -> Result<String> {
+    let listed = request(
+        coordinator,
+        reqwest::Method::GET,
+        "/v1/data-resources",
+        None,
+    )?;
+    if let Some(id) = listed
+        .get("resources")
+        .and_then(Value::as_array)
+        .and_then(|resources| {
+            resources.iter().find(|resource| {
+                resource.get("protocol").and_then(Value::as_str) == Some(protocol)
+                    && resource.get("display_name").and_then(Value::as_str) == Some(display_name)
+            })
+        })
+        .and_then(|resource| resource.get("resource_id").and_then(Value::as_str))
+    {
+        return Ok(id.to_owned());
+    }
+    let created = request(
+        coordinator,
+        reqwest::Method::POST,
+        "/v1/data-resources",
+        Some(json!({
+            "protocol": protocol,
+            "display_name": display_name,
+            "document": {},
+        })),
+    )?;
+    created
+        .get("resource_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .context("the Coordinator returned no resource_id")
+}
+
+/// Ensure an instance-scoped binding exists for one Port, reusing an equal one.
+pub(crate) fn ensure_binding(
+    coordinator: &CoordinatorArgs,
+    instance_id: &str,
+    resource_id: &str,
+    port: &str,
+    protocol: &str,
+    access: &str,
+    operations: &[String],
+) -> Result<()> {
+    let listed = request(coordinator, reqwest::Method::GET, "/v1/bindings", None)?;
+    let exists = listed
+        .get("bindings")
+        .and_then(Value::as_array)
+        .is_some_and(|bindings| {
+            bindings.iter().any(|binding| {
+                binding.get("instance_id").and_then(Value::as_str) == Some(instance_id)
+                    && binding.get("port_name").and_then(Value::as_str) == Some(port)
+                    && binding.get("protocol").and_then(Value::as_str) == Some(protocol)
+            })
+        });
+    if exists {
+        return Ok(());
+    }
+    request(
+        coordinator,
+        reqwest::Method::POST,
+        &format!("/v1/data-resources/{resource_id}/bindings"),
+        Some(json!({
+            "port": port,
+            "protocol": protocol,
+            "access": access,
+            "operations": operations,
+            "instance_id": instance_id,
+        })),
+    )?;
+    Ok(())
+}
+
+fn protocol_register_all(
+    coordinator: &CoordinatorArgs,
+    file: &Path,
+    protocol: &str,
+    publisher: &str,
+) -> Result<()> {
+    let planned = plan_operations(file, protocol)?;
+    let existing = request(
+        coordinator,
+        reqwest::Method::GET,
+        &format!("/v1/protocols/{protocol}/operations"),
+        None,
+    )?;
+    let mut known = existing
+        .get("operations")
+        .and_then(Value::as_array)
+        .map(|operations| {
+            operations
+                .iter()
+                .filter_map(|operation| {
+                    Some((
+                        operation.get("operation")?.as_str()?.to_owned(),
+                        operation.get("implementation_digest")?.as_str()?.to_owned(),
+                    ))
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let mut results = Vec::with_capacity(planned.len());
+    for operation in planned {
+        let source = std::fs::read_to_string(&operation.module).with_context(|| {
+            format!(
+                "operation `{}` module {} is not readable",
+                operation.id,
+                operation.module.display()
+            )
+        })?;
+        let digest = format!("sha256:{:x}", Sha256::digest(source.as_bytes()));
+        if let Some(known_digest) = known.get(&operation.id) {
+            if *known_digest != digest {
+                bail!(
+                    "operation `{}` is registered with a different implementation; bump its version instead of rewriting it",
+                    operation.id
+                );
+            }
+            results.push(json!({"operation": operation.id, "action": "unchanged"}));
+            continue;
+        }
+        let body = json!({
+            "operation": operation.id,
+            "semantics": operation.semantics,
+            "access": operation.access,
+            "module_source": source,
+            "module_export": operation.export,
+            "publisher": publisher,
+        });
+        request(
+            coordinator,
+            reqwest::Method::POST,
+            &format!("/v1/protocols/{protocol}/operations"),
+            Some(body),
+        )
+        .with_context(|| format!("failed to register operation `{}`", operation.id))?;
+        known.insert(operation.id.clone(), digest);
+        results.push(json!({"operation": operation.id, "action": "registered"}));
+    }
+    if coordinator.json {
+        return print_json(&json!({"protocol": protocol, "operations": results}));
+    }
+    let registered = results
+        .iter()
+        .filter(|result| result["action"] == "registered")
+        .count();
+    let unchanged = results.len() - registered;
+    println!(
+        "{}: {registered} registered, {unchanged} unchanged ({} operations)",
+        protocol,
+        results.len()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{plan_operations, protocol_registration_body};
+    use std::path::Path;
+
+    fn operations_file(directory: &Path, text: &str) -> std::path::PathBuf {
+        let path = directory.join("ato.operations.yaml");
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    const VALID: &str = r#"schema: ato.operations/v2
+operations:
+  - id: todo_list_due_dates
+    semantics: observation
+    execution:
+      kind: state_transform
+      use: ato.javascript@1
+      module: ./src/operations/todo.js
+      export: listDueDates
+    state:
+      kind: data_port
+      port: tasks
+      protocol: todo.board@1
+      access: read
+  - id: todo_create
+    semantics: evolution
+    execution:
+      kind: state_transform
+      use: ato.javascript@1
+      module: ./src/operations/todo.js
+      export: createTodo
+    state:
+      kind: data_port
+      port: tasks
+      protocol: todo.board@1
+      access: read_write
+"#;
+
+    #[test]
+    fn an_operations_v2_file_plans_one_registration_per_operation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = operations_file(directory.path(), VALID);
+        let planned = plan_operations(&path, "todo.board@1").unwrap();
+        assert_eq!(planned.len(), 2);
+        assert_eq!(planned[0].id, "todo_list_due_dates");
+        assert_eq!(planned[0].access, "read");
+        assert_eq!(planned[0].export, "listDueDates");
+        assert_eq!(
+            planned[0].module,
+            directory.path().join("./src/operations/todo.js")
+        );
+        assert_eq!(planned[1].semantics, "evolution");
+    }
+
+    #[test]
+    fn declarations_that_cannot_be_registered_faithfully_are_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let v1 = VALID.replace("ato.operations/v2", "ato.operations/v1");
+        assert!(
+            plan_operations(&operations_file(directory.path(), &v1), "todo.board@1")
+                .unwrap_err()
+                .to_string()
+                .contains("ato.operations/v2")
+        );
+        let mismatch = VALID.replace("protocol: todo.board@1", "protocol: other.board@1");
+        assert!(
+            plan_operations(
+                &operations_file(directory.path(), &mismatch),
+                "todo.board@1"
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("declares protocol")
+        );
+        let duplicate = VALID.replace("id: todo_create", "id: todo_list_due_dates");
+        assert!(
+            plan_operations(
+                &operations_file(directory.path(), &duplicate),
+                "todo.board@1"
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("more than once")
+        );
+        let no_module = VALID.replace("      module: ./src/operations/todo.js\n", "");
+        assert!(
+            plan_operations(
+                &operations_file(directory.path(), &no_module),
+                "todo.board@1"
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("execution.module")
+        );
+    }
+
+    #[test]
+    fn a_module_operation_sends_source_and_export_without_a_digest() {
+        let body = protocol_registration_body(
+            "todo_list_due_dates",
+            "observation",
+            "read",
+            None,
+            Some("export function listDueDates() {}"),
+            Some("listDueDates"),
+            "todo",
+        )
+        .unwrap();
+        assert_eq!(body["module_export"], "listDueDates");
+        assert!(
+            body["module_source"]
+                .as_str()
+                .unwrap()
+                .contains("listDueDates")
+        );
+        assert!(body.get("implementation_digest").is_none());
+    }
+
+    #[test]
+    fn a_digest_operation_still_works_without_a_module() {
+        let body = protocol_registration_body(
+            "todo_list",
+            "observation",
+            "read",
+            Some("sha256:abc"),
+            None,
+            None,
+            "todo",
+        )
+        .unwrap();
+        assert_eq!(body["implementation_digest"], "sha256:abc");
+        assert!(body.get("module_source").is_none());
+    }
+
+    #[test]
+    fn incomplete_or_oversized_module_registrations_are_refused() {
+        let no_implementation =
+            protocol_registration_body("op", "observation", "read", None, None, None, "publisher");
+        assert!(
+            no_implementation
+                .unwrap_err()
+                .to_string()
+                .contains("implementation-digest")
+        );
+        let only_module = protocol_registration_body(
+            "op",
+            "observation",
+            "read",
+            None,
+            Some("x"),
+            None,
+            "publisher",
+        );
+        assert!(only_module.unwrap_err().to_string().contains("together"));
+        let empty_export = protocol_registration_body(
+            "op",
+            "observation",
+            "read",
+            None,
+            Some("x"),
+            Some(""),
+            "publisher",
+        );
+        assert!(empty_export.unwrap_err().to_string().contains("non-empty"));
+        let oversized = "x".repeat(2 * 1024 * 1024 + 1);
+        let too_large = protocol_registration_body(
+            "op",
+            "observation",
+            "read",
+            None,
+            Some(&oversized),
+            Some("run"),
+            "publisher",
+        );
+        assert!(too_large.unwrap_err().to_string().contains("2 MiB"));
+    }
 }

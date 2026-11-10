@@ -51,6 +51,11 @@ enum Command {
         /// bridge.
         #[arg(long)]
         apps_dir: Option<PathBuf>,
+        /// Serve an additional app under `/apps/<prefix>`, sharing this
+        /// Coordinator's Resources. Repeatable:
+        /// `<prefix>=<dir>@<instance>[:<port>]`.
+        #[arg(long = "workspace-app", value_name = "PREFIX=DIR@INSTANCE[:PORT]")]
+        workspace_apps: Vec<String>,
         /// The app instance the bridge answers for.
         #[arg(long)]
         app_instance: Option<String>,
@@ -264,6 +269,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             addr,
             token,
             apps_dir,
+            workspace_apps,
             app_instance,
             app_port,
             allow_plaintext_bind,
@@ -271,28 +277,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
-            runtime.block_on(serve(
+            runtime.block_on(serve(ServeOptions {
                 db,
                 addr,
                 token,
                 apps_dir,
+                workspace_apps,
                 app_instance,
                 app_port,
                 allow_plaintext_bind,
-            ))
+            }))
         }
     }
 }
 
-async fn serve(
+struct ServeOptions {
     db: PathBuf,
     addr: String,
     token: String,
     apps_dir: Option<PathBuf>,
+    workspace_apps: Vec<String>,
     app_instance: Option<String>,
     app_port: String,
     allow_plaintext_bind: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+}
+
+async fn serve(options: ServeOptions) -> Result<(), Box<dyn std::error::Error>> {
+    let ServeOptions {
+        db,
+        addr,
+        token,
+        apps_dir,
+        workspace_apps,
+        app_instance,
+        app_port,
+        allow_plaintext_bind,
+    } = options;
     let socket: std::net::SocketAddr = addr
         .parse()
         .map_err(|_| format!("invalid --addr {addr} (expected IP:port)"))?;
@@ -305,6 +325,32 @@ async fn serve(
     }
     let coordinator = Coordinator::open(&db)?;
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    let mut workspace = Vec::new();
+    for entry in &workspace_apps {
+        let (prefix, rest) = entry.split_once('=').ok_or_else(|| {
+            format!("invalid --workspace-app `{entry}`; expected <prefix>=<dir>@<instance>[:port]")
+        })?;
+        let (dir, instance) = rest.split_once('@').ok_or_else(|| {
+            format!("invalid --workspace-app `{entry}`; expected <prefix>=<dir>@<instance>[:port]")
+        })?;
+        let (instance, port) = match instance.split_once(':') {
+            Some((instance, port)) => (instance, port.to_owned()),
+            None => (instance, app_port.clone()),
+        };
+        if prefix.is_empty() || instance.is_empty() {
+            return Err(
+                format!("invalid --workspace-app `{entry}`: empty prefix or instance").into(),
+            );
+        }
+        workspace.push(ato_coordinator::http::WorkspaceApp {
+            prefix: prefix.to_owned(),
+            app: ato_coordinator::http::AppsConfig {
+                dir: PathBuf::from(dir),
+                instance_id: instance.to_owned(),
+                port,
+            },
+        });
+    }
     let state = Arc::new(ApiState {
         coordinator: Mutex::new(coordinator),
         token,
@@ -314,6 +360,7 @@ async fn serve(
             instance_id: app_instance.unwrap_or_default(),
             port: app_port,
         }),
+        workspace,
     });
     let listener = TcpListener::bind(&addr).await?;
     println!("listening on http://{}", listener.local_addr()?);
