@@ -461,6 +461,8 @@ fn saved_state_export_and_import_round_trip() {
             "export-set",
             "--out",
             out.to_str().unwrap(),
+            "--format",
+            "json",
             "--coordinator",
             &format!("http://127.0.0.1:{port}"),
             "--token",
@@ -571,6 +573,8 @@ fn resource_export_can_write_canonical_bytes_for_a_snapshot() {
             "--out",
             out.to_str().unwrap(),
             "--canonical",
+            "--format",
+            "json",
             "--coordinator",
             &format!("http://127.0.0.1:{port}"),
             "--token",
@@ -599,6 +603,8 @@ fn resource_export_writes_the_document_with_its_digest() {
             "dres_1",
             "--out",
             out.to_str().unwrap(),
+            "--format",
+            "json",
             "--coordinator",
             &format!("http://127.0.0.1:{port}"),
             "--token",
@@ -743,4 +749,124 @@ fn gc_prints_the_deleted_result_count() {
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("deleted_results: 2"), "{stdout}");
+}
+
+#[test]
+fn resource_export_writes_a_hosted_compatible_archive() {
+    let envelope = r#"{"schema":"ato.data.export/v1","resource_id":"dres_1","protocol":"todo.board@1","revision":2,"generation":0,"content_digest":"sha256:7bc5dfb0f7c8e326912b6c10a55446463d90d87b80719f7ebe74c194e1387c0c","byte_size":17,"document":{"tasks":{"t1":{"id":"t1"}}}}"#;
+    let (port, handle) = stub(vec![(200, envelope)]);
+    let directory = tempfile::tempdir().unwrap();
+    let out = directory.path().join("saved-state.zip");
+    let output = ato()
+        .args([
+            "data",
+            "resource",
+            "export",
+            "dres_1",
+            "--out",
+            out.to_str().unwrap(),
+            "--coordinator",
+            &format!("http://127.0.0.1:{port}"),
+            "--token",
+            "test-token",
+        ])
+        .output()
+        .expect("run ato data resource export");
+    handle.join().expect("stub");
+    assert!(output.status.success(), "{output:?}");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"PK\x03\x04"), "not a zip");
+    let entries = ato_cli::zip_store::read_zip(&bytes).unwrap();
+    let metadata: serde_json::Value = serde_json::from_slice(&entries["metadata.json"]).unwrap();
+    assert_eq!(metadata["protocol"], "todo.board@1");
+    assert_eq!(
+        metadata["content_digest"],
+        ato_cli::zip_store::sha256_hex(&entries["data.json"])
+    );
+}
+
+#[test]
+fn resource_import_creates_a_new_resource_from_an_archive() {
+    let document = br#"{"tasks":{"t1":{"id":"t1"}}}"#;
+    let digest = ato_cli::zip_store::sha256_hex(document);
+    let metadata = serde_jcs::to_vec(&serde_json::json!({
+        "resource_id": "dres_1",
+        "display_name": null,
+        "protocol": "todo.board@1",
+        "revision": 1,
+        "generation": 0,
+        "content_digest": digest,
+        "schema_description_version": 0
+    }))
+    .unwrap();
+    let archive = ato_cli::zip_store::write_zip(&[
+        ("metadata.json", metadata.as_slice()),
+        ("data.json", document.as_slice()),
+    ]);
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("saved-state.zip");
+    std::fs::write(&file, archive).unwrap();
+    let (port, requests, handle) = capturing_stub(vec![(
+        201,
+        r#"{"resource_id":"dres_2","revision":1,"content_digest":"sha256:def"}"#,
+    )]);
+    let output = ato()
+        .args([
+            "data",
+            "resource",
+            "import",
+            "--file",
+            file.to_str().unwrap(),
+            "--coordinator",
+            &format!("http://127.0.0.1:{port}"),
+            "--token",
+            "test-token",
+        ])
+        .output()
+        .expect("run ato data resource import");
+    handle.join().expect("stub");
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("dres_2"), "{stdout}");
+    let request = requests.lock().unwrap()[0].clone();
+    assert!(request.contains("todo.board@1"), "{request}");
+}
+
+#[test]
+fn resource_import_refuses_a_tampered_archive_before_contacting_the_authority() {
+    let document = br#"{"tasks":{}}"#;
+    let metadata = serde_jcs::to_vec(&serde_json::json!({
+        "resource_id": "dres_1",
+        "display_name": null,
+        "protocol": "todo.board@1",
+        "revision": 1,
+        "generation": 0,
+        "content_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "schema_description_version": 0
+    }))
+    .unwrap();
+    let archive = ato_cli::zip_store::write_zip(&[
+        ("metadata.json", metadata.as_slice()),
+        ("data.json", document.as_slice()),
+    ]);
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("tampered.zip");
+    std::fs::write(&file, archive).unwrap();
+    let output = ato()
+        .args([
+            "data",
+            "resource",
+            "import",
+            "--file",
+            file.to_str().unwrap(),
+            "--coordinator",
+            "http://127.0.0.1:1",
+            "--token",
+            "test-token",
+        ])
+        .output()
+        .expect("run ato data resource import");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("export_digest_mismatch"), "{stderr}");
 }
