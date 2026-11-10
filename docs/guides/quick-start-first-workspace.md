@@ -27,8 +27,10 @@ cd ato-oss-quick-start-<version>
 ```
 
 The bundle is built by `.github/workflows/quickstart-bundle.yml` in
-`ato-run/ato-samples`; until that release is published, use the capsules from a
-local build of the sample sources.
+`ato-run/ato-samples`; it contains `bundle.json` (schema, version, capsule
+names) and is only published after that workflow opened it with the matching
+`ato` release. Until a release exists, use the capsules from a local build of
+the sample sources.
 
 ## 3. Open it
 
