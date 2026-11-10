@@ -149,3 +149,22 @@ failures that must stay explicit:
    `port <n> is already in use; pass --local-data-port <port>`.
 
 Both pass on macOS arm64.
+
+## Linux x86_64: median timing and negative paths (2026-11-10, later run)
+
+Repeated on `ubuntu-sugamo` with the current branch binary:
+
+```text
+acceptance-median --runs 3:
+run 3: open 4125ms resume 4138ms
+PASS
+  open median:   4125ms (4124 4181 4125)
+  resume median: 4138ms (4132 4215 4138)
+```
+
+`failure-paths.sh` also passes there:
+
+- an unwritable checkpoint keeps the workspace running and reports
+  `error: failed to create the checkpoint state directory …`;
+- a busy local-data port fails with
+  `error: port 18910 is already in use; pass --local-data-port <port>`.
