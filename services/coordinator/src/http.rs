@@ -31,6 +31,9 @@ use crate::{CommitInput, Coordinator, CoordinatorError};
 
 pub type Body = Full<Bytes>;
 
+/// Envelope served by GET /v1/data-resources/{id}/export.
+const EXPORT_SCHEMA: &str = "ato.data.export/v1";
+
 /// When set, the Coordinator serves a static app and its Data Ports bridge.
 #[derive(Debug, Clone)]
 pub struct AppsConfig {
@@ -357,6 +360,33 @@ pub async fn handle_request(
             };
             match coordinator.read_resource("local", id) {
                 Ok(snapshot) => json_response(StatusCode::OK, json!(snapshot)),
+                Err(error) => error_response(error),
+            }
+        }
+        (&Method::GET, ["v1", "data-resources", id, "export"]) => {
+            let coordinator = match state.coordinator.lock() {
+                Ok(coordinator) => coordinator,
+                Err(_) => {
+                    return json_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({ "error": "storage_error" }),
+                    );
+                }
+            };
+            match coordinator.read_resource("local", id) {
+                Ok(snapshot) => json_response(
+                    StatusCode::OK,
+                    json!({
+                        "schema": EXPORT_SCHEMA,
+                        "resource_id": snapshot.resource_id,
+                        "protocol": snapshot.protocol,
+                        "revision": snapshot.revision,
+                        "generation": snapshot.generation,
+                        "content_digest": snapshot.content_digest,
+                        "byte_size": snapshot.byte_size,
+                        "document": snapshot.document,
+                    }),
+                ),
                 Err(error) => error_response(error),
             }
         }
@@ -1721,5 +1751,33 @@ export function createTask({ arguments: args, state }) {
         assert_eq!(exported["revision"], 1);
         assert_eq!(exported["document"]["tasks"]["t1"]["id"], "t1");
         assert_eq!(exported["content_digest"], created["content_digest"]);
+    }
+
+    #[tokio::test]
+    async fn exports_the_cream_envelope() {
+        let state = state();
+        let (_, created) = call(
+            &state,
+            Method::POST,
+            "/v1/data-resources",
+            Some("Bearer test-token"),
+            json!({"protocol": "todo.board@1", "document": {"tasks": {"t1": {"id": "t1"}}}}),
+        )
+        .await;
+        let resource_id = created["resource_id"].as_str().unwrap().to_owned();
+        let (status, export) = call(
+            &state,
+            Method::GET,
+            &format!("/v1/data-resources/{resource_id}/export"),
+            Some("Bearer test-token"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(export["schema"], "ato.data.export/v1");
+        assert_eq!(export["resource_id"], resource_id);
+        assert_eq!(export["protocol"], "todo.board@1");
+        assert_eq!(export["content_digest"], created["content_digest"]);
+        assert_eq!(export["document"]["tasks"]["t1"]["id"], "t1");
     }
 }
