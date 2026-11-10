@@ -75,10 +75,11 @@ pub struct OpenArgs {
     /// the sample apps can reach the Data Ports bridge.
     #[arg(long)]
     pub local_data: bool,
-    /// Loopback port for `--local-data` (must match the pane URLs the shell
-    /// embeds, so it is fixed rather than ephemeral).
-    #[arg(long, default_value_t = 18788)]
-    pub local_data_port: u16,
+    /// Loopback port for `--local-data`. When omitted, the first free port at
+    /// or after 18788 is chosen (the port must be known before the shell URLs
+    /// are generated, so it cannot be ephemeral).
+    #[arg(long)]
+    pub local_data_port: Option<u16>,
 }
 
 #[derive(Debug, Args)]
@@ -712,6 +713,24 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
+/// Reserve a free loopback port for the in-process Coordinator.
+///
+/// The shell embeds the pane URLs, so the port must be chosen before the
+/// Coordinator starts. Binding and immediately releasing it is a best-effort
+/// probe; the Coordinator keeps the same error path if the port is taken in the
+/// race.
+fn free_local_data_port() -> Result<u16> {
+    for candidate in 18788..=18808 {
+        if std::net::TcpListener::bind(("127.0.0.1", candidate)).is_ok() {
+            return Ok(candidate);
+        }
+    }
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .context("no loopback port is available for the local Coordinator")?;
+    let port = listener.local_addr()?.port();
+    Ok(port)
+}
+
 fn install_signal_flag() -> Result<std::sync::Arc<std::sync::atomic::AtomicBool>> {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
@@ -950,9 +969,14 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
                     origin: None,
                     json: false,
                 });
+            let local_data_port = match args.local_data_port {
+                Some(port) => port,
+                None if args.local_data => free_local_data_port()?,
+                None => 18788,
+            };
             let pane_base = args
                 .local_data
-                .then(|| format!("http://127.0.0.1:{}", args.local_data_port));
+                .then(|| format!("http://127.0.0.1:{local_data_port}"));
             let control = crate::workspace_control::ControlHandle::start().ok();
             let running = start(
                 &args.file,
@@ -981,7 +1005,7 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
                     .collect();
                 let server = ato_coordinator::serve::spawn(ato_coordinator::serve::ServeConfig {
                     db: database.path().join("coordinator.db"),
-                    listen: format!("127.0.0.1:{}", args.local_data_port),
+                    listen: format!("127.0.0.1:{local_data_port}"),
                     token: token.clone(),
                     apps: None,
                     workspace,
@@ -989,8 +1013,8 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
                 .map_err(|error| {
                     if error.kind() == std::io::ErrorKind::AddrInUse {
                         anyhow::anyhow!(
-                            "port {} is already in use; pass --local-data-port <port>",
-                            args.local_data_port
+                            "port {local_data_port} is already in use; pass --local-data-port <port>",
+
                         )
                     } else {
                         anyhow::anyhow!("failed to start the local Coordinator: {error}")

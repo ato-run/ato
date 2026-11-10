@@ -65,8 +65,9 @@ The Coordinator owns a single-writer lease: a second live writer is refused
   the same stop action from the terminal.
 - Window/split layout and the active pane are restored; in-pane scroll or
   selection is not (it needs an app-declared state).
-- The local Coordinator uses port `18788`; if it is busy, pass
-  `--local-data-port <port>`.
+- The local Coordinator takes the first free port from `18788`; pass
+  `--local-data-port <port>` to pin one (a pinned busy port is named in the
+  error).
 - If a checkpoint cannot be written, the workspace stays open and the button
   shows **Failed**; fix the path/permissions and press it again. Nothing is
   silently discarded.
