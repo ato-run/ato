@@ -565,6 +565,55 @@ struct NativeDesktopCandidate {
     group: Option<ProcessServiceGroup>,
     endpoints: BTreeMap<String, String>,
     owned: Vec<PathBuf>,
+    /// The pids this Run started, in start order. Reported when a stop cannot
+    /// be confirmed so an operator or recovery can find them.
+    pids: Vec<(String, u32)>,
+    /// The Run area that must be kept while the stop is unconfirmed.
+    retained: PathBuf,
+    /// Set only once the group is confirmed stopped; Drop removes the Run area
+    /// only then.
+    stopped: bool,
+}
+
+/// A stop whose cessation could not be confirmed. The Run area is kept and the
+/// pids are named: deleting a directory a live process may still be writing to
+/// would destroy the only evidence of what was left.
+#[derive(Debug, thiserror::Error)]
+#[error("{code}: {detail} (pids: {pids:?}; retained: {retained:?})")]
+pub(crate) struct NativeStopUnconfirmed {
+    pub code: &'static str,
+    pub pids: Vec<(String, u32)>,
+    pub retained: PathBuf,
+    pub detail: String,
+}
+
+/// The one decision a stop makes about the Run area.
+///
+/// Factored out of the candidate so both branches are testable without an
+/// unkillable process: a confirmed stop removes the area; an unconfirmed one
+/// keeps it and reports the pids and the retained path.
+fn apply_stop_outcome(
+    stop: Result<(), String>,
+    owned: &[PathBuf],
+    pids: &[(String, u32)],
+    retained: &Path,
+) -> Result<(), NativeStopUnconfirmed> {
+    match stop {
+        Ok(()) => remove_owned(owned).map_err(|error| NativeStopUnconfirmed {
+            code: "native_process_stop_unconfirmed",
+            pids: pids.to_vec(),
+            retained: retained.to_path_buf(),
+            detail: format!(
+                "the process group stopped, but the Run area was not removed: {error:#}"
+            ),
+        }),
+        Err(detail) => Err(NativeStopUnconfirmed {
+            code: "native_process_stop_unconfirmed",
+            pids: pids.to_vec(),
+            retained: retained.to_path_buf(),
+            detail: format!("the process group could not be confirmed stopped: {detail}"),
+        }),
+    }
 }
 
 impl RunningCandidate for NativeDesktopCandidate {
@@ -582,10 +631,13 @@ impl RunningCandidate for NativeDesktopCandidate {
     fn stop(mut self: Box<Self>) -> Result<()> {
         // Stop the whole group, not the leader: a native app that forked a
         // helper is still running when only its main process exits.
-        if let Some(group) = self.group.take() {
-            group.stop()?;
-        }
-        remove_owned(&self.owned)
+        let outcome = match self.group.take() {
+            Some(group) => group.stop().map_err(|error| format!("{error:#}")),
+            None => Ok(()),
+        };
+        let result = apply_stop_outcome(outcome, &self.owned, &self.pids, &self.retained);
+        self.stopped = result.is_ok();
+        result.map_err(anyhow::Error::new)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -595,9 +647,20 @@ impl RunningCandidate for NativeDesktopCandidate {
 
 impl Drop for NativeDesktopCandidate {
     fn drop(&mut self) {
+        // The handle's own Drop terminates the group as a last defence, but a
+        // termination that was never confirmed is not permission to delete the
+        // Run area.
         drop(self.group.take());
-        if let Err(error) = remove_owned(&self.owned) {
-            eprintln!("[ato run] {error:#}");
+        if self.stopped {
+            if let Err(error) = remove_owned(&self.owned) {
+                eprintln!("[ato run] {error:#}");
+            }
+        } else if !self.owned.is_empty() {
+            eprintln!(
+                "[ato run] native_process_stop_unconfirmed: retaining {} and pids {:?}",
+                self.retained.display(),
+                self.pids
+            );
         }
     }
 }
@@ -609,6 +672,37 @@ fn launch_failure(error: anyhow::Error, owned: &[PathBuf]) -> RealizeFailure {
     RealizeFailure::Launch {
         error,
         evidence: None,
+    }
+}
+
+/// Fail a start whose candidate is already running.
+///
+/// A confirmed stop removes the Run area and reports a launch failure. A stop
+/// that could not be confirmed keeps the area and its pids and reports
+/// `Abandoned`, because "nothing is running" is not something this path can
+/// claim.
+fn fail_started(
+    error: anyhow::Error,
+    group: ProcessServiceGroup,
+    owned: &[PathBuf],
+    pids: &[(String, u32)],
+    retained: &Path,
+) -> RealizeFailure {
+    let outcome = group.stop().map_err(|stop| format!("{stop:#}"));
+    match apply_stop_outcome(outcome, owned, pids, retained) {
+        Ok(()) => RealizeFailure::Launch {
+            error,
+            evidence: None,
+        },
+        Err(stop) => RealizeFailure::Abandoned {
+            error,
+            cleanup: stop.to_string(),
+            resources: pids
+                .iter()
+                .map(|(name, pid)| format!("process:{name}:{pid}"))
+                .chain(std::iter::once(format!("scratch:{}", retained.display())))
+                .collect(),
+        },
     }
 }
 
@@ -665,15 +759,15 @@ pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure
     };
     let group = ProcessServiceGroup::start(prepared.extracted.root.as_path(), vec![spec])
         .map_err(|error| launch_failure(error, &owned))?;
+    let started_pids = group.pids();
     if let Err(detail) = wait_for_ports(request.ports) {
-        let stop = group.stop();
-        let error = match stop {
-            Ok(()) => anyhow!(detail),
-            Err(stop) => {
-                anyhow!("{detail}; additionally the process group was not fully stopped: {stop:#}")
-            }
-        };
-        return Err(launch_failure(error, &owned));
+        return Err(fail_started(
+            anyhow!(detail),
+            group,
+            &owned,
+            &started_pids,
+            &native_root,
+        ));
     }
     let pids = group.pids();
     let pid = pids.first().map(|(_, pid)| *pid);
@@ -684,20 +778,16 @@ pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure
         None => 0,
     };
     if let Err(detail) = verify_port_ownership(request.ports, owned_process_group) {
-        let stop = group.stop();
-        let error = match stop {
-            Ok(()) => anyhow::Error::new(NativeRefusal {
+        return Err(fail_started(
+            anyhow::Error::new(NativeRefusal {
                 code: "native_port_owner_mismatch",
                 detail,
             }),
-            Err(stop) => anyhow::Error::new(NativeRefusal {
-                code: "native_port_owner_mismatch",
-                detail: format!(
-                    "{detail}; additionally the process group was not fully stopped: {stop:#}"
-                ),
-            }),
-        };
-        return Err(launch_failure(error, &owned));
+            group,
+            &owned,
+            &pids,
+            &native_root,
+        ));
     }
     let process_group = u32::try_from(owned_process_group).ok();
     let endpoints = request
@@ -755,6 +845,9 @@ pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure
             group: Some(group),
             endpoints,
             owned,
+            pids: pids.clone(),
+            retained: native_root.clone(),
+            stopped: false,
         }),
         evidence: Some(evidence),
         execution,
@@ -1108,6 +1201,7 @@ time.sleep(0.3)
         assert!(pid_alive(child));
         let owned = vec![workspace.path().join("owned")];
         fs::create_dir_all(&owned[0]).unwrap();
+        let pids = group.pids();
         let mut candidate = Box::new(NativeDesktopCandidate {
             group: Some(group),
             endpoints: BTreeMap::from([(
@@ -1115,6 +1209,9 @@ time.sleep(0.3)
                 format!("http://127.0.0.1:{port}"),
             )]),
             owned: owned.clone(),
+            pids,
+            retained: owned[0].clone(),
+            stopped: false,
         });
         // The leader exits on its own; the child keeps the group alive.
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -1565,5 +1662,76 @@ time.sleep(0.3)
         assert!(error.contains("no listener"), "{error}");
 
         group.stop().expect("the tiny group stops");
+    }
+
+    #[test]
+    fn a_confirmed_stop_removes_the_run_area_and_an_unconfirmed_one_keeps_it() {
+        let scratch = tempfile::tempdir().unwrap();
+        let owned = vec![scratch.path().join("area")];
+        fs::create_dir_all(&owned[0]).unwrap();
+        let pids = vec![("native".to_owned(), 4242u32)];
+
+        apply_stop_outcome(Ok(()), &owned, &pids, &owned[0])
+            .expect("a confirmed stop removes the Run area");
+        assert!(!owned[0].exists());
+
+        // Simulate a group stop that could not be confirmed.
+        fs::create_dir_all(&owned[0]).unwrap();
+        let error = apply_stop_outcome(
+            Err("SIGKILL did not empty the process group".to_owned()),
+            &owned,
+            &pids,
+            &owned[0],
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "native_process_stop_unconfirmed");
+        assert_eq!(error.pids, pids);
+        assert_eq!(error.retained, owned[0]);
+        assert!(
+            error
+                .to_string()
+                .contains("native_process_stop_unconfirmed")
+                && error.to_string().contains("4242"),
+            "{error}"
+        );
+        assert!(
+            owned[0].exists(),
+            "an unconfirmed stop must keep the Run area"
+        );
+    }
+
+    #[test]
+    fn dropping_an_unconfirmed_candidate_keeps_the_run_area() {
+        let scratch = tempfile::tempdir().unwrap();
+        let area = scratch.path().join("area");
+        fs::create_dir_all(&area).unwrap();
+        let candidate = NativeDesktopCandidate {
+            group: None,
+            endpoints: BTreeMap::new(),
+            owned: vec![area.clone()],
+            pids: vec![("native".to_owned(), 7)],
+            retained: area.clone(),
+            stopped: false,
+        };
+        drop(candidate);
+        assert!(
+            area.exists(),
+            "Drop must not delete a Run area whose stop was never confirmed"
+        );
+
+        // A confirmed candidate's Drop removes what it still owns (the stop
+        // path already removed it; Drop is idempotent).
+        let area = scratch.path().join("confirmed");
+        fs::create_dir_all(&area).unwrap();
+        let candidate = NativeDesktopCandidate {
+            group: None,
+            endpoints: BTreeMap::new(),
+            owned: vec![area.clone()],
+            pids: Vec::new(),
+            retained: area.clone(),
+            stopped: true,
+        };
+        drop(candidate);
+        assert!(!area.exists());
     }
 }
