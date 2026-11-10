@@ -1078,18 +1078,29 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
                     && control.take_checkpoint_requested()
                 {
                     if let Some(path) = args.checkpoint_out.as_deref() {
-                        let checkpoint = save_workspace_now(
+                        match save_workspace_now(
                             path,
                             &running,
                             &args.file,
                             local_credentials,
                             lease.as_ref(),
-                        )?;
-                        println!(
-                            "checkpoint: {} ({} panes)",
-                            path.display(),
-                            checkpoint.pane.len()
-                        );
+                        ) {
+                            Ok(checkpoint) => {
+                                control.record_checkpoint_result(
+                                    true,
+                                    format!("{} panes", checkpoint.pane.len()),
+                                );
+                                println!(
+                                    "checkpoint: {} ({} panes)",
+                                    path.display(),
+                                    checkpoint.pane.len()
+                                );
+                            }
+                            Err(error) => {
+                                control.record_checkpoint_result(false, error.to_string());
+                                eprintln!("checkpoint failed: {error}");
+                            }
+                        }
                     } else {
                         println!("workspace: no --checkpoint-out was given; nothing to write");
                     }
@@ -1394,9 +1405,39 @@ fn shell_html(
   var checkpoint = document.getElementById("checkpoint-button");
   if (checkpoint && {checkpoint_enabled}) {{
     checkpoint.addEventListener("click", function () {{
+      checkpoint.disabled = true;
+      checkpoint.textContent = "Saving…";
       fetch("{url}/checkpoint?token={token}", {{ method: "POST", mode: "no-cors" }}).catch(function () {{}});
-      checkpoint.textContent = "Checkpointed";
-      window.setTimeout(function () {{ checkpoint.textContent = "Checkpoint"; }}, 1500);
+      var polls = 0;
+      function refresh() {{
+        fetch("{url}/status?token={token}", {{ mode: "cors" }})
+          .then(function (response) {{ return response.text(); }})
+          .then(function (text) {{
+            if (text.indexOf("ok:") === 0) {{
+              checkpoint.textContent = "Saved";
+              window.setTimeout(function () {{
+                checkpoint.textContent = "Checkpoint";
+                checkpoint.disabled = false;
+              }}, 1500);
+            }} else if (text.indexOf("error:") === 0) {{
+              checkpoint.textContent = "Failed";
+              window.setTimeout(function () {{
+                checkpoint.textContent = "Checkpoint";
+                checkpoint.disabled = false;
+              }}, 2500);
+            }} else if (polls++ < 20) {{
+              window.setTimeout(refresh, 300);
+            }} else {{
+              checkpoint.textContent = "Checkpoint";
+              checkpoint.disabled = false;
+            }}
+          }})
+          .catch(function () {{
+            if (polls++ < 20) window.setTimeout(refresh, 300);
+            else {{ checkpoint.textContent = "Checkpoint"; checkpoint.disabled = false; }}
+          }});
+      }}
+      window.setTimeout(refresh, 200);
     }});
   }}
   var stop = document.getElementById("stop-button");

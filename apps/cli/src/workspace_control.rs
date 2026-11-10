@@ -6,8 +6,8 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -16,6 +16,7 @@ pub struct ControlHandle {
     token: String,
     stop: Arc<AtomicBool>,
     checkpoint: Arc<AtomicBool>,
+    status: Arc<Mutex<Option<(bool, String)>>>,
     shutdown: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -28,12 +29,15 @@ impl ControlHandle {
         let token = random_token()?;
         let stop = Arc::new(AtomicBool::new(false));
         let checkpoint = Arc::new(AtomicBool::new(false));
+        let status = Arc::new(Mutex::new(None));
         let shutdown = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let thread_checkpoint = Arc::clone(&checkpoint);
+        let thread_status = Arc::clone(&status);
         let thread_shutdown = Arc::clone(&shutdown);
         let stop_path = format!("/stop?token={token}");
         let checkpoint_path = format!("/checkpoint?token={token}");
+        let status_path = format!("/status?token={token}");
         let thread = thread::spawn(move || {
             while !thread_shutdown.load(Ordering::Acquire) {
                 match listener.accept() {
@@ -42,8 +46,10 @@ impl ControlHandle {
                             stream,
                             &stop_path,
                             &checkpoint_path,
+                            &status_path,
                             &thread_stop,
                             &thread_checkpoint,
+                            &thread_status,
                         );
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -58,6 +64,7 @@ impl ControlHandle {
             token,
             stop,
             checkpoint,
+            status,
             shutdown,
             thread: Some(thread),
         })
@@ -78,6 +85,13 @@ impl ControlHandle {
     /// Consume one checkpoint request, so a held page button saves once.
     pub fn take_checkpoint_requested(&self) -> bool {
         self.checkpoint.swap(false, Ordering::AcqRel)
+    }
+
+    /// Record the outcome of the last checkpoint write for the page to read.
+    pub fn record_checkpoint_result(&self, ok: bool, message: impl Into<String>) {
+        if let Ok(mut status) = self.status.lock() {
+            *status = Some((ok, message.into()));
+        }
     }
 }
 
@@ -104,15 +118,33 @@ fn answer(
     mut stream: TcpStream,
     stop_path: &str,
     checkpoint_path: &str,
+    status_path: &str,
     stop: &AtomicBool,
     checkpoint: &AtomicBool,
+    status: &Mutex<Option<(bool, String)>>,
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     let mut request = [0u8; 4096];
     let read = stream.read(&mut request)?;
     let head = String::from_utf8_lossy(&request[..read]);
     let action = head.split_whitespace().nth(1).unwrap_or_default();
-    let status = if action == stop_path {
+    if action == status_path {
+        let body = match status.lock().ok().and_then(|status| status.clone()) {
+            Some((true, message)) => format!("ok: {message}"),
+            Some((false, message)) => format!("error: {message}"),
+            None => "pending".to_owned(),
+        };
+        stream.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\naccess-control-allow-origin: *\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .as_bytes(),
+        )?;
+        return Ok(());
+    }
+    let status_line = if action == stop_path {
         stop.store(true, Ordering::Release);
         "200 OK"
     } else if action == checkpoint_path {
@@ -123,7 +155,7 @@ fn answer(
     };
     stream.write_all(
         format!(
-            "HTTP/1.1 {status}\r\ncontent-type: text/plain\r\naccess-control-allow-origin: *\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok"
+            "HTTP/1.1 {status_line}\r\ncontent-type: text/plain\r\naccess-control-allow-origin: *\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok"
         )
         .as_bytes(),
     )?;
@@ -172,6 +204,33 @@ mod tests {
         let response = post(&control, "stop");
         assert!(response.starts_with("HTTP/1.1 200"), "{response}");
         assert!(control.stop_requested());
+    }
+
+    fn get_status(control: &ControlHandle) -> String {
+        let address = control.url().trim_start_matches("http://").to_owned();
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .write_all(
+                format!(
+                    "GET /status?token={} HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n",
+                    control.token()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    }
+
+    #[test]
+    fn the_checkpoint_outcome_is_readable_from_the_page() {
+        let control = ControlHandle::start().unwrap();
+        assert!(get_status(&control).ends_with("pending"));
+        control.record_checkpoint_result(true, "3 panes");
+        assert!(get_status(&control).ends_with("ok: 3 panes"));
+        control.record_checkpoint_result(false, "disk full");
+        assert!(get_status(&control).ends_with("error: disk full"));
     }
 
     #[test]
