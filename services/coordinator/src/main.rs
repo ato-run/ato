@@ -277,7 +277,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
-            runtime.block_on(serve(
+            runtime.block_on(serve(ServeOptions {
                 db,
                 addr,
                 token,
@@ -286,12 +286,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 app_instance,
                 app_port,
                 allow_plaintext_bind,
-            ))
+            }))
         }
     }
 }
 
-async fn serve(
+struct ServeOptions {
     db: PathBuf,
     addr: String,
     token: String,
@@ -300,7 +300,19 @@ async fn serve(
     app_instance: Option<String>,
     app_port: String,
     allow_plaintext_bind: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+}
+
+async fn serve(options: ServeOptions) -> Result<(), Box<dyn std::error::Error>> {
+    let ServeOptions {
+        db,
+        addr,
+        token,
+        apps_dir,
+        workspace_apps,
+        app_instance,
+        app_port,
+        allow_plaintext_bind,
+    } = options;
     let socket: std::net::SocketAddr = addr
         .parse()
         .map_err(|_| format!("invalid --addr {addr} (expected IP:port)"))?;
