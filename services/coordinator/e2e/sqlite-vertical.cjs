@@ -14,7 +14,7 @@ const { spawn, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-const WORK = process.env.ATO_VERTICAL_WORK || '/tmp/ato-sqlite-vertical';
+const WORK = process.env.ATO_VERTICAL_WORK || path.join(process.cwd(), '.tmp/sqlite-vertical');
 const COORD = process.env.ATO_COORDINATOR_BIN || 'target/debug/ato-coordinator';
 const DB = path.join(WORK, 'coordinator.sqlite');
 const TODO_BASE = 'http://127.0.0.1:8790';
@@ -25,8 +25,8 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   fs.rmSync(WORK, { recursive: true, force: true });
   fs.mkdirSync(path.join(WORK, 'app'), { recursive: true });
   fs.mkdirSync(path.join(WORK, 'calendar'), { recursive: true });
-  fs.cpSync(process.env.ATO_SAMPLES_TODO || '/tmp/ato-samples/shared-json-todo', path.join(WORK, 'app'), { recursive: true });
-  fs.cpSync(process.env.ATO_CALENDAR_APP || '/tmp/ato-samples/shared-json-calendar', path.join(WORK, 'calendar'), { recursive: true });
+  fs.cpSync(process.env.ATO_SAMPLES_TODO || path.join(process.cwd(), '../../ato-samples/samples/shared-json-todo'), path.join(WORK, 'app'), { recursive: true });
+  fs.cpSync(process.env.ATO_CALENDAR_APP || path.join(process.cwd(), '../../ato-samples/samples/shared-json-calendar'), path.join(WORK, 'calendar'), { recursive: true });
   execFileSync(COORD, ['init', '--db', DB]);
 
   const todoServer = spawn(COORD, ['serve', '--db', DB, '--addr', '127.0.0.1:8790', '--token', 'smoke', '--apps-dir', path.join(WORK, 'app'), '--app-instance', 'todo-ui', '--app-port', 'tasks'], { stdio: 'ignore' });
