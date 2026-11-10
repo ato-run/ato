@@ -435,6 +435,17 @@ pub fn execution_status(
                     host.os, host.arch
                 ),
             ));
+        } else if os == "windows" {
+            // Windows native routes are fail-closed: the AppContainer profile
+            // that would enforce the mandatory filesystem/state/egress and
+            // lifecycle policy is not implemented, so no Windows native Run is
+            // admitted. Naming this separately from "sandbox unavailable" keeps
+            // the missing implementation visible.
+            state = CapabilityState::Unavailable;
+            reasons.push(Reason::new(
+                ReasonCode::NativeWindowsContainmentUnavailable,
+                "Windows native admission is fail-closed until an AppContainer policy can enforce                  the mandatory filesystem, state, egress and lifecycle set",
+            ));
         } else {
             if !host.native.sandbox_tool {
                 state = CapabilityState::Unavailable;

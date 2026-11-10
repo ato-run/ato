@@ -29,6 +29,8 @@ pub(crate) mod artifact;
 
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
+#[cfg(target_os = "windows")]
+pub(crate) mod windows;
 
 /// A named native-adapter refusal. The code is stable and user-facing; the
 /// detail names what could not be enforced.
@@ -77,7 +79,12 @@ pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure
     macos::start(request)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure> {
+    windows::start(request)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub(crate) fn start(_request: NativeStart<'_>) -> Result<Realized, RealizeFailure> {
     Err(refusal(
         "native_adapter_unavailable",
