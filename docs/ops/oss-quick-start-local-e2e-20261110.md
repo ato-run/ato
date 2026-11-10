@@ -135,3 +135,17 @@ PASS
 So the workspace lifecycle costs about **4 seconds** per phase on macOS arm64
 (debug binary, prebuilt capsules); the earlier 13 s observation was one loaded
 run, not a regression.
+
+## Negative paths
+
+`scripts/oss-quick-start/failure-paths.sh --ato … --capsules …` checks two
+failures that must stay explicit:
+
+1. **A checkpoint that cannot be written** (regular file where the checkpoint
+   directory would be): after pressing Stop the workspace **keeps running**, and
+   `/status` reports `error: …` so the page can offer a retry instead of
+   pretending success.
+2. **A busy local-data port**: the second `ato workspace open` fails with
+   `port <n> is already in use; pass --local-data-port <port>`.
+
+Both pass on macOS arm64.
