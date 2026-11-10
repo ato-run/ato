@@ -7,8 +7,8 @@
 // Proves the export envelope travels: export-set from one authority, import-set
 // into a fresh authority, identical document digests, and a tampered file is
 // refused before it creates anything.
-import { spawn } from "node:child_process";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync, spawn } from "node:child_process";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 
@@ -83,17 +83,18 @@ try {
   assert.equal(invoked.status, 200, JSON.stringify(invoked.body));
   assert.equal(invoked.body.revision, 2);
 
-  const file = join(work, "saved-state.json");
-  const exported = await run(ato, ["data", "resource", "export-set", "--out", file, "--canonical", "--coordinator", "http://127.0.0.1:8791", "--token", token]);
+  // The canonical saved state is one hosted-compatible archive per Resource.
+  const archiveDir = join(work, "saved-state");
+  const sourceDetail = await call(8791, `/v1/data-resources/${resourceId}/document`);
+  const sourceDigest = sourceDetail.body.content_digest;
+  const exported = await run(ato, ["data", "resource", "export-set", "--out", archiveDir, "--coordinator", "http://127.0.0.1:8791", "--token", token]);
   assert.equal(exported.code, 0, exported.stderr);
-  const envelope = JSON.parse(await readFile(file, "utf8"));
-  assert.equal(envelope.schema, "ato.data.export-set/v1");
-  assert.equal(envelope.resources.length, 1);
-  const sourceDigest = envelope.resources[0].content_digest;
+  const archives = (await readdir(archiveDir)).filter((name) => name.endsWith(".zip"));
+  assert.equal(archives.length, 1, "expected one saved-state archive");
 
   const second = await serve(join(work, "two.sqlite"), 8792, token);
   try {
-    const imported = await run(ato, ["data", "resource", "import-set", "--file", file, "--coordinator", "http://127.0.0.1:8792", "--token", token]);
+    const imported = await run(ato, ["data", "resource", "import-set", "--file", archiveDir, "--coordinator", "http://127.0.0.1:8792", "--token", token]);
     assert.equal(imported.code, 0, imported.stderr);
     const listed = await call(8792, "/v1/data-resources");
     assert.equal(listed.body.resources.length, 1);
@@ -128,10 +129,17 @@ try {
     assert.match(inspected.stdout, new RegExp(`revision: ${mcpRevision}\\b`), inspected.stdout);
     console.log("PASS: imported state is live for CLI and MCP on the same revision", mcpRevision);
 
-    const taskId = Object.keys(envelope.resources[0].document.tasks)[0];
-    envelope.resources[0].document.tasks[taskId].title = "Tampered";
-    await writeFile(file, JSON.stringify(envelope, null, 2));
-    const tampered = await run(ato, ["data", "resource", "import-set", "--file", file, "--coordinator", "http://127.0.0.1:8792", "--token", token]);
+    const archivePath = join(archiveDir, archives[0]);
+    const tamperDir = join(work, "tamper");
+    execFileSync("unzip", ["-o", "-q", archivePath, "-d", tamperDir]);
+    const dataPath = join(tamperDir, "data.json");
+    const tamperedDocument = JSON.parse(await readFile(dataPath, "utf8"));
+    const taskId = Object.keys(tamperedDocument.tasks)[0];
+    tamperedDocument.tasks[taskId].title = "Tampered";
+    await writeFile(dataPath, JSON.stringify(tamperedDocument));
+    await rm(archivePath);
+    execFileSync("zip", ["-0", "-q", "-j", archivePath, join(tamperDir, "metadata.json"), dataPath]);
+    const tampered = await run(ato, ["data", "resource", "import-set", "--file", archiveDir, "--coordinator", "http://127.0.0.1:8792", "--token", token]);
     assert.notEqual(tampered.code, 0, "tampered import must fail");
     assert.match(tampered.stderr, /export_digest_mismatch/);
     const afterTamper = await call(8792, "/v1/data-resources");

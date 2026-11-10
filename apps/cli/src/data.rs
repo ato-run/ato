@@ -87,13 +87,19 @@ pub enum ResourceCommand {
         /// resource carries unchanged.
         #[arg(long)]
         canonical: bool,
+        /// "zip" (hosted-compatible archive, default) or "json".
+        #[arg(long, default_value = "zip")]
+        format: String,
         #[command(flatten)]
         coordinator: CoordinatorArgs,
     },
-    /// Export every Resource as one saved-state file.
+    /// Export every Resource as one saved-state archive per Resource.
     ExportSet {
         #[arg(long)]
         out: PathBuf,
+        /// "zip" (hosted-compatible archives, default) or "json".
+        #[arg(long, default_value = "zip")]
+        format: String,
         /// Write canonical (JCS) bytes, the form a v4 instance snapshot
         /// resource carries unchanged.
         #[arg(long)]
@@ -249,14 +255,16 @@ pub fn run(args: DataArgs) -> Result<()> {
                 resource_id,
                 out,
                 canonical,
+                format,
                 coordinator,
-            } => resource_export(&coordinator, &resource_id, &out, canonical),
+            } => resource_export(&coordinator, &resource_id, &out, canonical, &format),
             ResourceCommand::Import { file, coordinator } => resource_import(&coordinator, &file),
             ResourceCommand::ExportSet {
                 out,
+                format,
                 canonical,
                 coordinator,
-            } => resource_export_set(&coordinator, &out, canonical),
+            } => resource_export_set(&coordinator, &out, canonical, &format),
             ResourceCommand::ImportSet { file, coordinator } => {
                 resource_import_set(&coordinator, &file)
             }
@@ -525,9 +533,88 @@ fn inspect(coordinator: &CoordinatorArgs, resource_id: &str) -> Result<()> {
 
 const EXPORT_SCHEMA: &str = "ato.data.export/v1";
 const EXPORT_SET_SCHEMA: &str = "ato.data.export-set/v1";
+const SAVED_STATE_METADATA: &str = "metadata.json";
+const SAVED_STATE_DATA: &str = "data.json";
 
-/// Validate one export envelope: schema, required fields and the digest of the
-/// document it carries. Nothing is sent anywhere until this passes.
+/// The document bytes in whichever canonical form the authority's digest
+/// actually describes, so a native archive verifies cleanly on import.
+fn canonical_document_bytes(export: &Value) -> Result<Vec<u8>> {
+    let document = export.get("document").context("export has no document")?;
+    let expected = export
+        .get("content_digest")
+        .and_then(Value::as_str)
+        .context("export has no content_digest")?;
+    let candidates = [serde_jcs::to_vec(document)?, serde_json::to_vec(document)?];
+    for candidate in candidates {
+        let actual = format!("sha256:{:x}", Sha256::digest(&candidate));
+        if actual == expected {
+            return Ok(candidate);
+        }
+    }
+    bail!("export_canonical_mismatch: no canonical form matches {expected}")
+}
+
+fn export_archive(export: &Value) -> Result<Vec<u8>> {
+    let metadata = json!({
+        "resource_id": export.get("resource_id").cloned().unwrap_or(Value::Null),
+        "display_name": export.get("display_name").cloned().unwrap_or(Value::Null),
+        "protocol": export.get("protocol").cloned().context("export has no protocol")?,
+        "revision": export.get("revision").cloned().unwrap_or_else(|| json!(0)),
+        "generation": export.get("generation").cloned().unwrap_or_else(|| json!(0)),
+        "content_digest": export
+            .get("content_digest")
+            .cloned()
+            .context("export has no content_digest")?,
+        "schema_description_version": 0,
+    });
+    let metadata_bytes = serde_jcs::to_vec(&metadata)?;
+    let data_bytes = canonical_document_bytes(export)?;
+    Ok(crate::zip_store::write_zip(&[
+        (SAVED_STATE_METADATA, metadata_bytes.as_slice()),
+        (SAVED_STATE_DATA, data_bytes.as_slice()),
+    ]))
+}
+
+/// Parse a hosted-compatible archive. The digest in metadata.json must describe
+/// data.json exactly; nothing is sent to the authority before that holds.
+fn import_archive(bytes: &[u8]) -> Result<(String, Option<String>, Value)> {
+    let entries = crate::zip_store::read_zip(bytes).map_err(|code| anyhow::anyhow!(code))?;
+    let metadata_bytes = entries
+        .get(SAVED_STATE_METADATA)
+        .context("archive has no metadata.json")?;
+    let metadata: Value = serde_json::from_slice(metadata_bytes).context("parse metadata.json")?;
+    let data_bytes = entries
+        .get(SAVED_STATE_DATA)
+        .context("archive has no data.json")?;
+    let expected = metadata
+        .get("content_digest")
+        .and_then(Value::as_str)
+        .context("metadata.json has no content_digest")?;
+    let actual = format!("sha256:{:x}", Sha256::digest(data_bytes));
+    if actual != expected {
+        bail!(
+            "export_digest_mismatch: metadata.json says {expected}, data.json hashes to {actual}"
+        );
+    }
+    let protocol = metadata
+        .get("protocol")
+        .and_then(Value::as_str)
+        .context("metadata.json has no protocol")?
+        .to_owned();
+    let display_name = metadata
+        .get("display_name")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let document: Value = serde_json::from_slice(data_bytes).context("parse data.json")?;
+    Ok((protocol, display_name, document))
+}
+
+fn is_zip(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"PK\x03\x04")
+}
+
+/// Validate one legacy JSON export envelope: schema, required fields and the
+/// digest of the document it carries.
 fn verify_export(entry: &Value) -> Result<(String, Value)> {
     if entry.get("schema").and_then(Value::as_str) != Some(EXPORT_SCHEMA) {
         bail!("export schema must be {EXPORT_SCHEMA}");
@@ -560,6 +647,7 @@ fn resource_export(
     resource_id: &str,
     out: &PathBuf,
     canonical: bool,
+    format: &str,
 ) -> Result<()> {
     // The authority owns the envelope: it writes the digest next to the
     // document it hashed, so the CLI never reconstructs it from parts.
@@ -584,10 +672,16 @@ fn resource_export(
         .get("content_digest")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let bytes = if canonical {
-        serde_jcs::to_vec(&export)?
-    } else {
-        serde_json::to_vec_pretty(&export)?
+    let bytes = match format {
+        "json" => {
+            if canonical {
+                serde_jcs::to_vec(&export)?
+            } else {
+                serde_json::to_vec_pretty(&export)?
+            }
+        }
+        "zip" => export_archive(&export)?,
+        other => bail!("unknown export format {other} (expected zip or json)"),
     };
     std::fs::write(out, bytes).with_context(|| format!("write export {}", out.display()))?;
     println!(
@@ -602,6 +696,31 @@ fn resource_export(
 
 fn resource_import(coordinator: &CoordinatorArgs, file: &PathBuf) -> Result<()> {
     let bytes = std::fs::read(file).with_context(|| format!("read export {}", file.display()))?;
+    if is_zip(&bytes) {
+        let (protocol, display_name, document) = import_archive(&bytes)?;
+        let created = request(
+            coordinator,
+            reqwest::Method::POST,
+            "/v1/data-resources",
+            Some(json!({
+                "protocol": protocol,
+                "display_name": display_name,
+                "document": document,
+            })),
+        )?;
+        println!(
+            "imported as {} revision {}",
+            created
+                .get("resource_id")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+            created
+                .get("revision")
+                .and_then(Value::as_i64)
+                .unwrap_or_default()
+        );
+        return Ok(());
+    }
     let export: Value = serde_json::from_slice(&bytes)
         .with_context(|| format!("parse export {}", file.display()))?;
     let (protocol, document) = verify_export(&export)?;
@@ -632,6 +751,7 @@ fn resource_export_set(
     coordinator: &CoordinatorArgs,
     out: &PathBuf,
     canonical: bool,
+    format: &str,
 ) -> Result<()> {
     let export = request(
         coordinator,
@@ -642,22 +762,79 @@ fn resource_export_set(
     if export.get("schema").and_then(Value::as_str) != Some(EXPORT_SET_SCHEMA) {
         bail!("Coordinator returned an unexpected export-set schema");
     }
-    let count = export
+    let entries = export
         .get("resources")
         .and_then(Value::as_array)
-        .map(Vec::len)
-        .unwrap_or_default();
+        .context("export set has no resources")?;
+    if format == "zip" {
+        std::fs::create_dir_all(out)
+            .with_context(|| format!("create export directory {}", out.display()))?;
+        for entry in entries {
+            let resource_id = entry
+                .get("resource_id")
+                .and_then(Value::as_str)
+                .unwrap_or("resource");
+            let path = out.join(format!("{resource_id}.zip"));
+            std::fs::write(&path, export_archive(entry)?)
+                .with_context(|| format!("write export {}", path.display()))?;
+        }
+        println!("exported {} resources -> {}", entries.len(), out.display());
+        return Ok(());
+    }
     let bytes = if canonical {
         serde_jcs::to_vec(&export)?
     } else {
         serde_json::to_vec_pretty(&export)?
     };
     std::fs::write(out, bytes).with_context(|| format!("write export set {}", out.display()))?;
-    println!("exported {} resources -> {}", count, out.display());
+    println!("exported {} resources -> {}", entries.len(), out.display());
     Ok(())
 }
 
 fn resource_import_set(coordinator: &CoordinatorArgs, file: &PathBuf) -> Result<()> {
+    if file.is_dir() {
+        let mut paths = std::fs::read_dir(file)
+            .with_context(|| format!("read export directory {}", file.display()))?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        paths.sort();
+        let mut verified = Vec::new();
+        for path in paths {
+            if path.extension().and_then(|extension| extension.to_str()) != Some("zip") {
+                continue;
+            }
+            let bytes =
+                std::fs::read(&path).with_context(|| format!("read export {}", path.display()))?;
+            verified.push(import_archive(&bytes)?);
+        }
+        if verified.is_empty() {
+            bail!("no .zip archives in {}", file.display());
+        }
+        for (protocol, display_name, document) in verified {
+            let created = request(
+                coordinator,
+                reqwest::Method::POST,
+                "/v1/data-resources",
+                Some(json!({
+                    "protocol": protocol,
+                    "display_name": display_name,
+                    "document": document,
+                })),
+            )?;
+            println!(
+                "imported as {} revision {}",
+                created
+                    .get("resource_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("-"),
+                created
+                    .get("revision")
+                    .and_then(Value::as_i64)
+                    .unwrap_or_default()
+            );
+        }
+        return Ok(());
+    }
     let bytes = std::fs::read(file).with_context(|| format!("read export {}", file.display()))?;
     let export: Value = serde_json::from_slice(&bytes)
         .with_context(|| format!("parse export {}", file.display()))?;
