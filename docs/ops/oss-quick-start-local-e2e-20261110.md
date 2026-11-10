@@ -255,3 +255,33 @@ failure-paths: PASS
 
 The latest workspace code therefore still meets the acceptance and failure-path
 behaviour on Linux x86_64.
+
+## Windows x86_64 run (yuki-laptop, 2026-11-10)
+
+Host: `yuki-laptop` (Windows 11 26200, x86_64, VS 2022 BuildTools, Rust
+1.96.0), reached over SSH. The CLI was built from the branch source
+(`cargo build -p ato-cli`, debug) after fixing one real Windows build error: the
+shutdown timer's `Duration` import was `cfg(unix)`. The prebuilt Linux/macOS
+bundle (byte-identical capsules) was used as the workspace.
+
+Acceptance under Git Bash:
+
+```text
+PASS
+  open:   16907ms
+  resume: 11994ms
+
+acceptance-median --runs 2:
+PASS
+  open median:   12398ms (12913 11883)
+  resume median: 14883ms (16756 13010)
+```
+
+So the 3-OS matrix now has a Windows column: macOS PASS, Linux PASS, Windows
+x86_64 PASS (debug build, not the MSI release).
+
+Failure path checked manually with PowerShell because the bash script's
+`kill -0` liveness check does not see native Windows processes: after pressing
+Stop with an unwritable checkpoint the process **stayed alive**, `/status`
+returned `error: failed to create the checkpoint state directory …`, and the log
+printed the retry hint — the same behaviour as macOS/Linux.
