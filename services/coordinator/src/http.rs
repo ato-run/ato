@@ -1013,31 +1013,6 @@ pub async fn handle_request(
                 Err(error) => error_response(error),
             }
         }
-        (&Method::GET, ["v1", "workspaces", workspace_id, "lease"]) => {
-            let coordinator = match state.coordinator.lock() {
-                Ok(coordinator) => coordinator,
-                Err(_) => {
-                    return json_response(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        json!({ "error": "storage_error" }),
-                    );
-                }
-            };
-            match coordinator.workspace_lease(workspace_id) {
-                Ok(Some(lease)) => json_response(
-                    StatusCode::OK,
-                    json!({
-                        "schema": "ato.workspace-lease/1",
-                        "workspace_id": lease.workspace_id,
-                        "holder": lease.holder,
-                        "epoch": lease.epoch,
-                        "expires_at": lease.expires_at,
-                    }),
-                ),
-                Ok(None) => json_response(StatusCode::NOT_FOUND, json!({ "error": "no_lease" })),
-                Err(error) => error_response(error),
-            }
-        }
         _ => json_response(StatusCode::NOT_FOUND, json!({ "error": "not_found" })),
     }
 }
