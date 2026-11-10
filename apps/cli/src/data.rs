@@ -11,6 +11,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Args)]
 pub struct DataArgs {
@@ -555,6 +556,20 @@ fn resource_import(coordinator: &CoordinatorArgs, file: &PathBuf) -> Result<()> 
         .get("document")
         .cloned()
         .context("export has no document")?;
+    // Integrity: the envelope records the digest of the document it carries.
+    // Recompute it before sending anything; a tampered or truncated export is
+    // refused instead of imported under a wrong identity.
+    let expected = export
+        .get("content_digest")
+        .and_then(Value::as_str)
+        .context("export has no content_digest")?;
+    let actual = format!(
+        "sha256:{:x}",
+        Sha256::digest(serde_json::to_string(&document)?.as_bytes())
+    );
+    if actual != expected {
+        bail!("export_digest_mismatch: envelope says {expected}, document hashes to {actual}");
+    }
     let created = request(
         coordinator,
         reqwest::Method::POST,
