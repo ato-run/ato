@@ -73,3 +73,27 @@ carry that text.
    destination-repository note.
 9. Record the destination repository and the moved tree's commit SHA in a
    `docs/ops` note, next to the archive manifest's `origin_commit`.
+
+## Archive-move dry run (no destination repo needed)
+
+The move was rehearsed locally to prove the tooling and layout:
+
+```sh
+git -C <ato> archive origin/dev docs/archive | tar -x -C /tmp/archive-repo
+python3 scripts/archive_manifest.py --repo <ato> --ref origin/dev \
+  --archive-path docs/archive --license MPL-2.0 \
+  --destination-base https://github.com/ato-run/ato-archive/tree/main/docs/archive \
+  --output /tmp/archive-repo/manifest.json
+cd /tmp/archive-repo && git init && git add -A && git commit
+```
+
+Result: **488 archive files**, manifest verifies every file (0 missing, 0
+mismatched), `entries_digest` matches the earlier inventory
+(`sha256:4c6aa607…980d5`), total 183,558,811 bytes, and a sample destination URL
+resolves to `…/tree/main/docs/archive/2026/README.md`. The tree keeps the
+`docs/archive/` prefix, so existing relative links and the manifest's
+destination URLs agree; the archive README lives at the repository root.
+
+Remaining before the real move: the owner creates the public repository (and
+states its licence), then the same commands run against it, followed by the 24
+reference updates and the desktop-shim checklist below.
