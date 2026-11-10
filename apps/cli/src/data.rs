@@ -83,6 +83,10 @@ pub enum ResourceCommand {
         resource_id: String,
         #[arg(long)]
         out: PathBuf,
+        /// Write canonical (JCS) bytes, the form a v4 instance snapshot
+        /// resource carries unchanged.
+        #[arg(long)]
+        canonical: bool,
         #[command(flatten)]
         coordinator: CoordinatorArgs,
     },
@@ -90,6 +94,10 @@ pub enum ResourceCommand {
     ExportSet {
         #[arg(long)]
         out: PathBuf,
+        /// Write canonical (JCS) bytes, the form a v4 instance snapshot
+        /// resource carries unchanged.
+        #[arg(long)]
+        canonical: bool,
         #[command(flatten)]
         coordinator: CoordinatorArgs,
     },
@@ -240,12 +248,15 @@ pub fn run(args: DataArgs) -> Result<()> {
             ResourceCommand::Export {
                 resource_id,
                 out,
+                canonical,
                 coordinator,
-            } => resource_export(&coordinator, &resource_id, &out),
+            } => resource_export(&coordinator, &resource_id, &out, canonical),
             ResourceCommand::Import { file, coordinator } => resource_import(&coordinator, &file),
-            ResourceCommand::ExportSet { out, coordinator } => {
-                resource_export_set(&coordinator, &out)
-            }
+            ResourceCommand::ExportSet {
+                out,
+                canonical,
+                coordinator,
+            } => resource_export_set(&coordinator, &out, canonical),
             ResourceCommand::ImportSet { file, coordinator } => {
                 resource_import_set(&coordinator, &file)
             }
@@ -544,7 +555,12 @@ fn verify_export(entry: &Value) -> Result<(String, Value)> {
     Ok((protocol, document))
 }
 
-fn resource_export(coordinator: &CoordinatorArgs, resource_id: &str, out: &PathBuf) -> Result<()> {
+fn resource_export(
+    coordinator: &CoordinatorArgs,
+    resource_id: &str,
+    out: &PathBuf,
+    canonical: bool,
+) -> Result<()> {
     // The authority owns the envelope: it writes the digest next to the
     // document it hashed, so the CLI never reconstructs it from parts.
     let export = request(
@@ -568,8 +584,12 @@ fn resource_export(coordinator: &CoordinatorArgs, resource_id: &str, out: &PathB
         .get("content_digest")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    std::fs::write(out, serde_json::to_vec_pretty(&export)?)
-        .with_context(|| format!("write export {}", out.display()))?;
+    let bytes = if canonical {
+        serde_jcs::to_vec(&export)?
+    } else {
+        serde_json::to_vec_pretty(&export)?
+    };
+    std::fs::write(out, bytes).with_context(|| format!("write export {}", out.display()))?;
     println!(
         "exported {} revision {} ({}) -> {}",
         resource_id,
@@ -608,7 +628,11 @@ fn resource_import(coordinator: &CoordinatorArgs, file: &PathBuf) -> Result<()> 
     );
     Ok(())
 }
-fn resource_export_set(coordinator: &CoordinatorArgs, out: &PathBuf) -> Result<()> {
+fn resource_export_set(
+    coordinator: &CoordinatorArgs,
+    out: &PathBuf,
+    canonical: bool,
+) -> Result<()> {
     let export = request(
         coordinator,
         reqwest::Method::GET,
@@ -623,8 +647,12 @@ fn resource_export_set(coordinator: &CoordinatorArgs, out: &PathBuf) -> Result<(
         .and_then(Value::as_array)
         .map(Vec::len)
         .unwrap_or_default();
-    std::fs::write(out, serde_json::to_vec_pretty(&export)?)
-        .with_context(|| format!("write export set {}", out.display()))?;
+    let bytes = if canonical {
+        serde_jcs::to_vec(&export)?
+    } else {
+        serde_json::to_vec_pretty(&export)?
+    };
+    std::fs::write(out, bytes).with_context(|| format!("write export set {}", out.display()))?;
     println!("exported {} resources -> {}", count, out.display());
     Ok(())
 }

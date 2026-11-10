@@ -557,6 +557,35 @@ fn saved_state_import_refuses_a_tampered_entry_before_creating_anything() {
 }
 
 #[test]
+fn resource_export_can_write_canonical_bytes_for_a_snapshot() {
+    let envelope = r#"{"schema":"ato.data.export/v1","resource_id":"dres_1","protocol":"todo.board@1","revision":2,"generation":0,"content_digest":"sha256:abc123","byte_size":17,"document":{"tasks":{"t1":{"id":"t1"}}}}"#;
+    let (port, handle) = stub(vec![(200, envelope)]);
+    let directory = tempfile::tempdir().unwrap();
+    let out = directory.path().join("export.jcs");
+    let output = ato()
+        .args([
+            "data",
+            "resource",
+            "export",
+            "dres_1",
+            "--out",
+            out.to_str().unwrap(),
+            "--canonical",
+            "--coordinator",
+            &format!("http://127.0.0.1:{port}"),
+            "--token",
+            "test-token",
+        ])
+        .output()
+        .expect("run ato data resource export --canonical");
+    handle.join().expect("stub");
+    assert!(output.status.success(), "{output:?}");
+    let bytes = std::fs::read(&out).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(serde_jcs::to_vec(&value).unwrap(), bytes);
+}
+
+#[test]
 fn resource_export_writes_the_document_with_its_digest() {
     let envelope = r#"{"schema":"ato.data.export/v1","resource_id":"dres_1","protocol":"todo.board@1","revision":2,"generation":0,"content_digest":"sha256:abc123","byte_size":17,"document":{"tasks":{"t1":{"id":"t1"}}}}"#;
     let (port, requests, handle) = capturing_stub(vec![(200, envelope)]);
