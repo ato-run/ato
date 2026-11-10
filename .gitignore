@@ -71,3 +71,4 @@ claudedocs/
 # Internal research artifacts
 docs/internal/research/*.csv
 .worktrees/
+__pycache__/
