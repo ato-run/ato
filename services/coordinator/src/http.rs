@@ -688,6 +688,10 @@ pub async fn handle_request(
                 }
             };
             match method {
+                // MCP clients send this notification after initialize; it is not
+                // a request and must not be answered with an error.
+                "notifications/initialized" => json_response(StatusCode::ACCEPTED, json!({})),
+                "ping" => json_response(StatusCode::OK, reply(json!({}))),
                 "initialize" => json_response(
                     StatusCode::OK,
                     reply(json!({
@@ -1650,5 +1654,31 @@ export function createTask({ arguments: args, state }) {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(all["operations"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn accepts_mcp_notifications_without_an_error() {
+        let state = state();
+        let (status, _, body) = call_raw(
+            &state,
+            Method::POST,
+            "/mcp",
+            Some("Bearer test-token"),
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        let (status, _, pong) = call_raw(
+            &state,
+            Method::POST,
+            "/mcp",
+            Some("Bearer test-token"),
+            json!({"jsonrpc": "2.0", "id": 9, "method": "ping"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let pong: Value = serde_json::from_str(&pong).unwrap();
+        assert_eq!(pong["id"], 9);
+        assert_eq!(pong["result"], json!({}));
     }
 }

@@ -168,6 +168,15 @@ pub struct RelayLoopReport {
     pub consecutive_failures: u32,
 }
 
+/// Delay before retrying after this many consecutive relay failures: 1s, 2s,
+/// 4s, ... capped at 30s. A caller that never reaches the relay therefore backs
+/// off instead of hammering it.
+pub fn backoff_delay(consecutive_failures: u32) -> std::time::Duration {
+    let exponent = consecutive_failures.saturating_sub(1).min(5);
+    let seconds = (1u64 << exponent).min(30);
+    std::time::Duration::from_secs(seconds)
+}
+
 /// One step of the outbound loop. A caller runs this repeatedly; the loop
 /// never executes a request the origin has not authorized, and never pretends
 /// an offline relay succeeded.
@@ -771,5 +780,17 @@ Connection: close
         let mut plain = request("GET", "/health", "");
         plain.encryption = Some("none".into());
         assert_eq!(origin.handle(plain).await.status, 200);
+    }
+
+    #[test]
+    fn backs_off_after_repeated_failures() {
+        use std::time::Duration;
+        assert_eq!(backoff_delay(1), Duration::from_secs(1));
+        assert_eq!(backoff_delay(2), Duration::from_secs(2));
+        assert_eq!(backoff_delay(3), Duration::from_secs(4));
+        assert_eq!(backoff_delay(4), Duration::from_secs(8));
+        assert_eq!(backoff_delay(5), Duration::from_secs(16));
+        assert_eq!(backoff_delay(6), Duration::from_secs(30));
+        assert_eq!(backoff_delay(100), Duration::from_secs(30));
     }
 }
