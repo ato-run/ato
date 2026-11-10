@@ -157,6 +157,10 @@ pub struct WorkspaceCheckpointV1 {
     /// workspace was served by a Coordinator. Browser-only panes omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
+    /// The lease epoch that wrote this checkpoint, so a later writer can be
+    /// fenced and a stale one refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writer: Option<WorkspaceWriterV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -178,6 +182,15 @@ pub struct WorkspacePaneViewStateV1 {
     /// App-declared, restorable view value. Ato stores it and never parses it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<serde_json::Value>,
+}
+
+/// The Coordinator lease that wrote this checkpoint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceWriterV1 {
+    pub workspace_id: String,
+    pub holder: String,
+    pub epoch: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -401,6 +414,13 @@ impl WorkspaceCheckpointV1 {
         }
         if let Some(data) = &self.data {
             validate_saved_data(data)?;
+        }
+        if let Some(writer) = &self.writer {
+            validate_sha256(&writer.workspace_id, "checkpoint writer workspace_id")?;
+            validate_label(&writer.holder, "checkpoint writer holder")?;
+            if writer.epoch < 1 {
+                bail!("checkpoint writer epoch must be positive");
+            }
         }
         let mut previous_view: Option<&str> = None;
         for view in &self.view.pane {
@@ -752,9 +772,11 @@ pub fn save_workspace_checkpoint(
     path: &Path,
     running: &RunningWorkspace,
     data: Option<serde_json::Value>,
+    writer: Option<WorkspaceWriterV1>,
 ) -> Result<WorkspaceCheckpointV1> {
     let (mut checkpoint, objects) = running.capture()?;
     checkpoint.data = data;
+    checkpoint.writer = writer;
     let directory = checkpoint_state_directory(path);
     std::fs::create_dir_all(&directory).with_context(|| {
         format!(
@@ -952,10 +974,32 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
                     }
                 }
                 running.provision(&args.file, &generated)?;
-                Some((server, database, token))
+                Some((server, database, token, generated))
             } else {
                 None
             };
+            let data_coordinator = _local_data
+                .as_ref()
+                .map(|(_, _, _, generated)| generated.clone())
+                .or_else(|| coordinator.clone());
+            let holder = format!(
+                "{}-{}",
+                std::env::var("HOSTNAME")
+                    .or_else(|_| std::env::var("COMPUTERNAME"))
+                    .unwrap_or_else(|_| "local".to_owned()),
+                std::process::id()
+            );
+            let lease = data_coordinator
+                .as_ref()
+                .map(|args| {
+                    crate::data::acquire_workspace_lease(
+                        args,
+                        &running.workspace_digest,
+                        &holder,
+                        3600,
+                    )
+                })
+                .transpose()?;
             println!("workspace: {}", running.shell_url);
             if !args.no_open {
                 crate::open_browser(&running.shell_url)?;
@@ -967,7 +1011,7 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
             }
             wait_for_shutdown()?;
             if let Some(path) = args.checkpoint_out.as_deref() {
-                let data = if let (Some((_, _, token)), Some(base)) =
+                let data = if let (Some((_, _, token, _)), Some(base)) =
                     (_local_data.as_ref(), pane_base.as_ref())
                 {
                     let export = crate::data::CoordinatorArgs {
@@ -1003,12 +1047,22 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
                 } else {
                     None
                 };
-                let checkpoint = save_workspace_checkpoint(path, &running, data)?;
+                let writer = lease.as_ref().map(|lease| WorkspaceWriterV1 {
+                    workspace_id: lease.workspace_id.clone(),
+                    holder: lease.holder.clone(),
+                    epoch: lease.epoch,
+                });
+                let checkpoint = save_workspace_checkpoint(path, &running, data, writer)?;
                 println!(
                     "checkpoint: {} ({} panes)",
                     path.display(),
                     checkpoint.pane.len()
                 );
+            }
+            if let (Some(args), Some(lease)) = (&data_coordinator, &lease)
+                && let Err(error) = crate::data::release_workspace_lease(args, lease)
+            {
+                eprintln!("workspace: the lease could not be released: {error}");
             }
             drop(running);
             Ok(())
@@ -1656,6 +1710,7 @@ impl RunningWorkspace {
             },
             pane,
             data: None,
+            writer: None,
         };
         checkpoint.validate()?;
         Ok((checkpoint, objects))
@@ -1833,6 +1888,7 @@ mod tests {
                 },
             ],
             data: None,
+            writer: None,
         };
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("checkpoint.toml");

@@ -1524,6 +1524,60 @@ pub(crate) fn register_all_declaration(
     protocol_register_all(coordinator, file, protocol, publisher)
 }
 
+/// The single-writer lease a workspace holds on its Coordinator.
+#[derive(Debug, Clone)]
+pub(crate) struct WorkspaceLease {
+    pub workspace_id: String,
+    pub holder: String,
+    pub epoch: i64,
+}
+
+pub(crate) fn acquire_workspace_lease(
+    coordinator: &CoordinatorArgs,
+    workspace_id: &str,
+    holder: &str,
+    ttl_seconds: i64,
+) -> Result<WorkspaceLease> {
+    let value = request(
+        coordinator,
+        reqwest::Method::POST,
+        &format!("/v1/workspaces/{}/lease", workspace_id.replace('/', "%2F")),
+        Some(json!({ "holder": holder, "ttl_seconds": ttl_seconds })),
+    )?;
+    Ok(WorkspaceLease {
+        workspace_id: value
+            .get("workspace_id")
+            .and_then(Value::as_str)
+            .unwrap_or(workspace_id)
+            .to_owned(),
+        holder: value
+            .get("holder")
+            .and_then(Value::as_str)
+            .unwrap_or(holder)
+            .to_owned(),
+        epoch: value
+            .get("epoch")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+    })
+}
+
+pub(crate) fn release_workspace_lease(
+    coordinator: &CoordinatorArgs,
+    lease: &WorkspaceLease,
+) -> Result<()> {
+    request(
+        coordinator,
+        reqwest::Method::DELETE,
+        &format!(
+            "/v1/workspaces/{}/lease",
+            lease.workspace_id.replace('/', "%2F")
+        ),
+        Some(json!({ "holder": lease.holder, "epoch": lease.epoch })),
+    )?;
+    Ok(())
+}
+
 /// Read the whole saved DataResource set from a Coordinator.
 pub(crate) fn export_resources(coordinator: &CoordinatorArgs) -> Result<Value> {
     request(
