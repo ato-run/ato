@@ -15,8 +15,9 @@ data flows through declared operations.
 ## Demo
 
 A 76-second, no-audio, captioned recording of the flow below: edit the
-whiteboard, add a task with a due date, let the calendar read the due-date
-projection, checkpoint, stop, and resume with the same data and split layout.
+whiteboard, add a task with a due date, let the FullCalendar month view read the
+due-date projection, checkpoint, stop, and resume with the same scene, data and
+split layout.
 It was recorded with the published `ato 0.9.1` CLI and the published v0.9.1
 bundle on macOS arm64; the same commands and bundle are covered by the
 macOS/Linux/Windows acceptance evidence linked under
