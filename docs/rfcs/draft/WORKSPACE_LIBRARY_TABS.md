@@ -45,9 +45,13 @@ never delete Workspaces or DataResources.
 
 - The tab row shows "Personal" plus one tab per organization (the newest
   Workspace of that organization), only when the API says the surface exists.
-- The same grid and card styles as My Apps are reused; entries are rendered as
-  tiles. External references open a tab; app/operations references are SPA
-  routes.
+- The screen IS the existing My Apps screen, not a second view: the same
+  `MyAppsPage` component, `.app-grid` and `.app-tile` render the entries, and
+  only the tile source changes (a `workspace` mode). Loading and failure are
+  shown inside that same screen.
+- External references open a tab; app/operations references are SPA routes. In
+  workspace mode the personal listing, drag reorder and remove menus do not
+  run — a reference has no instance lifecycle here.
 - The row is not a second navigation header; the existing
   Explore / Library / Studio header is unchanged.
 - Unconfigured back-office apps are not invented: a Workspace only lists

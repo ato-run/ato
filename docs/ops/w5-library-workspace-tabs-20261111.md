@@ -36,6 +36,27 @@
 
 Screenshot: `.tmp/w5-library-workspace-tabs.png`.
 
+## Unified mode (follow-up, same day)
+
+The first pass still rendered a separate `WorkspaceEntryGrid`. It now renders the
+Library screen itself:
+
+- ato-pwa #803: `MyAppsPage` takes an optional `workspace` mode and draws the
+  references with the same `.home-screen`, `.app-grid` and `.app-tile` markup;
+  the separate grid component was deleted. The personal listing, reorder and
+  remove menus do not run in this mode; loading and failure appear inline.
+- Validation: typecheck, `homeScreen.dom.test.tsx` + `WorkspacesPanel` +
+  `GalleryHeader` → 3 files / 55 tests; `npm run build` (89 static pages).
+- Staging `pwa d114017c-54c2-40fd-838b-8b1a24fa29f9`, real Chrome:
+  - `/workspace` → `https://stg-app.ato.run/?view=my-apps`.
+  - Tabs: 個人 / Ato / Ato QA Workspace.
+  - Personal grid: 32 tiles (the normal My Apps screen).
+  - `Ato` tab: **the same grid element** with 6 tiles — Task Board, Calendar,
+    Memos, Studio, Runners, GitHub — and Task Board opens in a new tab.
+  - Switching back to 個人 restores the 32 personal tiles.
+
+Screenshot: `.tmp/w5-library-workspace-mode.png`.
+
 ## Known gaps
 
 - Paid entitlement currently uses the existing cloud entitlement / paid-email
