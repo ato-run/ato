@@ -4,14 +4,14 @@
 
 Atoは、動作中のアプリ一式とそのデータをポータブルなCapsuleとして保存します。ここで作業を保存し、別のマシンで同じタスクと同じレイアウトを開けます。アプリはそれぞれ独立したままで、Workspaceはそれらを構成し、データは宣言されたoperationを通じて流れます。
 
-[74秒のデモを見る](https://github.com/ato-run/ato-samples/releases/download/v0.9.1/ato-quick-start-demo-v0.9.1.mp4)
+[74秒のデモを見る](https://ato-run.github.io/ato-samples/media/ato-quick-start-demo-v0.9.1.mp4)
 · [クイックスタート](#クイックスタート) · [English](README.md) · [ato.run](https://ato.run/)
 
-[![タスクボード、カレンダー、ホワイトボードの3アプリWorkspace](docs/assets/oss-quick-start/demo-poster.png)](https://github.com/ato-run/ato-samples/releases/download/v0.9.1/ato-quick-start-demo-v0.9.1.mp4)
+[![タスクボード、カレンダー、ホワイトボードの3アプリWorkspace](docs/assets/oss-quick-start/demo-poster.png)](https://ato-run.github.io/ato-samples/media/ato-quick-start-demo-v0.9.1.mp4)
 
 ## デモ
 
-下記の流れを74秒・音声なし・英語字幕で収録したものです。ホワイトボードを編集し、期限付きのタスクを追加し、カレンダーが期限のprojectionだけを読むことを確認し、Checkpointして停止し、同じデータと分割レイアウトでResumeします。公開済みの`ato 0.9.1` CLIと公開v0.9.1 bundleをmacOS arm64で使用して収録しました。同じコマンドとbundleは、[ドキュメント](#ドキュメント)のmacOS/Linux/Windows受入証跡でも扱っています。
+下記の流れを74秒・音声なし・英語字幕で収録したものです。ホワイトボードを編集し、期限付きのタスクを追加し、カレンダーが期限のprojectionだけを読むことを確認し、Checkpointして停止し、同じデータと分割レイアウトでResumeします。公開済みの`ato 0.9.1` CLIと公開v0.9.1 bundleをmacOS arm64で使用して収録しました。同じコマンドとbundleは、[ドキュメント](#ドキュメント)のmacOS/Linux/Windows受入証跡でも扱っています。動画は[`ato-samples` v0.9.1リリース](https://github.com/ato-run/ato-samples/releases/tag/v0.9.1)にもダウンロード用に添付しています（SHA-256 `8fb85dfd52e587586ff522c5de3722dcbbd1d5b73fb4eedb51244738a575140e`）。
 
 ## クイックスタート
 
