@@ -4,14 +4,14 @@
 
 Atoは、動作中のアプリ一式とそのデータをポータブルなCapsuleとして保存します。ここで作業を保存し、別のマシンで同じタスクと同じレイアウトを開けます。アプリはそれぞれ独立したままで、Workspaceはそれらを構成し、データは宣言されたoperationを通じて流れます。
 
-[74秒のデモを見る](https://ato-run.github.io/ato-samples/media/ato-quick-start-demo-v0.9.1.mp4)
+[76秒のデモを見る](https://ato-run.github.io/ato-samples/media/ato-quick-start-demo-v0.9.1.mp4)
 · [クイックスタート](#クイックスタート) · [English](README.md) · [ato.run](https://ato.run/)
 
 [![タスクボード、カレンダー、ホワイトボードの3アプリWorkspace](docs/assets/oss-quick-start/demo-poster.png)](https://ato-run.github.io/ato-samples/media/ato-quick-start-demo-v0.9.1.mp4)
 
 ## デモ
 
-下記の流れを74秒・音声なし・英語字幕で収録したものです。ホワイトボードを編集し、期限付きのタスクを追加し、カレンダーが期限のprojectionだけを読むことを確認し、Checkpointして停止し、同じデータと分割レイアウトでResumeします。公開済みの`ato 0.9.1` CLIと公開v0.9.1 bundleをmacOS arm64で使用して収録しました。同じコマンドとbundleは、[ドキュメント](#ドキュメント)のmacOS/Linux/Windows受入証跡でも扱っています。動画は[`ato-samples` v0.9.1リリース](https://github.com/ato-run/ato-samples/releases/tag/v0.9.1)にもダウンロード用に添付しています（SHA-256 `8fb85dfd52e587586ff522c5de3722dcbbd1d5b73fb4eedb51244738a575140e`）。
+下記の流れを76秒・音声なし・英語字幕で収録したものです。ホワイトボードを編集し、期限付きのタスクを追加し、FullCalendarの月表示が期限のprojectionだけを読むことを確認し、Checkpointして停止し、同じシーン・データ・分割レイアウトでResumeします。公開済みの`ato 0.9.1` CLIと公開v0.9.1 bundleをmacOS arm64で使用して収録しました。同じコマンドとbundleは、[ドキュメント](#ドキュメント)のmacOS/Linux/Windows受入証跡でも扱っています。動画は[`ato-samples` v0.9.1リリース](https://github.com/ato-run/ato-samples/releases/tag/v0.9.1)にもダウンロード用に添付しています（SHA-256 `27a6c6a94825d1c2ae4ea5f259febe0d5c5ee4670d6a6c99321b7bea382b37c6`）。
 
 ## クイックスタート
 
@@ -80,6 +80,7 @@ ato workspace open workspace.toml --checkpoint workspace.checkpoint.toml \
 
 - Workspace shellが扱うのは**Static Webペインのみ**です。native/processペインは名前付きで拒否され、surface hostが必要です（本リリースの範囲外）。
 - Checkpointが復元するのはペインのデータ、分割、アクティブペインです。アプリ内のスクロール位置やテキスト選択は復元されません。
+- Excalidrawのシーンは、ペイン内の**Save checkpoint**ボタンで保存します。その後のshellのCheckpointが、他のペインとレイアウトと一緒にそのシーンを取り込みます。未保存のシーンは含まれません。
 - サンプルのTask Boardには小さなlegacy local-state移行が残っています。ウォークスルーで意味を持つデータとレイアウトは、宣言されたoperation側です。
 - live writerの引き継ぎには共有Coordinatorが必要です。checkpointを別ホストへコピーするのは、オフラインでの継続という別の操作です。
 - このウォークスルーに本番サービスは不要で、GitHubのリリースダウンロード以外の外部接続はありません。

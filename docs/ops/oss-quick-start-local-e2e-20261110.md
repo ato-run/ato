@@ -353,3 +353,40 @@ a development build:
   (https://github.com/ato-run/ato-samples/releases/download/v0.9.1/ato-quick-start-demo-v0.9.1.mp4),
   SHA-256 `8fb85dfd52e587586ff522c5de3722dcbbd1d5b73fb4eedb51244738a575140e`,
   duration 74.3 s.
+
+## Calendar rework: vendored FullCalendar 7.1.4 (2026-11-11)
+
+The hand-written month grid was hard to read in the ~400 px pane, so the
+Calendar pane now uses FullCalendar for rendering, date math and navigation.
+Ato keeps only the adapter from the operation-only `todo_list_due_dates`
+projection into events.
+
+- **Vendored build**: `fullcalendar@7.1.4` (MIT) + dayGrid/list + Pulse theme +
+  Japanese locale + `temporal-polyfill`, compiled with Vite into one IIFE
+  (`fullcalendar.min.js`, 286 KB) and one stylesheet (skeleton + Pulse theme,
+  19 KB). The capsule makes no network request; no CDN is used. The vendor
+  README and LICENSE live next to the files.
+- **Views**: `dayGridMonth` by default, `listMonth` in the toolbar,
+  `editable: false`. Below 520 px the pane shows one dot per due date; wider
+  panes show titles. Events refetch every 4 s and on visibility change, so a
+  TODO edit appears without reloading the pane.
+- **Verified** in the real three-pane workspace at 1440 px (compact dots) and
+  1920 px (titles, Japanese weekdays), including a `todo_create` appearing
+  through the refetch.
+
+Re-cut artifacts:
+
+- bundle `ato-oss-quick-start-v0.9.1.tar.gz` SHA-256
+  `c7472a1b7aba1884dd1b6f1478238706c0879359717be83ada9abcc451b99a86`
+  (capsules: todo `d414333c…`, calendar `37839882…`, excalidraw `6d3fdcd4…`),
+  built by `quickstart-bundle.yml` from `ato-samples` main.
+- demo `ato-quick-start-demo-v0.9.1.mp4`, 76 s, SHA-256
+  `27a6c6a94825d1c2ae4ea5f259febe0d5c5ee4670d6a6c99321b7bea382b37c6`.
+
+Two defects surfaced while exercising the pane in a browser and are fixed in the
+sample sources: index.html kept a static Excalidraw header (disabled Save
+button) next to the React shell, and Excalidraw scene JSON contains `null`
+fields that TOML checkpoints cannot encode. The sample now strips nulls before
+`scene_save`; the general limit remains (a DataResource document containing
+JSON `null` cannot be checkpointed by the CLI yet) and is not claimed as
+supported.
