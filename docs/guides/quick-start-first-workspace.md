@@ -6,7 +6,7 @@ checkpoint, stop, and resume with the data and the layout intact. You do not
 build Rust, and you do not need an ato.run account.
 
 The same flow is shown in the
-[74-second demo](https://github.com/ato-run/ato-samples/releases/download/v0.9.1/ato-quick-start-demo-v0.9.1.mp4)
+[74-second demo](https://ato-run.github.io/ato-samples/media/ato-quick-start-demo-v0.9.1.mp4)
 (no audio, English captions), recorded with the published `ato 0.9.1` and the
 v0.9.1 bundle.
 
