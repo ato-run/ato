@@ -4,6 +4,26 @@ This file records user-visible changes to the ato CLI, newest first. Release
 tags v<version> must match apps/cli/Cargo.toml; cargo-dist refuses a tag whose
 version is behind an already-published one.
 
+## 0.1.0 — unreleased
+
+The 0.1.0 line restarts the product version of the renewed tree. It follows
+0.8.2 on the same channels (GitHub Releases, Homebrew `ato-run/homebrew-ato`,
+shell installer, MSI). The pre-renewal repository is preserved in
+https://github.com/ato-run/ato-archive-2026-11.
+
+### Distribution
+- `ato-cli`, `ato-provider-nacelle`, `netd` and the nacelle eBPF crate are
+  versioned 0.1.0, matching the other workspace crates.
+- The Windows MSI uses a new upgrade code, so it does not upgrade or block on
+  an installed 0.8.x MSI; uninstall 0.8.x first if it is present.
+- Homebrew and installer behaviour when moving from 0.8.2 to 0.1.0 is not yet
+  verified (tracked in TODO #223).
+
+### Removed
+- In-tree `apps/desktop` and `apps/desktop-tauri` (the Desktop is released from
+  `ato-run/ato-desktop`), `benchmarks/ready-state`, `tools/legacy-vm-inspector`,
+  `spikes/`, desky mock samples, `docs/aodd` and `docs/archive`.
+
 ## 0.8.1 — unreleased
 
 ### Added
