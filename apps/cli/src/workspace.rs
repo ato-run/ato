@@ -993,13 +993,16 @@ pub fn run(args: WorkspaceArgs) -> Result<()> {
                 let workspace = running
                     .pane_directories()
                     .into_iter()
-                    .map(|(pane_id, dir)| ato_coordinator::http::WorkspaceApp {
-                        prefix: pane_id.clone(),
-                        app: ato_coordinator::http::AppsConfig {
-                            dir,
-                            instance_id: pane_id,
-                            port: "tasks".to_owned(),
-                        },
+                    .map(|(pane_id, dir)| {
+                        let port = pane_primary_port(&dir);
+                        ato_coordinator::http::WorkspaceApp {
+                            prefix: pane_id.clone(),
+                            app: ato_coordinator::http::AppsConfig {
+                                dir,
+                                instance_id: pane_id,
+                                port,
+                            },
+                        }
                     })
                     .collect();
                 let server = ato_coordinator::serve::spawn(ato_coordinator::serve::ServeConfig {
@@ -1405,17 +1408,24 @@ fn shell_html(
             .get(&pane.id)
             .with_context(|| format!("shell has no URL for pane `{}`", pane.id))?;
         let title = pane.app.as_deref().unwrap_or(&pane.id);
+        // A prefix URL already ends with `/`; appending another would make the
+        // app resolve `./assets` under `…//assets`, which the Coordinator 404s.
+        let src = if url.ends_with('/') {
+            url.clone()
+        } else {
+            format!("{url}/")
+        };
         let active = if view.active_pane == pane.id {
             " active"
         } else {
             ""
         };
         panes.push_str(&format!(
-            r#"<section class="pane{active}" data-pane="{id}" style="flex:{weight} 1 0"><header>{title}</header><iframe title="{title}" src="{url}/"></iframe></section>"#,
+            r#"<section class="pane{active}" data-pane="{id}" style="flex:{weight} 1 0"><header>{title}</header><iframe title="{title}" src="{src}"></iframe></section>"#,
             id = html_escape(&pane.id),
             weight = view.split[index],
             title = html_escape(title),
-            url = html_escape(url),
+            src = html_escape(&src),
         ));
         if index + 1 < manifest.pane.len() {
             dividers.push_str(&format!(
@@ -1632,6 +1642,19 @@ struct PaneProvision {
     pane_id: String,
     ports: Vec<DataPortDeclaration>,
     operations_file: Option<PathBuf>,
+}
+
+/// The Port the runtime context should default to for a pane: the first Port
+/// the pane's own `ato.data.toml` declares.
+fn pane_primary_port(directory: &Path) -> String {
+    let declaration = directory.join("ato.data.toml");
+    if let Ok(text) = std::fs::read_to_string(&declaration)
+        && let Ok(parsed) = toml::from_str::<DataPortDeclarationFile>(&text)
+        && let Some(port) = parsed.port.first()
+    {
+        return port.name.clone();
+    }
+    "tasks".to_owned()
 }
 
 fn read_pane_provisions(pane_id: &str, destination: &Path) -> Result<PaneProvision> {
