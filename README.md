@@ -7,14 +7,14 @@ workspace here, open the same task and layout on a different machine. The apps
 stay independent applications; the workspace only composes them and the
 data flows through declared operations.
 
-[Watch the 74-second demo](https://ato-run.github.io/ato-samples/media/ato-quick-start-demo-v0.9.1.mp4)
+[Watch the 76-second demo](https://ato-run.github.io/ato-samples/media/ato-quick-start-demo-v0.9.1.mp4)
 · [Quick start](#quick-start) · [日本語](README.ja.md) · [ato.run](https://ato.run/)
 
 [![Three-app workspace: task board, calendar and whiteboard](docs/assets/oss-quick-start/demo-poster.png)](https://ato-run.github.io/ato-samples/media/ato-quick-start-demo-v0.9.1.mp4)
 
 ## Demo
 
-A 74-second, no-audio, captioned recording of the flow below: edit the
+A 76-second, no-audio, captioned recording of the flow below: edit the
 whiteboard, add a task with a due date, let the calendar read the due-date
 projection, checkpoint, stop, and resume with the same data and split layout.
 It was recorded with the published `ato 0.9.1` CLI and the published v0.9.1
@@ -22,7 +22,7 @@ bundle on macOS arm64; the same commands and bundle are covered by the
 macOS/Linux/Windows acceptance evidence linked under
 [Documentation](#documentation). The video is also attached to the
 [`ato-samples` v0.9.1 release](https://github.com/ato-run/ato-samples/releases/tag/v0.9.1)
-for download (SHA-256 `8fb85dfd52e587586ff522c5de3722dcbbd1d5b73fb4eedb51244738a575140e`).
+for download (SHA-256 `27a6c6a94825d1c2ae4ea5f259febe0d5c5ee4670d6a6c99321b7bea382b37c6`).
 
 ## Quick start
 
@@ -108,6 +108,9 @@ See [Computation](docs/concepts/computation.md) and
   are refused by name and need a surface host (not part of this release).
 - The checkpoint restores the pane data, the split and the active pane; in-pane
   scroll or text selection inside an app is not restored.
+- Excalidraw saves its scene through its own **Save checkpoint** button; the
+  shell Checkpoint then captures that scene with the other panes and the layout.
+  An unsaved scene is not included.
 - The sample Task Board still carries a small legacy local-state migration; the
   data and layout that matter for the walkthrough are the declared operations.
 - A live writer hand-over needs a shared Coordinator; copying a checkpoint to
