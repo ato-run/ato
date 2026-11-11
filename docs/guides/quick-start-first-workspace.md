@@ -5,13 +5,23 @@ This is the "pick up your work on another computer" walkthrough: install the
 checkpoint, stop, and resume with the data and the layout intact. You do not
 build Rust, and you do not need an ato.run account.
 
+The same flow is shown in the
+[74-second demo](https://github.com/ato-run/ato-samples/releases/download/v0.9.1/ato-quick-start-demo-v0.9.1.mp4)
+(no audio, English captions), recorded with the published `ato 0.9.1` and the
+v0.9.1 bundle.
+
 ## 1. Install the CLI
 
-- macOS (Homebrew): `brew install ato-run/homebrew-ato/ato-cli`
-- Windows: run the `ato-cli-x86_64-pc-windows-msvc.msi` release asset
-- Linux/macOS (shell): run the `ato-cli-installer.sh` release asset
+- macOS/Linux (Homebrew): `brew install ato-run/ato/ato`
+- Linux/macOS without Homebrew:
+  `curl -fsSL https://github.com/ato-run/ato/releases/download/v0.9.1/ato-cli-installer.sh | sh`
+- Windows x86_64: run the
+  [`ato-cli-x86_64-pc-windows-msvc.msi`](https://github.com/ato-run/ato/releases/download/v0.9.1/ato-cli-x86_64-pc-windows-msvc.msi)
+  release asset
 
-`ato --version` should print a version. The CLI is the only thing you install.
+`ato --version` should print `0.9.1`. The CLI is the only thing you install.
+The output of the installer and MSI paths is verified on Linux x86_64 and
+Windows x86_64; Homebrew uses the same release artifacts.
 
 ## 2. Get the sample workspace
 
@@ -19,18 +29,19 @@ The release carries a prebuilt bundle (three capsules plus a `workspace.toml`
 that pins their SHA-256 digests); no `npm`, no `cargo`, no sample source:
 
 ```sh
-curl -LO https://github.com/ato-run/ato-samples/releases/download/<tag>/ato-oss-quick-start-<version>.tar.gz
-curl -LO https://github.com/ato-run/ato-samples/releases/download/<tag>/ato-oss-quick-start-<version>.tar.gz.sha256
-shasum -a 256 -c ato-oss-quick-start-<version>.tar.gz.sha256
-tar xzf ato-oss-quick-start-<version>.tar.gz
-cd ato-oss-quick-start-<version>
+curl -LO https://github.com/ato-run/ato-samples/releases/download/v0.9.1/ato-oss-quick-start-v0.9.1.tar.gz
+curl -LO https://github.com/ato-run/ato-samples/releases/download/v0.9.1/ato-oss-quick-start-v0.9.1.tar.gz.sha256
+shasum -a 256 -c ato-oss-quick-start-v0.9.1.tar.gz.sha256
+tar xzf ato-oss-quick-start-v0.9.1.tar.gz
+cd ato-oss-quick-start-v0.9.1
 ```
 
 The bundle is built by `.github/workflows/quickstart-bundle.yml` in
 `ato-run/ato-samples`; it contains `bundle.json` (schema, version, capsule
 names) and is only published after that workflow opened it with the matching
-`ato` release. Until a release exists, use the capsules from a local build of
-the sample sources.
+`ato` release. The v0.9.1 bundle was built and checked by that workflow against
+the v0.9.1 CLI. Source builds of the samples are documented in the
+[sample repository](https://github.com/ato-run/ato-samples).
 
 ## 3. Open it
 

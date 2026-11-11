@@ -1,8 +1,10 @@
 # OSS quick start: local 3-app workspace acceptance (2026-11-10)
 
-Status: **local verification only**. The CLI install and the Windows/Linux hosts
-are still pending (H1 CI, T1), so this records what the workspace lifecycle
-already does with the development binary on macOS.
+Status: **verified through the published releases**. This file began as the
+macOS development-binary log; the later sections record the Linux and Windows
+x86_64 runs, the v0.9.0/v0.9.1 release artifacts, the 74-second public demo and
+the acceptance numbers used by the README. Where an early section says a host is
+pending, the later section supersedes it; the raw logs are kept as written.
 
 ## Setup
 

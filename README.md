@@ -1,143 +1,127 @@
 # Ato
 
-Ato is a computing interface for preserving, sharing, and continuing work from
-an addressable point. It combines a computation model with a runtime and CLI
-for working with Capsules.
+**Pick up your work on another computer.**
 
-[ato.run](https://ato.run/) is the web service built on Ato for discovering,
-trying, saving, and sharing runnable software. This repository contains the
-runtime, CLI, adapters, and supporting tools. [About Ato](https://ato.run/about/)
-· [日本語](README.ja.md)
+Ato keeps a running set of apps and their data as a portable Capsule: save the
+workspace here, open the same task and layout on a different machine. The apps
+stay independent applications; the workspace only composes them and the
+data flows through declared operations.
 
-## Why Ato?
+[Watch the 74-second demo](https://github.com/ato-run/ato-samples/releases/download/v0.9.1/ato-quick-start-demo-v0.9.1.mp4)
+· [Quick start](#quick-start) · [日本語](README.ja.md) · [ato.run](https://ato.run/)
 
-Work is often tied to a process, machine, source tree, or particular
-snapshot. Moving it elsewhere can require reconstructing the environment and
-checking whether the result still behaves as intended. Ato explores an
-approach that identifies the work separately from the physical means used to
-realize it, such as a process, container, or snapshot.
+[![Three-app workspace: task board, calendar and whiteboard](docs/assets/oss-quick-start/demo-poster.png)](https://github.com/ato-run/ato-samples/releases/download/v0.9.1/ato-quick-start-demo-v0.9.1.mp4)
 
-The design aims to support application sharing, continuing development work,
-and handing off long-running agent tasks through a common interface. These
-are use cases for the model, not a claim that every form of state or handoff
-is supported today. The example below shows the current static application
-verification path.
+## Demo
 
-## Core concepts
-
-- **Computation** is the work that can continue from its current point.
-- **Capsule** is a sealed, immutable, addressable continuation point. It can
-  be preserved and shared; the physical method used to realize it does not
-  define its identity.
-- **Run** resumes a Capsule and advances the computation. Runs can develop
-  different futures from the same Capsule.
-
-For portable applications, a **Contract** describes observable requirements,
-a **Derivation** declares a way to realize them, and a verification **receipt**
-records the observations for a Run. See [Computation](docs/concepts/computation.md)
-and [application contracts](docs/concepts/application-contracts.md) for the
-model and its profiles.
+A 74-second, no-audio, captioned recording of the flow below: edit the
+whiteboard, add a task with a due date, let the calendar read the due-date
+projection, checkpoint, stop, and resume with the same data and split layout.
+It was recorded with the published `ato 0.9.1` CLI and the published v0.9.1
+bundle on macOS arm64; the same commands and bundle are covered by the
+macOS/Linux/Windows acceptance evidence linked under
+[Documentation](#documentation).
 
 ## Quick start
 
-### Try ato.run
+You install only the CLI. No Rust toolchain, no `npm`, no account.
 
-Explore public software on [ato.run](https://ato.run/) or
-[try 2048](https://ato.run/?view=discover&detail=discover%3Adiscover-2048)
-in your browser.
+### 1. Install the CLI
 
-### Try the CLI
-
-Install the Rust toolchain declared in [rust-toolchain.toml](rust-toolchain.toml),
-then clone the repository, build the CLI, and run the supplied static application
-bundle:
-
-```sh
-git clone https://github.com/ato-run/ato.git
-cd ato
-cargo build -p ato-cli --bin ato --locked
-mkdir -p .tmp/getting-started
-target/debug/ato run samples/interop-static.capsule --no-open \
-  --verification-receipt .tmp/getting-started/receipt.json
-```
-
-The CLI validates the bundle, realizes its declared route, checks the source
-identity and HTTP response against the Contract, and writes a receipt. On
-success, inspect `.tmp/getting-started/receipt.json` for the selected
-Derivation and observations; `fully_satisfied` is `true` when all required
-observations are satisfied. `--no-open` verifies and exits without opening a
-browser. See [Getting started](docs/guides/getting-started.md) for details,
-other routes, and failure boundaries. Published CLI artifacts are listed in
-[GitHub Releases](https://github.com/ato-run/ato/releases).
-
-For example, inspect the receipt with Python 3:
+- macOS/Linux (Homebrew): `brew install ato-run/ato/ato`
+- Linux/macOS without Homebrew:
+  `curl -fsSL https://github.com/ato-run/ato/releases/download/v0.9.1/ato-cli-installer.sh | sh`
+- Windows x86_64: run the
+  [`ato-cli-x86_64-pc-windows-msvc.msi`](https://github.com/ato-run/ato/releases/download/v0.9.1/ato-cli-x86_64-pc-windows-msvc.msi)
+  release asset
 
 ```sh
-python3 -c 'import json; r=json.load(open(".tmp/getting-started/receipt.json")); print("fully_satisfied:", r["fully_satisfied"]); [print(o["id"] + ":", o["outcome"]) for o in r["observations"]]'
+ato --version    # 0.9.1
 ```
 
-```text
-fully_satisfied: True
-app-proof: satisfied
-source-identity: satisfied
+### 2. Get the sample workspace
+
+The release carries a prebuilt bundle (three capsules plus a `workspace.toml`
+that pins their SHA-256 digests); there is nothing to build:
+
+```sh
+curl -LO https://github.com/ato-run/ato-samples/releases/download/v0.9.1/ato-oss-quick-start-v0.9.1.tar.gz
+curl -LO https://github.com/ato-run/ato-samples/releases/download/v0.9.1/ato-oss-quick-start-v0.9.1.tar.gz.sha256
+shasum -a 256 -c ato-oss-quick-start-v0.9.1.tar.gz.sha256
+tar xzf ato-oss-quick-start-v0.9.1.tar.gz
+cd ato-oss-quick-start-v0.9.1
 ```
 
-This static example does not demonstrate general cross-host portability or
-restoration of process memory.
+### 3. Open the workspace
 
-## Current status
+```sh
+ato workspace open workspace.toml --local-data --checkpoint-out workspace.checkpoint.toml
+```
 
-Ato is experimental. This repository includes computation objects, lifecycle
-commands, adapters, portable bundle handling, and the static verification
-example above. Python, OCI, GPU, state, and external services require their
-own declared routes and host admission; their presence in the code does not
-establish availability on ato.run production.
+The CLI starts a local Coordinator, serves the three apps side by side and
+opens the shell in your browser. The calendar reads only the declared due-date
+projection, never the task board document.
 
-General recovery across different hosts, process-memory restoration, and
-autonomous AI Formation are research or development work. Ato does not
-promise that every application runs everywhere or replace tools such as
-Docker and Nix. Matching a Contract alone does not guarantee state continuity
-or safe side effects. See [compatibility](docs/concepts/compatibility.md) and
-[state continuity](docs/concepts/state-continuity.md).
+### 4. Edit, checkpoint, stop
 
-## Roadmap and work tracking
+Edit in the panes, then press **Checkpoint** (or **Ctrl-S**) to save while the
+workspace keeps running, and **Stop and save** to checkpoint and stop.
 
-Work is tracked in [GitHub Issues](https://github.com/ato-run/ato/issues) (and
-GitHub Projects when a board is used). There is no Markdown roadmap in this
-repository; [the archived roadmap](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/legacy/OPEN_ISSUES_ROADMAP.md)
-is historical evidence and is not updated.
+### 5. Resume
+
+```sh
+ato workspace open workspace.toml --checkpoint workspace.checkpoint.toml \
+  --local-data --checkpoint-out workspace.checkpoint.toml
+```
+
+The saved data and the split layout come back. A pane that cannot be restored
+fails the resume instead of silently starting empty.
+
+## Continue on another computer
+
+Copy `workspace.toml`, the capsules and the checkpoint (including its
+`.state/` directory) to the other host and run the resume command there; the
+capsules are byte-identical across the macOS/Linux/Windows builds, so no
+digests need to change. To keep both machines live at once, point them at one
+Coordinator (`--coordinator`/`--token`); its lease refuses a second live writer
+and increments the epoch on hand-over. A copied checkpoint is a continuation
+of the file set, not a live transfer of writer authority.
+
+## Core concepts
+
+- **Computation** — the work that can continue from its current point.
+- **Capsule** — a sealed, immutable, addressable continuation point; the
+  physical way it is realized does not define its identity.
+- **Run** — resumes a Capsule and advances the computation.
+- **Contract / Derivation / receipt** — for portable applications, the
+  observable requirements, a declared way to realize them, and the recorded
+  observations of a Run.
+
+See [Computation](docs/concepts/computation.md) and
+[application contracts](docs/concepts/application-contracts.md) for the model.
+
+## Current limitations
+
+- The workspace shell serves **Static Web panes only**; native/process panes
+  are refused by name and need a surface host (not part of this release).
+- The checkpoint restores the pane data, the split and the active pane; in-pane
+  scroll or text selection inside an app is not restored.
+- The sample Task Board still carries a small legacy local-state migration; the
+  data and layout that matter for the walkthrough are the declared operations.
+- A live writer hand-over needs a shared Coordinator; copying a checkpoint to
+  another host is a separate, offline continuation.
+- No production services are needed for this walkthrough, and none are
+  contacted beyond the GitHub release download.
 
 ## Documentation
 
-General user documentation is owned by the
-[ato.run documentation](https://ato.run/docs/). This repository owns the
-technical documentation for the runtime, CLI, specifications and operations
-([documentation index](docs/README.md)).
+- [Quick start walkthrough](docs/guides/quick-start-first-workspace.md)
+- [Getting started / build from source](docs/guides/getting-started.md)
+- [3-OS acceptance evidence and measured timings](docs/ops/oss-quick-start-local-e2e-20261110.md)
+- [Sample capsule sources and bundle](https://github.com/ato-run/ato-samples)
+- [Concepts](docs/concepts/) · [RFCs](docs/rfcs/)
 
-- [Getting started](docs/guides/getting-started.md) and [Formation guide](docs/guides/formation.md)
-- [Concepts](docs/concepts/computation.md), [application contracts](docs/concepts/application-contracts.md), and [glossary](docs/glossary-reference.md)
-- [Architecture](docs/architecture/README.md) and [specifications](docs/specifications/README.md)
-- [Runner and hosting](docs/guides/runner-hosting.md), [operations](docs/operations/README.md), and the [documentation index](docs/README.md)
+## Contributing
 
-## Contributing and license
-
-See [Contributing](CONTRIBUTING.md) and [GitHub issues](https://github.com/ato-run/ato/issues).
-
-Project-authored code is licensed under the [Mozilla Public License 2.0](LICENSE)
-(`MPL-2.0`). Third-party code, dependencies, patches containing upstream code,
-and materials with their own license notices retain their respective terms.
-For example, the CPython fixture, WiX templates, and release workflow retain
-their upstream licenses; the AODD skill retains its MIT license. The CLI's
-[Apache license text](apps/cli/LICENSE-APACHE) is retained for the WiX template
-and previously distributed versions. Previously granted licenses remain in effect.
-
-This code license does not establish a new license for the Capsule Process
-Model's theoretical documents.
-
-<!-- Compatibility anchors from the previous documentation entry. -->
-<a id="main-use-cases"></a><a id="design-principle-everything-can-be-a-capsule"></a>
-<a id="core-model"></a><a id="capsule--run--replay--continue"></a>
-<a id="core--kernel-and-adapter"></a><a id="materialization"></a>
-<a id="the-computation-theory-behind-it"></a><a id="basic-lifecycle"></a>
-<a id="capsuletoml-example"></a><a id="project-scope"></a><a id="current-implementation-status"></a>
-<a id="capsule-run-replay-continue"></a><a id="core-kernel-and-adapter"></a>
+Issues and pull requests are welcome. The repository flow is
+`feature branch → dev → stg → main`; see the guides above for the local checks.
