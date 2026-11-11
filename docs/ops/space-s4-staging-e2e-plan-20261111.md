@@ -42,6 +42,33 @@ Status: prepared, **not executed**. Staging deploy is blocked on Cloudflare auth
 
 Screenshots per case: `.tmp/space-s4/<case>-<viewport>-<theme>.png`.
 
+## Local mock harness (client gate, not staging)
+
+`apps/ato-pwa/scripts/space-local-e2e.mjs` serves the built PWA with an SPA
+fallback and mocks the API in Playwright. It exists because staging could not be
+deployed while Cloudflare auth was unavailable; it is a development gate, never
+a substitute for the staging run.
+
+Run: `cd apps/ato-pwa && npm run build && node scripts/space-local-e2e.mjs`
+
+Result (2026-11-11): **9/9 PASS**
+
+```
+PASS legacy /workspace redirects to Library
+PASS tabs show My Apps and Ato
+PASS header has no Workspace button
+PASS bell shows unread badge 1
+PASS opening the bell marks invitations read
+PASS joining adds the Space tab without reload
+PASS deep link restores the Space
+PASS removed membership drops the Space and falls back to My Apps
+PASS free account keeps the classic My Apps screen
+```
+
+The staging cases still to run are the ones that need real sessions, real
+invitations and real org membership: accept/decline across two accounts, revoke
+by an admin, re-login, and the mobile/desktop light/dark pass.
+
 ## Report format
 
 For each case: PASS / FAIL / BLOCKED + screenshot path. Report the changed
