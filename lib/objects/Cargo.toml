@@ -1,6 +1,6 @@
 [package]
 name = "ato-objects"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 license = "MPL-2.0"
 description = "Verified persistence and transport for addressable Ato objects"
@@ -14,7 +14,7 @@ dist = false
 layer = "objects"
 
 [dependencies]
-ato-computation = { path = "../computation", version = "0.1.0" }
+ato-computation = { path = "../computation", version = "1.0.0" }
 blake3 = "1.5"
 base64 = "0.22"
 # Pure-Rust implementation of libsodium's `crypto_secretstream` construction.

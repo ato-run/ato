@@ -1,6 +1,6 @@
 [package]
 name = "ato-adapter-browser"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 license = "MPL-2.0"
 description = "Browser physical-input protocol Adapter for Ato"
@@ -12,10 +12,10 @@ dist = false
 layer = "adapter"
 
 [dependencies]
-ato-adapter-api = { path = "../api", version = "0.1.0" }
-ato-computation = { path = "../../../lib/computation", version = "0.1.0" }
-ato-objects = { path = "../../../lib/objects", version = "0.1.0" }
-ato-record-writer = { path = "../../record-writer", version = "0.1.0" }
+ato-adapter-api = { path = "../api", version = "1.0.0" }
+ato-computation = { path = "../../../lib/computation", version = "1.0.0" }
+ato-objects = { path = "../../../lib/objects", version = "1.0.0" }
+ato-record-writer = { path = "../../record-writer", version = "1.0.0" }
 base64 = "0.22"
 blake3 = "1"
 rand = "0.8"

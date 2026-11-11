@@ -1,6 +1,6 @@
 [package]
 name = "ato-materializer-static-web"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 license = "MPL-2.0"
 description = "Deterministic immutable Static Web Bundle materialization"
@@ -29,4 +29,4 @@ url = "2"
 # Dev-only: pins the State lane's on-the-wire format to the Browser
 # Materializer that owns it. arch-check ignores dev edges, and no shipped
 # artifact links this crate.
-ato-materializer-browser = { path = "../browser", version = "0.1.0" }
+ato-materializer-browser = { path = "../browser", version = "1.0.0" }
