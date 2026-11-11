@@ -285,3 +285,36 @@ Failure path checked manually with PowerShell because the bash script's
 Stop with an unwritable checkpoint the process **stayed alive**, `/status`
 returned `error: failed to create the checkpoint state directory …`, and the log
 printed the retry hint — the same behaviour as macOS/Linux.
+
+## Windows x86_64 with the released v0.9.0 artifacts (2026-11-11)
+
+After the v0.9.0 release published (CLI assets + Windows MSI) and the quick-start
+bundle was attached to `ato-run/ato-samples` v0.9.0, the 90-second flow was run
+on `yuki-laptop` with **installed release artifacts only**:
+
+| Step | Measurement |
+|---|---|
+| MSI install (`msiexec /qn`) | **1,181 ms** |
+| bundle download from the GitHub release (`Invoke-WebRequest`) | **11,152 ms** |
+| SHA-256 verification (`Get-FileHash`) + extract (`tar xzf`) | **135 ms**, hash OK |
+| `ato workspace open` → shell URL | **3,869 ms** |
+| TODO edit through the bridge (creates the task) | 5,187 ms (cumulative) |
+| Checkpoint requested → `/status` = `ok:` | 5,538 ms (cumulative) |
+| Stop and save → checkpoint file present, process exited | **6,031 ms** total |
+
+Machine-attributable total: **≈18.5 s** (install + download + extract + flow),
+well inside the 90-second basic acceptance; the human editing time is not part
+of the automated measurement (the edit was driven through the same data-port
+operation the UI uses).
+
+Acceptance harness with the installed `ato 0.9.0` and the downloaded bundle:
+
+```text
+PASS
+  open:   3534ms
+  resume: 3949ms
+```
+
+The released artifacts therefore carry the workspace commands; the earlier
+source-build Windows run (12–17 s per phase) was a debug build and is superseded
+by these release numbers.
