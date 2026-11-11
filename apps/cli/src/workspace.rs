@@ -1408,17 +1408,24 @@ fn shell_html(
             .get(&pane.id)
             .with_context(|| format!("shell has no URL for pane `{}`", pane.id))?;
         let title = pane.app.as_deref().unwrap_or(&pane.id);
+        // A prefix URL already ends with `/`; appending another would make the
+        // app resolve `./assets` under `…//assets`, which the Coordinator 404s.
+        let src = if url.ends_with('/') {
+            url.clone()
+        } else {
+            format!("{url}/")
+        };
         let active = if view.active_pane == pane.id {
             " active"
         } else {
             ""
         };
         panes.push_str(&format!(
-            r#"<section class="pane{active}" data-pane="{id}" style="flex:{weight} 1 0"><header>{title}</header><iframe title="{title}" src="{url}/"></iframe></section>"#,
+            r#"<section class="pane{active}" data-pane="{id}" style="flex:{weight} 1 0"><header>{title}</header><iframe title="{title}" src="{src}"></iframe></section>"#,
             id = html_escape(&pane.id),
             weight = view.split[index],
             title = html_escape(title),
-            url = html_escape(url),
+            src = html_escape(&src),
         ));
         if index + 1 < manifest.pane.len() {
             dividers.push_str(&format!(
