@@ -57,6 +57,24 @@ Library screen itself:
 
 Screenshot: `.tmp/w5-library-workspace-mode.png`.
 
+## Creating a Workspace from the tabs
+
+- ato-pwa #805: when the API answers `can_create: true`, the tab row shows a
+  `+`; it opens a small dialog (organization select + name) over the same
+  screen and calls `POST /v1/workspaces`. On success the availability is
+  refreshed and the new tab is selected. A person without entitlement sees no
+  `+` and the API still refuses with `403 workspace_entitlement_required`.
+- Validation: typecheck, `WorkspacesPanel` + `homeScreen` → 2 files / 37 tests;
+  `npm run build` (89 static pages).
+- Staging `pwa de7ad8ef-4d92-43f6-b9b2-733b46a12dd1`, real Chrome:
+  - Entitled account: `+` present; dialog lists `QA Workspace Org` and `Ato`
+    with a name field and Cancel/Create actions (dialog opened and dismissed
+    during verification; no workspace was created for the test).
+  - QA account B: tabs show Personal and Ato QA Workspace, **no `+`**
+    (`can_create: false`).
+
+Screenshot: `.tmp/w5-library-create.png`.
+
 ## Known gaps
 
 - Paid entitlement currently uses the existing cloud entitlement / paid-email
