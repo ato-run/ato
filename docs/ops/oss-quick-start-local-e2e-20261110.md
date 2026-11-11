@@ -318,3 +318,10 @@ PASS
 The released artifacts therefore carry the workspace commands; the earlier
 source-build Windows run (12–17 s per phase) was a debug build and is superseded
 by these release numbers.
+
+## Published v0.9.0 artifact verification (2026-11-11)
+
+- **macOS arm64 release binary** (`ato-cli-aarch64-apple-darwin.tar.xz`): `ato 0.9.0`, `ato workspace open` present; acceptance harness **PASS** (open 2,698 ms / resume 5,368 ms).
+- **Linux x86_64 release binary** (`ato-cli-x86_64-unknown-linux-gnu.tar.xz`): `ato 0.9.0`, workspace present; acceptance **PASS** (open 593 ms / resume 622 ms).
+- **Windows x86_64 MSI** release artifact: installed (1,181 ms), acceptance PASS (open 3,534 ms / resume 3,949 ms), 90-second flow ≈18.5 s machine-attributable.
+- **Bundle CI gate**: `quick-start-bundle.yml` ran on `ato-samples` main with v0.9.0 available; the verification step that opens the built bundle with the released CLI passed. The CI-built bundle and the published Windows-built bundle have **identical capsule SHA-256s** (`2c1fafd1…`, `a47f8c9c…`, `c42477d4…`); only tar metadata differs.
