@@ -1,98 +1,97 @@
 # Ato
 
-Atoは、参照可能な地点から作業を保存・共有・継続するためのコンピューティングインターフェースです。計算モデルと、Capsuleを扱うランタイム・CLIを組み合わせています。
+**Pick up your work on another computer. — 別のコンピュータで、続きから。**
 
-[ato.run](https://ato.run/)は、動作するソフトウェアの発見、試用、保存、共有のためにAto上に構築されたWebサービスです。このリポジトリにはランタイム、CLI、Adapter、関連ツールが含まれます。[About Ato](https://ato.run/about/) · [English](README.md)
+Atoは、動作中のアプリ一式とそのデータをポータブルなCapsuleとして保存します。ここで作業を保存し、別のマシンで同じタスクと同じレイアウトを開けます。アプリはそれぞれ独立したままで、Workspaceはそれらを構成し、データは宣言されたoperationを通じて流れます。
 
-## なぜAtoなのか
+[74秒のデモを見る](https://github.com/ato-run/ato-samples/releases/download/v0.9.1/ato-quick-start-demo-v0.9.1.mp4)
+· [クイックスタート](#クイックスタート) · [English](README.md) · [ato.run](https://ato.run/)
 
-作業は多くの場合、プロセス、マシン、ソースツリー、特定のスナップショットに結び付いています。別の場所に移すには、環境を再構築し、結果が期待どおりに動くか確認しなければならないことがあります。Atoは、作業の同一性と、それを実現するプロセス・コンテナ・スナップショットなどの物理的な手段を分けるアプローチを探究しています。
+[![タスクボード、カレンダー、ホワイトボードの3アプリWorkspace](docs/assets/oss-quick-start/demo-poster.png)](https://github.com/ato-run/ato-samples/releases/download/v0.9.1/ato-quick-start-demo-v0.9.1.mp4)
 
-アプリケーションの共有、開発作業の継続、長時間のエージェントタスクの引き継ぎを、共通のインターフェースで扱うことを目指しています。これらはモデルのユースケースであり、すべての状態や引き継ぎが現在サポートされているという意味ではありません。以下の例では、現在の静的アプリケーションの検証経路を試せます。
+## デモ
 
-## 基本概念
-
-- **Computation**：現在地点から継続可能な計算・作業。
-- **Capsule**：封印された、不変で参照可能な継続地点。保存・共有でき、実現する物理的な方法はその同一性を定義しません。
-- **Run**：Capsuleを再開して計算を進める実行。同じCapsuleから複数のRunを始め、それぞれ異なる未来へ進められます。
-
-ポータブルアプリケーションでは、**Contract**が観測可能な要件を記述し、**Derivation**がその実現方法を宣言します。検証**receipt**は、Runで得られた観測結果を記録します。詳細は[Computation](docs/concepts/computation.md)と[アプリケーション契約](docs/concepts/application-contracts.md)を参照してください。
+下記の流れを74秒・音声なし・英語字幕で収録したものです。ホワイトボードを編集し、期限付きのタスクを追加し、カレンダーが期限のprojectionだけを読むことを確認し、Checkpointして停止し、同じデータと分割レイアウトでResumeします。公開済みの`ato 0.9.1` CLIと公開v0.9.1 bundleをmacOS arm64で使用して収録しました。同じコマンドとbundleは、[ドキュメント](#ドキュメント)のmacOS/Linux/Windows受入証跡でも扱っています。
 
 ## クイックスタート
 
-### ato.runを試す
+インストールするのはCLIだけです。Rustツールチェーンも`npm`もアカウントも不要です。
 
-ブラウザで[ato.run](https://ato.run/)の公開ソフトウェアを探すか、[2048を試せます](https://ato.run/?view=discover&detail=discover%3Adiscover-2048)。
+### 1. CLIのインストール
 
-### CLIを試す
-
-[rust-toolchain.toml](rust-toolchain.toml)で指定されたRustツールチェーンをインストールし、リポジトリをcloneしてCLIをビルドし、同梱の静的アプリケーションbundleを実行します。
-
-```sh
-git clone https://github.com/ato-run/ato.git
-cd ato
-cargo build -p ato-cli --bin ato --locked
-mkdir -p .tmp/getting-started
-target/debug/ato run samples/interop-static.capsule --no-open \
-  --verification-receipt .tmp/getting-started/receipt.json
-```
-
-CLIはbundleを検証し、宣言された実行経路で実現して、ソースの同一性とHTTP応答をContractに照らし合わせ、receiptを書き出します。成功後、`.tmp/getting-started/receipt.json`で選択されたDerivationと観測結果を確認できます。必要な観測がすべて満たされると`fully_satisfied`は`true`になります。`--no-open`はブラウザを開かずに検証して終了します。詳細、他の経路、失敗時の境界は[Getting started](docs/guides/getting-started.md)を参照してください。公開済みのCLI成果物は[GitHub Releases](https://github.com/ato-run/ato/releases)にあります。
-
-例えば、Python 3でreceiptを確認できます。成功時の出力例は次のとおりです。
+- macOS/Linux（Homebrew）: `brew install ato-run/ato/ato`
+- Homebrewを使わないLinux/macOS:
+  `curl -fsSL https://github.com/ato-run/ato/releases/download/v0.9.1/ato-cli-installer.sh | sh`
+- Windows x86_64: リリース資産の
+  [`ato-cli-x86_64-pc-windows-msvc.msi`](https://github.com/ato-run/ato/releases/download/v0.9.1/ato-cli-x86_64-pc-windows-msvc.msi)
+  を実行
 
 ```sh
-python3 -c 'import json; r=json.load(open(".tmp/getting-started/receipt.json")); print("fully_satisfied:", r["fully_satisfied"]); [print(o["id"] + ":", o["outcome"]) for o in r["observations"]]'
+ato --version    # 0.9.1
 ```
 
-```text
-fully_satisfied: True
-app-proof: satisfied
-source-identity: satisfied
+### 2. サンプルWorkspaceの取得
+
+リリースにはビルド済みbundle（3つのcapsuleと、SHA-256を固定した`workspace.toml`）が添付されています。ビルド作業はありません。
+
+```sh
+curl -LO https://github.com/ato-run/ato-samples/releases/download/v0.9.1/ato-oss-quick-start-v0.9.1.tar.gz
+curl -LO https://github.com/ato-run/ato-samples/releases/download/v0.9.1/ato-oss-quick-start-v0.9.1.tar.gz.sha256
+shasum -a 256 -c ato-oss-quick-start-v0.9.1.tar.gz.sha256
+tar xzf ato-oss-quick-start-v0.9.1.tar.gz
+cd ato-oss-quick-start-v0.9.1
 ```
 
-この静的な例は、一般的なホスト間移植性やプロセスメモリの復元を実証するものではありません。
+### 3. Workspaceを開く
 
-## 現在の状況
+```sh
+ato workspace open workspace.toml --local-data --checkpoint-out workspace.checkpoint.toml
+```
 
-Atoは実験的なプロジェクトです。このリポジトリには計算オブジェクト、ライフサイクルコマンド、Adapter、ポータブルbundleの処理、上記の静的な検証例が含まれます。Python、OCI、GPU、状態、外部サービスには、それぞれ宣言された経路とホストでの実行許可が必要です。コードの存在はato.run本番での利用可能性を意味しません。
+CLIがローカルCoordinatorを起動し、3つのアプリを横並びで配信して、ブラウザでshellを開きます。カレンダーが読むのは宣言された期限のprojectionだけで、タスクボードのdocumentそのものは受け取りません。
 
-異なるホスト間の汎用的な復元、プロセスメモリの復元、AIによる自律的なFormationは研究・開発段階です。すべてのアプリがどこでも動く保証や、Docker・Nixなどのツールの代替を目的とするものではありません。Contractの一致だけでは、状態の継続や副作用の安全性は保証されません。[互換性](docs/concepts/compatibility.md)と[状態の継続性](docs/concepts/state-continuity.md)を参照してください。
+### 4. 編集・Checkpoint・停止
 
-## ロードマップと作業管理
+ペインで編集したあと、**Checkpoint**（または**Ctrl-S**）で動作を続けたまま保存し、**Stop and save**で保存して停止します。
 
-作業は[GitHub Issues](https://github.com/ato-run/ato/issues)（ボードを使う場合はGitHub Projects）で管理します。このリポジトリにMarkdownのロードマップは置きません。[アーカイブ済みのロードマップ](https://github.com/ato-run/ato-archive-2026-11/blob/a13b011e7d41813d62b0f7da359c38637ad3f68a/docs/archive/2026/legacy/OPEN_ISSUES_ROADMAP.md)は履歴として残した資料で、更新しません。
+### 5. Resume
+
+```sh
+ato workspace open workspace.toml --checkpoint workspace.checkpoint.toml \
+  --local-data --checkpoint-out workspace.checkpoint.toml
+```
+
+保存したデータと分割レイアウトが戻ります。復元できないペインがある場合、空の状態で黙って開始せず、Resume自体が失敗します。
+
+## 別のコンピュータで続ける
+
+`workspace.toml`、capsule一式、checkpoint（`.state/`ディレクトリを含む）を別ホストへコピーし、そこでResumeコマンドを実行します。capsuleはmacOS/Linux/Windowsのビルド間でバイト同一なので、digestを変更する必要はありません。2台を同時に動かす場合は、1つのCoordinator（`--coordinator`/`--token`）を共有します。leaseが2人目のlive writerを拒否し、引き継ぎ時にepochを進めます。checkpointのコピーはファイル一式の継続であり、writer権限のライブ移転ではありません。
+
+## 基本概念
+
+- **Computation** — 現在地点から継続できる計算・作業。
+- **Capsule** — 封印された不変で参照可能な継続地点。実現手段が同一性を決めません。
+- **Run** — Capsuleを再開して計算を進める実行。
+- **Contract / Derivation / receipt** — ポータブルアプリケーションの観測可能な要件、実現方法の宣言、Runの観測記録。
+
+モデルの詳細は[Computation](docs/concepts/computation.md)と[アプリケーション契約](docs/concepts/application-contracts.md)を参照してください。
+
+## 現在の制約
+
+- Workspace shellが扱うのは**Static Webペインのみ**です。native/processペインは名前付きで拒否され、surface hostが必要です（本リリースの範囲外）。
+- Checkpointが復元するのはペインのデータ、分割、アクティブペインです。アプリ内のスクロール位置やテキスト選択は復元されません。
+- サンプルのTask Boardには小さなlegacy local-state移行が残っています。ウォークスルーで意味を持つデータとレイアウトは、宣言されたoperation側です。
+- live writerの引き継ぎには共有Coordinatorが必要です。checkpointを別ホストへコピーするのは、オフラインでの継続という別の操作です。
+- このウォークスルーに本番サービスは不要で、GitHubのリリースダウンロード以外の外部接続はありません。
 
 ## ドキュメント
 
-一般的な利用者向けドキュメントは[ato.runのドキュメント](https://ato.run/docs/)が所有します。このリポジトリはランタイム、CLI、仕様、運用の技術ドキュメントを所有します（[ドキュメント目次](docs/README.md)）。
+- [クイックスタートのウォークスルー](docs/guides/quick-start-first-workspace.md)
+- [Getting started / ソースからのビルド](docs/guides/getting-started.md)
+- [3 OSの受入証跡と実測値](docs/ops/oss-quick-start-local-e2e-20261110.md)
+- [サンプルcapsuleのソースとbundle](https://github.com/ato-run/ato-samples)
+- [コンセプト](docs/concepts/) · [RFC](docs/rfcs/)
 
-- [Getting started](docs/guides/getting-started.md)・[Formationガイド](docs/guides/formation.md)
-- [基本概念](docs/concepts/computation.md)・[アプリケーション契約](docs/concepts/application-contracts.md)・[用語集](docs/glossary-reference.md)
-- [アーキテクチャ](docs/architecture/README.md)・[仕様](docs/specifications/README.md)
-- [Runnerとホスティング](docs/guides/runner-hosting.md)・[運用](docs/operations/README.md)・[ドキュメント目次](docs/README.md)
+## コントリビュート
 
-## 貢献とライセンス
-
-[貢献方法](CONTRIBUTING.md)と[GitHub issues](https://github.com/ato-run/ato/issues)を参照してください。
-
-プロジェクトが作成したコードは[Mozilla Public License 2.0](LICENSE)（`MPL-2.0`）で提供します。第三者のコード、依存ライブラリ、上流コードを含むパッチ、独自のライセンス表示がある資料には、それぞれの条件が引き続き適用されます。例えば、CPythonのfixture、WiXテンプレート、リリースワークフローは上流のライセンスを、AODDスキルはMITライセンスを維持します。CLIの[Apacheライセンス本文](apps/cli/LICENSE-APACHE)はWiXテンプレートおよび過去に配布されたバージョンのために保持しています。過去に付与されたライセンスは引き続き有効です。
-
-このコードのライセンスは、Capsule Process Modelの理論文書に新たなライセンスを付与するものではありません。
-
-<!-- Compatibility anchors from the previous documentation entry. -->
-<a id="ato"></a>
-<a id="主なユースケース"></a>
-<a id="設計原則everything-can-be-a-capsule"></a>
-<a id="コアモデル"></a>
-<a id="capsule--run--replay--continue"></a>
-<a id="core--kernel-と-adapter"></a>
-<a id="materialization"></a>
-<a id="背景にある計算理論"></a>
-<a id="基本ライフサイクル"></a>
-<a id="capsuletoml-の例"></a>
-<a id="プロジェクトのスコープ"></a>
-<a id="現在の実装状態"></a>
-<a id="capsule-run-replay-continue"></a>
-<a id="core-kernel-と-adapter"></a>
-<a id="設計原則：everything-can-be-a-capsule"></a>
+IssueとPull Requestを歓迎します。リポジトリの流れは`feature branch → dev → stg → main`です。ローカルの確認方法は上記のガイドを参照してください。

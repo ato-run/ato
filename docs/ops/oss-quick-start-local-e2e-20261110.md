@@ -1,8 +1,10 @@
 # OSS quick start: local 3-app workspace acceptance (2026-11-10)
 
-Status: **local verification only**. The CLI install and the Windows/Linux hosts
-are still pending (H1 CI, T1), so this records what the workspace lifecycle
-already does with the development binary on macOS.
+Status: **verified through the published releases**. This file began as the
+macOS development-binary log; the later sections record the Linux and Windows
+x86_64 runs, the v0.9.0/v0.9.1 release artifacts, the 74-second public demo and
+the acceptance numbers used by the README. Where an early section says a host is
+pending, the later section supersedes it; the raw logs are kept as written.
 
 ## Setup
 
@@ -325,3 +327,29 @@ by these release numbers.
 - **Linux x86_64 release binary** (`ato-cli-x86_64-unknown-linux-gnu.tar.xz`): `ato 0.9.0`, workspace present; acceptance **PASS** (open 593 ms / resume 622 ms).
 - **Windows x86_64 MSI** release artifact: installed (1,181 ms), acceptance PASS (open 3,534 ms / resume 3,949 ms), 90-second flow ≈18.5 s machine-attributable.
 - **Bundle CI gate**: `quick-start-bundle.yml` ran on `ato-samples` main with v0.9.0 available; the verification step that opens the built bundle with the released CLI passed. The CI-built bundle and the published Windows-built bundle have **identical capsule SHA-256s** (`2c1fafd1…`, `a47f8c9c…`, `c42477d4…`); only tar metadata differs.
+
+## Demo recording environment (2026-11-11)
+
+The public 74-second demo was recorded from the published artifacts, not from
+a development build:
+
+- **Host**: macOS arm64 (Darwin `15.8.1`), real Google Chrome
+  driven by Playwright; the shell and its three iframes were served by the
+  `ato workspace open --local-data` process.
+- **CLI**: `ato 0.9.1` release binary
+  (`ato-cli-aarch64-apple-darwin.tar.xz`, downloaded from the v0.9.1 release).
+- **Bundle**: `ato-oss-quick-start-v0.9.1.tar.gz` from the `ato-samples` v0.9.1
+  release, SHA-256 `8fe7e38656fd2ab345e56ee6ae73c59cb03fdf38304f57c87a7e0744951e84ab`.
+- **Method**: two browser sessions — session 1 edits the whiteboard, adds a task
+  with a due date, reloads the Calendar pane so it re-reads the projection,
+  presses Checkpoint and Stop and saves the checkpoint; session 2 launches with
+  `--checkpoint` and shows the restored task, calendar entries and split. Raw
+  WebM was captured at 1440x900/30 fps and edited to 74 s by adding title,
+  OS/closing cards and captions (no speed change, no synthetic app states).
+- **Observed during recording**: the Calendar pane showed the added due date
+  after its reload, and the resumed Task Board reported `同期準備完了` with the
+  same two tasks; the restored split was `[0.4, 0.3, 0.3]`.
+- **Artifact**: `ato-quick-start-demo-v0.9.1.mp4`
+  (https://github.com/ato-run/ato-samples/releases/download/v0.9.1/ato-quick-start-demo-v0.9.1.mp4),
+  SHA-256 `8fb85dfd52e587586ff522c5de3722dcbbd1d5b73fb4eedb51244738a575140e`,
+  duration 74.3 s.
