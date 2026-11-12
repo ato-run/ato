@@ -413,7 +413,7 @@ impl HttpRelayTransport {
         path: &str,
         body: Option<&str>,
     ) -> Result<(u16, String), RelayError> {
-        use std::io::{Read, Write};
+        use std::io::{BufRead, BufReader, Read, Write};
         let address = self
             .base
             .strip_prefix("http://")
@@ -429,37 +429,102 @@ impl HttpRelayTransport {
             .ok();
         let payload = body.unwrap_or("");
         let request = format!(
-            "{method} {path} HTTP/1.1
-Host: {host}
-Authorization: Bearer {}
-Content-Type: application/json
-Content-Length: {}
-Connection: close
-
-{payload}",
+            "{method} {path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
             self.token,
             payload.len()
         );
         stream
             .write_all(request.as_bytes())
             .map_err(|_| RelayError::Unavailable)?;
-        let mut response = String::new();
-        stream
-            .read_to_string(&mut response)
+        // Read the response ourselves instead of `read_to_string`: a keep-alive
+        // connection (or a 204 with no body) never reaches EOF, so waiting for
+        // one silently turns every poll into a read timeout and the relay loop
+        // stalls. Parse the status line and the framing headers, then read
+        // exactly the body the server framed.
+        let mut reader = BufReader::new(stream.try_clone().map_err(|_| RelayError::Unavailable)?);
+        let mut status_line = String::new();
+        reader
+            .read_line(&mut status_line)
             .map_err(|_| RelayError::Unavailable)?;
-        let status = response
+        let status = status_line
             .split_whitespace()
             .nth(1)
             .and_then(|code| code.parse::<u16>().ok())
             .ok_or(RelayError::Unavailable)?;
-        let body = if let Some(index) = response.find("\r\n\r\n") {
-            response[index + 4..].to_owned()
-        } else if let Some(index) = response.find("\n\n") {
-            response[index + 2..].to_owned()
+        let mut content_length: Option<usize> = None;
+        let mut chunked = false;
+        loop {
+            let mut line = String::new();
+            let read = reader
+                .read_line(&mut line)
+                .map_err(|_| RelayError::Unavailable)?;
+            if read == 0 {
+                break;
+            }
+            let header = line.trim_end_matches(['\r', '\n']);
+            if header.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = header.split_once(':') {
+                let name = name.trim().to_ascii_lowercase();
+                let value = value.trim();
+                if name == "content-length" {
+                    content_length = value.parse::<usize>().ok();
+                } else if name == "transfer-encoding"
+                    && value.to_ascii_lowercase().contains("chunked")
+                {
+                    chunked = true;
+                }
+            }
+        }
+        if status == 204 || status == 304 {
+            return Ok((status, String::new()));
+        }
+        let mut body_bytes: Vec<u8> = Vec::new();
+        if chunked {
+            loop {
+                let mut size_line = String::new();
+                reader
+                    .read_line(&mut size_line)
+                    .map_err(|_| RelayError::Unavailable)?;
+                let size_text = size_line.trim();
+                let size =
+                    usize::from_str_radix(size_text.split(';').next().unwrap_or("0").trim(), 16)
+                        .map_err(|_| RelayError::Unavailable)?;
+                if size == 0 {
+                    loop {
+                        let mut trailer = String::new();
+                        let read = reader
+                            .read_line(&mut trailer)
+                            .map_err(|_| RelayError::Unavailable)?;
+                        if read == 0 || trailer.trim().is_empty() {
+                            break;
+                        }
+                    }
+                    break;
+                }
+                let mut chunk = vec![0u8; size];
+                reader
+                    .read_exact(&mut chunk)
+                    .map_err(|_| RelayError::Unavailable)?;
+                body_bytes.extend_from_slice(&chunk);
+                let mut crlf = [0u8; 2];
+                reader
+                    .read_exact(&mut crlf)
+                    .map_err(|_| RelayError::Unavailable)?;
+            }
+        } else if let Some(length) = content_length {
+            let mut buf = vec![0u8; length];
+            reader
+                .read_exact(&mut buf)
+                .map_err(|_| RelayError::Unavailable)?;
+            body_bytes = buf;
         } else {
-            String::new()
-        };
-        Ok((status, body))
+            reader
+                .read_to_end(&mut body_bytes)
+                .map_err(|_| RelayError::Unavailable)?;
+        }
+        Ok((status, String::from_utf8_lossy(&body_bytes).into_owned()))
     }
 }
 
