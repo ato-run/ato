@@ -12,6 +12,11 @@
 //!   authorization value or the body;
 //! - the origin is the only authority: every envelope is re-authorized here,
 //!   not by the relay;
+//! - the relay is data-only: an envelope must present the relay data
+//!   capability, never the Coordinator admin bearer, and it can reach the
+//!   data routes alone;
+//! - a replayed `request_id` is answered from its recorded receipt instead of
+//!   being applied a second time;
 //! - fencing: an envelope for another `origin_epoch` is refused, so a replaced
 //!   authority cannot be spoken to.
 
@@ -21,8 +26,8 @@ use hyper::Method;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
-use crate::Coordinator;
-use crate::http::{ApiState, handle_request};
+use crate::http::{ApiState, handle_relay_data_request};
+use crate::{Coordinator, RelayReceipt};
 
 pub const RELAY_ENVELOPE_SCHEMA: &str = "ato.relay-envelope/1";
 
@@ -71,24 +76,42 @@ impl std::fmt::Display for RelayError {
 
 /// The origin side: validates the envelope and dispatches it through the same
 /// HTTP surface a local client uses.
+///
+/// The origin holds no admin bearer. An envelope is admitted only when it
+/// presents the relay-only data capability, and it then reaches the data
+/// routes alone.
 pub struct Origin {
     pub epoch: i64,
     state: ApiState,
+    /// SHA-256 of the relay data capability; the secret itself is not kept.
+    data_capability: [u8; 32],
 }
 
 impl Origin {
-    pub fn new(coordinator: Coordinator, epoch: i64, token: String) -> Self {
+    pub fn new(coordinator: Coordinator, epoch: i64, data_token: String) -> Self {
         let (shutdown, _receiver) = watch::channel(false);
         Self {
             epoch,
+            data_capability: digest(&data_token),
             state: ApiState {
                 coordinator: Mutex::new(coordinator),
-                token,
+                // The relay never accepts the admin bearer, so this state
+                // carries no usable admin token.
+                token: String::new(),
                 shutdown,
                 apps: None,
                 workspace: Vec::new(),
             },
         }
+    }
+
+    /// Whether the envelope presented the relay data capability. A missing or
+    /// different bearer - including the admin API bearer - is not enough.
+    fn presents_data_capability(&self, authorization: Option<&str>) -> bool {
+        let Some(presented) = authorization.and_then(|value| value.strip_prefix("Bearer ")) else {
+            return false;
+        };
+        constant_time_eq(&digest(presented), &self.data_capability)
     }
 
     pub async fn handle(&self, request: RelayRequest) -> RelayResponse {
@@ -100,6 +123,14 @@ impl Origin {
         };
         if request.schema != RELAY_ENVELOPE_SCHEMA {
             return refuse(400, "invalid_envelope");
+        }
+        if request.request_id.is_empty() || request.request_id.len() > 128 {
+            return refuse(400, "invalid_request_id");
+        }
+        // The capability is verified before anything is dispatched. The admin
+        // bearer is not a substitute and is never compared here.
+        if !self.presents_data_capability(request.authorization.as_deref()) {
+            return refuse(401, "relay_data_capability_invalid");
         }
         if request.origin_epoch != self.epoch {
             return refuse(409, "origin_epoch_mismatch");
@@ -115,19 +146,39 @@ impl Origin {
             "DELETE" => Method::DELETE,
             _ => return refuse(400, "invalid_method"),
         };
-        let response = handle_request(
-            &self.state,
-            &method,
-            &request.path,
-            request.authorization.as_deref(),
-            request.body.as_bytes(),
-        )
-        .await;
+        let request_digest = request_digest(&request);
+        match self.receipt(&request.request_id) {
+            Ok(Some(receipt)) => {
+                if receipt.request_digest != request_digest {
+                    return refuse(409, "relay_request_id_conflict");
+                }
+                return RelayResponse {
+                    schema: RELAY_ENVELOPE_SCHEMA.to_owned(),
+                    request_id: request.request_id,
+                    status: receipt.status,
+                    body: receipt.body,
+                };
+            }
+            Ok(None) => {}
+            Err(()) => return refuse(503, "relay_receipt_unavailable"),
+        }
+        let response =
+            handle_relay_data_request(&self.state, &method, &request.path, request.body.as_bytes())
+                .await;
         let status = response.status().as_u16();
         let body = http_body_util::BodyExt::collect(response.into_body())
             .await
             .map(|collected| String::from_utf8_lossy(&collected.to_bytes()).into_owned())
             .unwrap_or_default();
+        if status < 500
+            && self
+                .record(&request.request_id, &request_digest, status, &body)
+                .is_err()
+        {
+            // The decision executed but could not be recorded. Claiming
+            // success would let a redelivery apply it a second time.
+            return refuse(503, "relay_receipt_unavailable");
+        }
         RelayResponse {
             schema: RELAY_ENVELOPE_SCHEMA.to_owned(),
             request_id: request.request_id,
@@ -135,6 +186,62 @@ impl Origin {
             body,
         }
     }
+
+    fn receipt(&self, request_id: &str) -> Result<Option<RelayReceipt>, ()> {
+        let coordinator = self.state.coordinator.lock().map_err(|_| ())?;
+        coordinator.relay_receipt(request_id).map_err(|_| ())
+    }
+
+    fn record(
+        &self,
+        request_id: &str,
+        request_digest: &str,
+        status: u16,
+        body: &str,
+    ) -> Result<(), ()> {
+        let mut coordinator = self.state.coordinator.lock().map_err(|_| ())?;
+        coordinator
+            .record_relay_receipt(request_id, request_digest, status, body)
+            .map_err(|_| ())
+    }
+}
+
+/// SHA-256 of a capability. Hashing both sides first means the comparison
+/// always runs over 32 bytes and the secret length never changes the work.
+fn digest(value: &str) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(value.as_bytes());
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
+/// Compare two capability digests without an early return on the first
+/// differing byte.
+fn constant_time_eq(left: &[u8; 32], right: &[u8; 32]) -> bool {
+    let mut difference = 0u8;
+    for (left, right) in left.iter().zip(right.iter()) {
+        difference |= left ^ right;
+    }
+    difference == 0
+}
+
+/// The identity of a request for replay detection. The authorization value is
+/// deliberately excluded: a retried envelope with a rotated capability is the
+/// same request, and the capability itself is never stored.
+fn request_digest(request: &RelayRequest) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"ato.relay-request/1");
+    hasher.update([0]);
+    hasher.update(request.origin_epoch.to_le_bytes());
+    hasher.update([0]);
+    hasher.update(request.method.as_bytes());
+    hasher.update([0]);
+    hasher.update(request.path.as_bytes());
+    hasher.update([0]);
+    hasher.update(request.body.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 /// Minimal newline-delimited transport for a locally reachable relay.
@@ -401,7 +508,7 @@ mod tests {
         Origin::new(
             Coordinator::open_in_memory().unwrap(),
             7,
-            "test-token".into(),
+            "data-token".into(),
         )
     }
 
@@ -413,7 +520,7 @@ mod tests {
             method: method.into(),
             path: path.into(),
             body: body.into(),
-            authorization: Some("Bearer test-token".into()),
+            authorization: Some("Bearer data-token".into()),
             encryption: None,
         }
     }
@@ -450,11 +557,11 @@ mod tests {
     #[tokio::test]
     async fn the_loop_answers_with_the_origin_decision() {
         let origin = origin();
-        let mut stale = request("GET", "/health", "");
+        let mut stale = request("GET", "/v1/data-resources", "");
         stale.request_id = "req-2".into();
         stale.origin_epoch = 6;
         let mut relay = MemoryRelay {
-            queue: vec![request("GET", "/health", ""), stale],
+            queue: vec![request("GET", "/v1/data-resources", ""), stale],
             ..MemoryRelay::default()
         };
         let mut loop_ = RelayLoop::new();
@@ -538,7 +645,7 @@ mod tests {
                             "method": "POST",
                             "path": "/v1/data-resources",
                             "body": r#"{"protocol":"todo.board@1","document":{}}"#,
-                            "authorization": "Bearer test-token"
+                            "authorization": "Bearer data-token"
                         });
                         writeln!(writer, "{envelope}").unwrap();
                     } else {
@@ -594,35 +701,51 @@ mod tests {
 
     #[tokio::test]
     async fn refuses_a_malformed_envelope() {
-        let mut envelope = request("GET", "/health", "");
+        let origin = origin();
+        let mut envelope = request("GET", "/v1/data-resources", "");
         envelope.schema = "ato.relay-envelope/2".into();
-        assert_eq!(origin().handle(envelope).await.status, 400);
-        let mut envelope = request("PUT", "/health", "");
+        assert_eq!(origin.handle(envelope).await.status, 400);
+        let mut envelope = request("GET", "/v1/data-resources", "");
+        envelope.request_id.clear();
+        assert_eq!(origin.handle(envelope).await.status, 400);
+        let mut envelope = request("PUT", "/v1/data-resources", "");
         envelope.method = "PUT".into();
-        assert_eq!(origin().handle(envelope).await.status, 400);
+        assert_eq!(origin.handle(envelope).await.status, 400);
     }
 
     #[tokio::test]
-    async fn the_relay_cannot_bypass_origin_authorization() {
+    async fn an_envelope_must_present_the_data_capability() {
+        let origin = origin();
         let mut envelope = request("GET", "/v1/data-resources", "");
         envelope.authorization = None;
-        assert_eq!(origin().handle(envelope).await.status, 401);
-        let mut envelope = request("GET", "/v1/data-resources", "");
-        envelope.authorization = Some("Bearer wrong".into());
-        assert_eq!(origin().handle(envelope).await.status, 401);
+        let response = origin.handle(envelope).await;
+        assert_eq!(response.status, 401);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&response.body).unwrap()["error"],
+            "relay_data_capability_invalid"
+        );
+
+        for bearer in [
+            "Bearer wrong",
+            "Bearer test-token",
+            "data-token",
+            "bearer data-token",
+        ] {
+            let mut envelope = request("GET", "/v1/data-resources", "");
+            envelope.authorization = Some(bearer.into());
+            let response = origin.handle(envelope).await;
+            assert_eq!(response.status, 401, "{bearer}");
+            assert!(
+                response.body.contains("relay_data_capability_invalid"),
+                "{bearer}: {}",
+                response.body
+            );
+        }
     }
 
     #[tokio::test]
-    async fn dispatches_an_authorized_request_through_the_local_surface() {
+    async fn dispatches_a_data_request_through_the_local_surface() {
         let origin = origin();
-        let response = origin.handle(request("GET", "/health", "")).await;
-        assert_eq!(response.status, 200);
-        assert!(
-            response.body.contains("\"status\":\"ok\""),
-            "{}",
-            response.body
-        );
-
         let created = origin
             .handle(request(
                 "POST",
@@ -632,6 +755,77 @@ mod tests {
             .await;
         assert_eq!(created.status, 201);
         assert!(created.body.contains("resource_id"), "{}", created.body);
+        assert!(created.body.contains("\"revision\":1"), "{}", created.body);
+        assert!(created.body.contains("content_digest"), "{}", created.body);
+
+        let body: serde_json::Value = serde_json::from_str(&created.body).unwrap();
+        let resource_id = body["resource_id"].as_str().unwrap();
+        let mut read_request = request("GET", &format!("/v1/data-resources/{resource_id}"), "");
+        read_request.request_id = "req-read".into();
+        let read = origin.handle(read_request).await;
+        assert_eq!(read.status, 200);
+        assert!(read.body.contains(resource_id), "{}", read.body);
+    }
+
+    #[tokio::test]
+    async fn the_data_capability_cannot_reach_administrative_routes() {
+        let origin = origin();
+        for (index, (method, path)) in [
+            ("GET", "/health"),
+            ("POST", "/control/shutdown"),
+            ("GET", "/v1/data-resources/export"),
+            ("GET", "/v1/data-resources/quota"),
+            ("GET", "/v1/data-resources/abc/export"),
+            ("POST", "/mcp"),
+            ("GET", "/v1/bindings"),
+            ("POST", "/v1/protocols/todo.board@1/operations"),
+            ("GET", "/apps/whoever"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut envelope = request(method, path, "{}");
+            envelope.request_id = format!("scope-{index}");
+            let response = origin.handle(envelope).await;
+            assert_eq!(response.status, 403, "{method} {path}");
+            assert!(
+                response.body.contains("relay_capability_scope_exceeded"),
+                "{method} {path}: {}",
+                response.body
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_replayed_request_id_is_not_applied_twice() {
+        let origin = origin();
+        let create = || {
+            request(
+                "POST",
+                "/v1/data-resources",
+                r#"{"protocol":"todo.board@1","document":{"tasks":{"t1":{"id":"t1"}}}}"#,
+            )
+        };
+        let first = origin.handle(create()).await;
+        assert_eq!(first.status, 201);
+        let second = origin.handle(create()).await;
+        assert_eq!(second, first);
+        {
+            let coordinator = origin.state.coordinator.lock().unwrap();
+            assert_eq!(coordinator.list_resources("local").unwrap().len(), 1);
+        }
+
+        let mut conflicting = create();
+        conflicting.body = r#"{"protocol":"todo.board@1","document":{"tasks":{}}}"#.into();
+        let response = origin.handle(conflicting).await;
+        assert_eq!(response.status, 409);
+        assert!(
+            response.body.contains("relay_request_id_conflict"),
+            "{}",
+            response.body
+        );
+        let coordinator = origin.state.coordinator.lock().unwrap();
+        assert_eq!(coordinator.list_resources("local").unwrap().len(), 1);
     }
 
     #[test]
@@ -762,23 +956,23 @@ Connection: close
     #[tokio::test]
     async fn refuses_an_encryption_mode_it_cannot_verify() {
         let origin = origin();
-        let mut e2ee = request("GET", "/health", "");
+        let mut e2ee = request("GET", "/v1/data-resources", "");
         e2ee.encryption = Some("e2ee".into());
         let response = origin.handle(e2ee).await;
         assert_eq!(response.status, 422);
         assert!(response.body.contains("encryption_mode_unsupported"));
 
-        let mut recoverable = request("GET", "/health", "");
+        let mut recoverable = request("GET", "/v1/data-resources", "");
         recoverable.encryption = Some("recoverable".into());
         assert_eq!(origin.handle(recoverable).await.status, 422);
 
-        let mut unknown = request("GET", "/health", "");
+        let mut unknown = request("GET", "/v1/data-resources", "");
         unknown.encryption = Some("rot13".into());
         let response = origin.handle(unknown).await;
         assert_eq!(response.status, 400);
         assert!(response.body.contains("invalid_encryption_mode"));
 
-        let mut plain = request("GET", "/health", "");
+        let mut plain = request("GET", "/v1/data-resources", "");
         plain.encryption = Some("none".into());
         assert_eq!(origin.handle(plain).await.status, 200);
     }
