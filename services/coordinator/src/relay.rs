@@ -414,6 +414,12 @@ impl HttpRelayTransport {
         body: Option<&str>,
     ) -> Result<(u16, String), RelayError> {
         use std::io::{BufRead, BufReader, Read, Write};
+        // A hosted relay in production is https. The raw TcpStream path below
+        // stays for the local/http relay (and its framing tests); https goes
+        // through the same HTTP client the CLI already uses.
+        if self.base.starts_with("https://") {
+            return self.request_https(method, path, body);
+        }
         let address = self
             .base
             .strip_prefix("http://")
@@ -525,6 +531,38 @@ impl HttpRelayTransport {
                 .map_err(|_| RelayError::Unavailable)?;
         }
         Ok((status, String::from_utf8_lossy(&body_bytes).into_owned()))
+    }
+
+    /// https relay calls, through the rustls client the CLI already depends on.
+    ///
+    /// Same contract as the http path: the origin token travels in the
+    /// Authorization header, the body is the opaque envelope, and every
+    /// transport problem is Unavailable (the loop backs off, nothing executes).
+    fn request_https(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+    ) -> Result<(u16, String), RelayError> {
+        use std::time::Duration;
+        let url = format!("{}{}", self.base, path);
+        let parsed =
+            reqwest::Method::from_bytes(method.as_bytes()).map_err(|_| RelayError::Unavailable)?;
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|_| RelayError::Unavailable)?;
+        let mut request = client
+            .request(parsed, &url)
+            .header("authorization", format!("Bearer {}", self.token))
+            .header("content-type", "application/json");
+        if let Some(payload) = body {
+            request = request.body(payload.to_owned());
+        }
+        let response = request.send().map_err(|_| RelayError::Unavailable)?;
+        let status = response.status().as_u16();
+        let text = response.text().map_err(|_| RelayError::Unavailable)?;
+        Ok((status, text))
     }
 }
 
