@@ -1,6 +1,6 @@
 [package]
 name = "ato-compose"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 license = "MPL-2.0"
 description = "Concrete small-step composition semantics for Ato computations"
@@ -15,9 +15,9 @@ layer = "compose"
 
 [dependencies]
 blake3 = "1.5"
-ato-computation = { path = "../computation", version = "0.1.0" }
-ato-kernel = { path = "../kernel", version = "0.1.0" }
-ato-objects = { path = "../objects", version = "0.1.0" }
+ato-computation = { path = "../computation", version = "1.0.0" }
+ato-kernel = { path = "../kernel", version = "1.0.0" }
+ato-objects = { path = "../objects", version = "1.0.0" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_jcs = "0.1"

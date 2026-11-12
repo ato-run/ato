@@ -1,6 +1,6 @@
 [package]
 name = "ato-kernel"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 license = "MPL-2.0"
 description = "Minimal transition kernel for addressable Ato computations"
@@ -14,9 +14,9 @@ dist = false
 layer = "kernel"
 
 [dependencies]
-ato-computation = { path = "../computation", version = "0.1.0" }
-ato-objects = { path = "../objects", version = "0.1.0" }
+ato-computation = { path = "../computation", version = "1.0.0" }
+ato-objects = { path = "../objects", version = "1.0.0" }
 thiserror = "2.0"
 
 [dev-dependencies]
-ato-compose = { path = "../compose", version = "0.1.0" }
+ato-compose = { path = "../compose", version = "1.0.0" }

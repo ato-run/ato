@@ -1,6 +1,6 @@
 [package]
 name = "ato-materializer-browser"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 license = "MPL-2.0"
 description = "Portable browser localStorage materialization descriptors for Ato"
@@ -12,8 +12,8 @@ dist = false
 layer = "app"
 
 [dependencies]
-ato-computation = { path = "../../../lib/computation", version = "0.1.0" }
-ato-objects = { path = "../../../lib/objects", version = "0.1.0" }
+ato-computation = { path = "../../../lib/computation", version = "1.0.0" }
+ato-objects = { path = "../../../lib/objects", version = "1.0.0" }
 serde = { version = "1", features = ["derive"] }
 serde_jcs = "0.1"
 serde_json = "1"

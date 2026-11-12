@@ -1,6 +1,6 @@
 [package]
 name = "ato-formation-worker"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 description = "Executes Formation jobs in an isolated build sandbox"
 license = "MPL-2.0"
@@ -17,20 +17,20 @@ name = "ato-formation-worker"
 path = "src/bin/ato-formation-worker.rs"
 
 [dependencies]
-ato-adapter-api = { path = "../../extensions/adapters/api", version = "0.1.0" }
-ato-portable-application = { path = "../portable-application", version = "0.1.0" }
-ato-adapter-oci = { path = "../../extensions/adapters/oci", version = "0.1.0" }
+ato-adapter-api = { path = "../../extensions/adapters/api", version = "1.0.0" }
+ato-portable-application = { path = "../portable-application", version = "1.0.0" }
+ato-adapter-oci = { path = "../../extensions/adapters/oci", version = "1.0.0" }
 anyhow = "1"
-ato-adapter-process = { path = "../../extensions/adapters/process", version = "0.1.0" }
-ato-formation = { path = "../../lib/formation", version = "0.1.0" }
-ato-ipc = { path = "../../lib/ipc", version = "0.1.0" }
-ato-materializer-static-web = { path = "../../extensions/materializers/static-web", version = "0.1.0" }
-ato-objects = { path = "../../lib/objects", version = "0.1.0" }
-ato-runtime-attempt = { path = "../../lib/runtime-attempt", version = "0.1.0" }
-ato-sandbox = { path = "../../lib/sandbox", version = "0.1.0" }
+ato-adapter-process = { path = "../../extensions/adapters/process", version = "1.0.0" }
+ato-formation = { path = "../../lib/formation", version = "1.0.0" }
+ato-ipc = { path = "../../lib/ipc", version = "1.0.0" }
+ato-materializer-static-web = { path = "../../extensions/materializers/static-web", version = "1.0.0" }
+ato-objects = { path = "../../lib/objects", version = "1.0.0" }
+ato-runtime-attempt = { path = "../../lib/runtime-attempt", version = "1.0.0" }
+ato-sandbox = { path = "../../lib/sandbox", version = "1.0.0" }
 clap = { version = "4.5", features = ["derive", "env"] }
 libc = "0.2"
-netd = { path = "../../services/netd", version = "0.5.2" }
+netd = { path = "../../services/netd", version = "1.0.0" }
 fs2 = "0.4"
 flate2 = "1"
 httpdate = "1"
@@ -44,7 +44,7 @@ tar = "0.4"
 tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
-ato-connected-realization-worker = { path = "../connected-realization-worker", version = "0.1.0" }
+ato-connected-realization-worker = { path = "../connected-realization-worker", version = "1.0.0" }
 
 [dev-dependencies]
 tar = "0.4"

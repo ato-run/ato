@@ -1,6 +1,6 @@
 [package]
 name = "ato-realization-planner"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 license = "MPL-2.0"
 description = "Explicit Realization path planner for Ato"
@@ -12,11 +12,11 @@ dist = false
 layer = "planner"
 
 [dependencies]
-ato-adapter-api = { path = "../adapters/api", version = "0.1.0" }
-ato-computation = { path = "../../lib/computation", version = "0.1.0" }
-ato-materializer-api = { path = "../materializers/api", version = "0.1.0" }
-ato-player = { path = "../player", version = "0.1.0" }
+ato-adapter-api = { path = "../adapters/api", version = "1.0.0" }
+ato-computation = { path = "../../lib/computation", version = "1.0.0" }
+ato-materializer-api = { path = "../materializers/api", version = "1.0.0" }
+ato-player = { path = "../player", version = "1.0.0" }
 thiserror = "2"
 
 [dev-dependencies]
-ato-objects = { path = "../../lib/objects", version = "0.1.0" }
+ato-objects = { path = "../../lib/objects", version = "1.0.0" }

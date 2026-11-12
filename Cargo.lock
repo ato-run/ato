@@ -97,7 +97,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "arch-check"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "cargo_metadata",
@@ -143,7 +143,7 @@ dependencies = [
 
 [[package]]
 name = "ato-adapter-api"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ato-computation",
  "ato-objects",
@@ -156,7 +156,7 @@ dependencies = [
 
 [[package]]
 name = "ato-adapter-binding"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ato-adapter-api",
  "ato-computation",
@@ -168,7 +168,7 @@ dependencies = [
 
 [[package]]
 name = "ato-adapter-browser"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ato-adapter-api",
  "ato-computation",
@@ -187,7 +187,7 @@ dependencies = [
 
 [[package]]
 name = "ato-adapter-http"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ato-adapter-api",
  "ato-computation",
@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "ato-adapter-oci"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "rustix",
@@ -215,7 +215,7 @@ dependencies = [
 
 [[package]]
 name = "ato-adapter-process"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ato-adapter-api",
  "rustix",
@@ -227,7 +227,7 @@ dependencies = [
 
 [[package]]
 name = "ato-adapter-pty"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ato-adapter-api",
  "ato-computation",
@@ -239,7 +239,7 @@ dependencies = [
 
 [[package]]
 name = "ato-adapter-workspace"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ato-adapter-api",
  "ato-computation",
@@ -253,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "ato-browser-host"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "ato-adapter-api",
@@ -268,7 +268,7 @@ dependencies = [
 
 [[package]]
 name = "ato-browser-semantics"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ato-adapter-api",
  "ato-adapter-browser",
@@ -284,7 +284,7 @@ dependencies = [
 
 [[package]]
 name = "ato-cert-export"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -295,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "ato-cli"
-version = "0.9.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -355,7 +355,7 @@ dependencies = [
 
 [[package]]
 name = "ato-compose"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ato-computation",
  "ato-kernel",
@@ -370,7 +370,7 @@ dependencies = [
 
 [[package]]
 name = "ato-computation"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "blake3",
  "hex",
@@ -382,7 +382,7 @@ dependencies = [
 
 [[package]]
 name = "ato-connected-realization-worker"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "ato-adapter-api",
@@ -436,7 +436,7 @@ dependencies = [
 
 [[package]]
 name = "ato-contracts"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ato-computation",
  "ato-materializer-api",
@@ -448,7 +448,7 @@ dependencies = [
 
 [[package]]
 name = "ato-coordinator"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bytes",
  "clap",
@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "ato-firecracker-guest-image"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "ato-adapter-api",
@@ -493,7 +493,7 @@ dependencies = [
 
 [[package]]
 name = "ato-formation"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -512,7 +512,7 @@ dependencies = [
 
 [[package]]
 name = "ato-formation-worker"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "ato-adapter-api",
@@ -544,7 +544,7 @@ dependencies = [
 
 [[package]]
 name = "ato-host-control"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "libc",
  "tempfile",
@@ -553,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "ato-host-facts"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -564,7 +564,7 @@ dependencies = [
 
 [[package]]
 name = "ato-ipc"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "dirs",
  "hex",
@@ -577,7 +577,7 @@ dependencies = [
 
 [[package]]
 name = "ato-kernel"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ato-compose",
  "ato-computation",
@@ -587,7 +587,7 @@ dependencies = [
 
 [[package]]
 name = "ato-local-execution"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "ato-adapter-api",
@@ -617,7 +617,7 @@ dependencies = [
 
 [[package]]
 name = "ato-local-runtime"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "ato-computation",
@@ -631,7 +631,7 @@ dependencies = [
 
 [[package]]
 name = "ato-materializer-api"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ato-adapter-api",
  "ato-computation",
@@ -644,7 +644,7 @@ dependencies = [
 
 [[package]]
 name = "ato-materializer-browser"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ato-computation",
  "ato-objects",
@@ -656,7 +656,7 @@ dependencies = [
 
 [[package]]
 name = "ato-materializer-replay"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ato-adapter-api",
  "ato-computation",
@@ -669,7 +669,7 @@ dependencies = [
 
 [[package]]
 name = "ato-materializer-snapshot"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ato-adapter-api",
  "ato-computation",
@@ -684,7 +684,7 @@ dependencies = [
 
 [[package]]
 name = "ato-materializer-static-web"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "ato-materializer-browser",
@@ -701,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "ato-materializer-vm-snapshot"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ato-adapter-api",
  "ato-computation",
@@ -719,7 +719,7 @@ dependencies = [
 
 [[package]]
 name = "ato-native-surface-gateway"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "ato-formation",
@@ -739,7 +739,7 @@ dependencies = [
 
 [[package]]
 name = "ato-objects"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ato-computation",
  "base64 0.22.1",
@@ -759,7 +759,7 @@ dependencies = [
 
 [[package]]
 name = "ato-player"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ato-adapter-api",
  "ato-computation",
@@ -769,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "ato-portable-application"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "ato-adapter-oci",
@@ -800,7 +800,7 @@ dependencies = [
 
 [[package]]
 name = "ato-realization-planner"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ato-adapter-api",
  "ato-computation",
@@ -812,7 +812,7 @@ dependencies = [
 
 [[package]]
 name = "ato-receipt-authority"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ato-formation",
  "serde",
@@ -822,7 +822,7 @@ dependencies = [
 
 [[package]]
 name = "ato-record-writer"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ato-adapter-api",
  "ato-computation",
@@ -836,7 +836,7 @@ dependencies = [
 
 [[package]]
 name = "ato-runtime-attempt"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "ato-adapter-api",
@@ -869,7 +869,7 @@ dependencies = [
 
 [[package]]
 name = "ato-runtime-image-ledger"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -879,7 +879,7 @@ dependencies = [
 
 [[package]]
 name = "ato-runtime-object-graph"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "ato-adapter-workspace",
@@ -903,7 +903,7 @@ dependencies = [
 
 [[package]]
 name = "ato-sandbox"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -918,7 +918,7 @@ dependencies = [
 
 [[package]]
 name = "ato-tls-observe"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "rustls 0.23.46",
  "rustls-pki-types",
@@ -1029,7 +1029,7 @@ dependencies = [
 
 [[package]]
 name = "capsulehub"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1702,7 +1702,7 @@ dependencies = [
 
 [[package]]
 name = "guest-agent"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ato-ipc",
  "libc",
@@ -2316,7 +2316,7 @@ dependencies = [
 
 [[package]]
 name = "netd"
-version = "0.5.2"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3300,7 +3300,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "snapshot-builder"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "ato-computation",

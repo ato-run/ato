@@ -1,7 +1,7 @@
 [package]
 license = "MPL-2.0"
 name = "arch-check"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 publish = false
 description = "Validate Ato package dependency architecture from cargo metadata"
