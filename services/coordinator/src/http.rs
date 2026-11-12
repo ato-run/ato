@@ -241,6 +241,38 @@ fn serve_served_app(
     })
 }
 
+/// Who proved the request may be served.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestPrincipal {
+    /// The caller presented the Coordinator admin bearer to the local API.
+    Admin,
+    /// A relay envelope presented the relay-only data capability. Only the
+    /// data routes are reachable; administrative, whole-state and app routes
+    /// stay local.
+    RelayData,
+}
+
+/// The routes the relay data capability may reach. Everything else (export,
+/// quota, MCP, control, app serving, protocol registration and binding
+/// listing) stays behind the local admin bearer.
+fn relay_data_route(method: &Method, path: &str) -> bool {
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match (method, segments.as_slice()) {
+        (&Method::POST, ["v1", "data-resources"]) => true,
+        (&Method::GET, ["v1", "data-resources"]) => true,
+        (&Method::GET, ["v1", "data-resources", id]) => !matches!(*id, "quota" | "export"),
+        (&Method::POST, ["v1", "data-resources", _, "operations"]) => true,
+        (&Method::POST, ["v1", "data-resources", _, "bindings"]) => true,
+        (&Method::GET, ["v1", "bindings", _, "document"]) => true,
+        (&Method::POST, ["v1", "bindings", _, "operations"]) => true,
+        (&Method::DELETE, ["v1", "bindings", _]) => true,
+        _ => false,
+    }
+}
+
+/// Handle one request. Kept independent of hyper body type so tests can call
+/// it directly with bytes. This entry point serves a caller that presents the
+/// Coordinator admin bearer.
 pub async fn handle_request(
     state: &ApiState,
     method: &Method,
@@ -248,6 +280,42 @@ pub async fn handle_request(
     authorization: Option<&str>,
     body: &[u8],
 ) -> Response<Body> {
+    handle_request_as(
+        state,
+        method,
+        path,
+        RequestPrincipal::Admin,
+        authorization,
+        body,
+    )
+    .await
+}
+
+/// Handle a request that arrived as a relay envelope which already proved the
+/// relay-only data capability. The admin bearer is never consulted here.
+pub async fn handle_relay_data_request(
+    state: &ApiState,
+    method: &Method,
+    path: &str,
+    body: &[u8],
+) -> Response<Body> {
+    handle_request_as(state, method, path, RequestPrincipal::RelayData, None, body).await
+}
+
+async fn handle_request_as(
+    state: &ApiState,
+    method: &Method,
+    path: &str,
+    principal: RequestPrincipal,
+    authorization: Option<&str>,
+    body: &[u8],
+) -> Response<Body> {
+    if principal == RequestPrincipal::RelayData && !relay_data_route(method, path) {
+        return json_response(
+            StatusCode::FORBIDDEN,
+            json!({ "error": "relay_capability_scope_exceeded" }),
+        );
+    }
     if method == Method::GET && path == "/health" {
         let resources = state
             .coordinator
@@ -278,7 +346,7 @@ pub async fn handle_request(
     {
         return response;
     }
-    if !authorized(authorization, &state.token) {
+    if principal == RequestPrincipal::Admin && !authorized(authorization, &state.token) {
         return json_response(StatusCode::UNAUTHORIZED, json!({ "error": "unauthorized" }));
     }
 
