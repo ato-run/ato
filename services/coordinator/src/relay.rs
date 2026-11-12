@@ -535,9 +535,12 @@ impl HttpRelayTransport {
 
     /// https relay calls, through the rustls client the CLI already depends on.
     ///
-    /// Same contract as the http path: the origin token travels in the
-    /// Authorization header, the body is the opaque envelope, and every
-    /// transport problem is Unavailable (the loop backs off, nothing executes).
+    /// The blocking client owns a private runtime, so it must be built and
+    /// dropped outside the relay command's tokio context (dropping one inside
+    /// an async context panics). The request therefore runs on a scoped helper
+    /// thread; the caller only waits for its result. Same contract as the http
+    /// path: origin token in Authorization, opaque envelope as the body, and
+    /// every transport problem is Unavailable so the loop backs off.
     fn request_https(
         &self,
         method: &str,
@@ -546,23 +549,33 @@ impl HttpRelayTransport {
     ) -> Result<(u16, String), RelayError> {
         use std::time::Duration;
         let url = format!("{}{}", self.base, path);
-        let parsed =
-            reqwest::Method::from_bytes(method.as_bytes()).map_err(|_| RelayError::Unavailable)?;
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|_| RelayError::Unavailable)?;
-        let mut request = client
-            .request(parsed, &url)
-            .header("authorization", format!("Bearer {}", self.token))
-            .header("content-type", "application/json");
-        if let Some(payload) = body {
-            request = request.body(payload.to_owned());
-        }
-        let response = request.send().map_err(|_| RelayError::Unavailable)?;
-        let status = response.status().as_u16();
-        let text = response.text().map_err(|_| RelayError::Unavailable)?;
-        Ok((status, text))
+        let token = self.token.clone();
+        let method = method.to_owned();
+        let payload = body.map(|value| value.to_owned());
+        std::thread::scope(|scope| {
+            scope
+                .spawn(move || -> Result<(u16, String), RelayError> {
+                    let parsed = reqwest::Method::from_bytes(method.as_bytes())
+                        .map_err(|_| RelayError::Unavailable)?;
+                    let client = reqwest::blocking::Client::builder()
+                        .timeout(Duration::from_secs(10))
+                        .build()
+                        .map_err(|_| RelayError::Unavailable)?;
+                    let mut request = client
+                        .request(parsed, &url)
+                        .header("authorization", format!("Bearer {token}"))
+                        .header("content-type", "application/json");
+                    if let Some(body) = payload {
+                        request = request.body(body);
+                    }
+                    let response = request.send().map_err(|_| RelayError::Unavailable)?;
+                    let status = response.status().as_u16();
+                    let text = response.text().map_err(|_| RelayError::Unavailable)?;
+                    Ok((status, text))
+                })
+                .join()
+                .map_err(|_| RelayError::Unavailable)?
+        })
     }
 }
 
