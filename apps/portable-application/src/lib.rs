@@ -1844,6 +1844,41 @@ fn build_native_bundle_inner(
     Ok((bytes, bundle))
 }
 
+/// The build-phase network a native **source** route needs.
+///
+/// The route kind itself determines this: a source route's build only reaches
+/// the pinned crate and source hosts this build defines, and there is no
+/// authored alternative. The profile validator still refuses any other
+/// host/port, and a bundle that does not declare the build phase at all is
+/// refused; the builder therefore states the one legitimate set instead of
+/// asking every manifest to repeat a constant it cannot vary.
+fn native_build_network(
+    route: &PortableDynamicRouteSpec,
+) -> Vec<ato_formation::requirements::NetworkRequirement> {
+    native_build_network_for(route.native.as_ref())
+}
+
+fn native_build_network_for(
+    native: Option<&PortableNativeRouteSpec>,
+) -> Vec<ato_formation::requirements::NetworkRequirement> {
+    let is_source_route = native.is_some_and(|native| {
+        native
+            .facts
+            .contains_key(ato_formation::native_desktop::NATIVE_SOURCE_URL_RUNTIME)
+    });
+    if !is_source_route {
+        return Vec::new();
+    }
+    ato_formation::native_desktop::NATIVE_BUILD_EGRESS_HOSTS
+        .iter()
+        .map(|host| ato_formation::requirements::NetworkRequirement {
+            phase: ato_formation::requirements::ExecutionPhase::Build,
+            host: (*host).to_owned(),
+            port: 443,
+        })
+        .collect()
+}
+
 pub fn build_dynamic_routes_bundle(
     source_root: &Path,
     spec: &PortableAuthoredBundleSpec,
@@ -2286,6 +2321,7 @@ fn bound_authored_derivation(
         requirements: ato_formation::requirements::ExecutionRequirements {
             host: route.host.clone(),
             startup: route.startup.clone(),
+            network: native_build_network(route),
             ..Default::default()
         },
         schema: BOUND_DERIVATION_SCHEMA.to_owned(),
@@ -7116,5 +7152,60 @@ start = "implicit"
                 .contains("TLS requirement does not target"),
             "{error}"
         );
+    }
+}
+
+#[cfg(test)]
+mod m2_source_build_network_tests {
+    use super::*;
+    fn draft(facts: &[(&str, &str)]) -> PortableNativeRouteSpec {
+        PortableNativeRouteSpec {
+            os: "macos".to_owned(),
+            arch: "aarch64".to_owned(),
+            entry: "solidcraft-cli".to_owned(),
+            artifact_path: None,
+            artifact: None,
+            format: Some("zip".to_owned()),
+            signature: None,
+            signature_target: None,
+            facts: facts
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect(),
+        }
+    }
+
+    /// A source route's build can only reach the pinned crate/source hosts, and
+    /// the profile validator refuses anything else. The builder states that one
+    /// set; the manifest never has to (and cannot) vary it.
+    #[test]
+    fn a_source_route_declares_the_fixed_build_egress() {
+        let route = draft(&[(
+            "ato.native.source_url",
+            "https://github.com/tangency-labs/solidcraft",
+        )]);
+        let network = native_build_network_for(Some(&route));
+        let hosts: Vec<&str> = network.iter().map(|entry| entry.host.as_str()).collect();
+        assert_eq!(
+            hosts,
+            ato_formation::native_desktop::NATIVE_BUILD_EGRESS_HOSTS.to_vec()
+        );
+        assert!(network.iter().all(|entry| entry.port == 443));
+        assert!(
+            network
+                .iter()
+                .all(|entry| entry.phase == ato_formation::requirements::ExecutionPhase::Build)
+        );
+    }
+
+    #[test]
+    fn a_remote_or_bundled_route_declares_no_build_egress() {
+        let remote = draft(&[(
+            "ato.native.remote_url",
+            "https://example.invalid/solidcraft.zip",
+        )]);
+        assert!(native_build_network_for(Some(&remote)).is_empty());
+        // A command route (no native draft at all) never gains build egress.
+        assert!(native_build_network_for(None).is_empty());
     }
 }
