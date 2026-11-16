@@ -137,3 +137,13 @@ cargo fmt -p ato-portable-application -- --check               # clean
   `runnable=false` on this workstation only because it cannot apply the
   Seatbelt policy (`native_sandbox_unavailable`).
 
+
+## 9. staging publish (2026-11-16)
+
+- `ato hub publish`（dev CLI、staging session）で `capsules/ato/solidcraft` を公開。
+  digest `sha256:1f1895ecdcff6a3cedbdc381ea769a6effb70e38d4945897fde8e2afa268e4ee`。
+- API detail: `capability_surfaces=["native_terminal"]`、`derivations` 2 件（`sha256:80118875…` / `sha256:97d008d7…`）、
+  `requires.platforms=["macos/aarch64"]`、`verification={state:"experimental", successful_runs:0}`。
+- ページ https://stg-app.ato.run/capsules/ato/solidcraft は 200 で描画され、
+  「ターミナル」「macos/aarch64」「実験的 / 成功した実行の報告はありません」を表示する。
+  成功 Run が 0 なのは**実機未検証だから**であり、run count は成功 Run のみで数える方針どおり。
