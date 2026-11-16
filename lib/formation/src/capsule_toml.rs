@@ -401,7 +401,7 @@ fn render_native_surface(
         let mut table = serde_json::json!({
             "kind": native.surface.kind(), "profile": native.surface.profile(),
             "width": width, "height": height, "port": port,
-            "probe_port": native.probe_port, "probe_path": path,
+            "probe_port": native.probe_port.clone(), "probe_path": path,
             "probe_keysyms": keysyms, "probe_max_frame_bytes": max_frame_bytes,
             "probe_timeout_ms": timeout_ms,
         });
@@ -448,7 +448,7 @@ fn render_native_surface(
         "cols": cols,
         "rows": rows,
         "port": port,
-        "probe_port": native.probe_port,
+        "probe_port": native.probe_port.clone(),
         "probe_path": path,
         "probe_input": text("probe_input", input)?,
         "probe_output_delimiter": text("probe_output_delimiter", output_delimiter)?,
@@ -687,7 +687,7 @@ fn read_native_surface(
     })?;
     let adapter = NativeSurfaceAdapter {
         surface,
-        probe_port: required_str(table, "probe_port", WHAT)?,
+        probe_port: Some(required_str(table, "probe_port", WHAT)?),
         operations: vec![NativeProbeOperation::TerminalExchange {
             path: required_str(table, "probe_path", WHAT)?,
             input: required_str(table, "probe_input", WHAT)?.into_bytes(),
@@ -776,7 +776,7 @@ fn read_pixel_surface(
     };
     let adapter = NativeSurfaceAdapter {
         surface,
-        probe_port: required_str(table, "probe_port", WHAT)?,
+        probe_port: Some(required_str(table, "probe_port", WHAT)?),
         operations: vec![NativeProbeOperation::PixelKeyFrame {
             path: required_str(table, "probe_path", WHAT)?,
             keysyms,

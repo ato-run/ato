@@ -789,6 +789,7 @@ impl PortableBundleExecutor<'_> {
             provenance: acquired.provenance,
             descriptor: &native.descriptor,
             ports: &native.ports,
+            terminal: native.terminal.as_ref(),
             workspace,
             runtime_root: self.runtime_root,
             state_paths,

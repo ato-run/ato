@@ -780,6 +780,7 @@ dependencies = [
  "ato-ipc",
  "ato-materializer-static-web",
  "ato-objects",
+ "ato-pty-host",
  "ato-runtime-attempt",
  "ato-sandbox",
  "ato-tls-observe",
@@ -796,6 +797,13 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+]
+
+[[package]]
+name = "ato-pty-host"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

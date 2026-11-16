@@ -83,6 +83,15 @@ pub const SCENARIO_CONTRACT_VERIFIER: &str = "ato.contract.scenario@1";
 /// certificate's validity. The presented leaf serial is evidence, not
 /// identity: it changes on every renewal.
 pub const TLS_CONTRACT_VERIFIER: &str = "ato.contract.tls@1";
+/// The terminal-exchange acceptance verifier: a declared, bounded exchange
+/// with a native Terminal surface completed.
+///
+/// K states the operation (`path`), the logical Terminal Port, and the digest
+/// the captured bytes must have when the author pins one. The bytes themselves,
+/// the delimiter and the deadline are the Adapter catalog's, not K's: this
+/// verifier adds no new transport, only an acceptance condition over the
+/// existing `terminal_exchange` observation.
+pub const TERMINAL_CONTRACT_VERIFIER: &str = "ato.contract.terminal@1";
 
 pub const BOUND_CONTRACT_SCHEMA: &str = "ato.contract/1";
 pub const BOUND_DERIVATION_SCHEMA: &str = "ato.derivation/1";

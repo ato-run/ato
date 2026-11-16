@@ -13,8 +13,8 @@ use serde::Deserialize;
 use crate::authoring::{
     BROWSER_PROTOCOL, ClientAddressTransport, EffectClass, PROCESS_PROTOCOL,
     SCENARIO_CONTRACT_VERIFIER, STATE_FILESYSTEM_PROTOCOL, StateSaveDeclaration,
-    TCP_EGRESS_PROTOCOL, TLS_CONTRACT_VERIFIER, TlsStart, WORKSPACE_PROTOCOL,
-    validate_tls_server_name,
+    TCP_EGRESS_PROTOCOL, TERMINAL_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER, TlsStart,
+    WORKSPACE_PROTOCOL, validate_tls_server_name,
 };
 use crate::model_set::MODEL_SET_PROTOCOL;
 use crate::native_desktop::{
@@ -23,10 +23,18 @@ use crate::native_desktop::{
     NativeArch, NativeArtifactFormat, NativeOs, NativeSignaturePolicy, NativeSignatureTarget,
     native_bundle_root, valid_native_entry,
 };
+use crate::native_surface::{
+    NativePresentation, NativeProbeOperation, NativeSurfaceAdapter, terminal_size_in_bounds,
+};
 use crate::requirements::HostRequirement;
 
 pub const CAPSULE_SCHEMA_V2: &str = "ato.capsule/2";
 pub const OCI_PROTOCOL: &str = "ato.oci@1";
+/// The one native Surface presentation a v2 ato.native@1 route can drive
+/// today. The Adapter owns the PTY, so no HTTP probe Port exists.
+pub const NATIVE_TERMINAL_SURFACE_KIND: &str = "terminal";
+/// The logical transport a v2 native Terminal Port declares.
+pub const NATIVE_TERMINAL_PORT_PROTOCOL: &str = crate::native_surface::TERMINAL_PORT_PROTOCOL;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CapsuleTomlV2Error {
@@ -61,6 +69,23 @@ pub struct PortableAuthoringDraftV2 {
     pub scenarios: Vec<PortableScenarioDraftV2>,
     /// `ato.contract.tls@1` observations: the certificate a port presents.
     pub tls_observations: Vec<PortableTlsObservationDraftV2>,
+    /// ato.contract.terminal@1 observations: one declared terminal exchange
+    /// of a v2 native Terminal surface.
+    pub terminal_observations: Vec<PortableTerminalObservationDraftV2>,
+}
+
+/// A Terminal observation as authored. It names the logical Terminal Port and
+/// the declared operation path whose captured bytes it observes, plus the
+/// optional digest those bytes must have. It never names an expected answer
+/// that a run could fabricate: the digest is of measured bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortableTerminalObservationDraftV2 {
+    pub id: String,
+    pub port: String,
+    /// The declared operation path this observation observes.
+    pub operation: String,
+    /// The sha256 reference of the captured bytes, when the author pins one.
+    pub body_digest: Option<String>,
 }
 
 /// A TLS observation as authored. It names a logical port, the host name the
@@ -162,6 +187,13 @@ pub struct PortableNativeDraftV2 {
     /// override. The bundle builder merges them with the derived facts and
     /// validates the union as one descriptor.
     pub facts: BTreeMap<String, String>,
+    /// The optional Terminal surface this route drives.
+    ///
+    /// A route that declares one is observed through its declared terminal
+    /// exchanges: the Adapter owns the PTY and the route opens no listening
+    /// socket, so it declares no guest TCP port and no HTTP probe Port. A
+    /// route that omits one addresses its app over HTTP exactly as before.
+    pub native_surface: Option<NativeSurfaceAdapter>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,6 +417,28 @@ struct Derivation {
     /// `executable` (default) or `bundle`: what the signature verdict covers.
     #[serde(default)]
     signature_target: Option<String>,
+    /// The optional native Surface this route drives. A terminal surface is
+    /// the only presentation a v2 native route authors today.
+    #[serde(default)]
+    native_surface: Option<NativeSurfaceTable>,
+}
+
+/// `[derivation.native_surface]` on an `ato.native@1` route.
+///
+/// The operation vocabulary is the existing `terminal_exchange` one: the same
+/// keys, the same byte and time bounds and the same JSON shape the v1 native
+/// Adapter validates. It is parsed as that type rather than redefined, so an
+/// operation cannot come to mean two things. No `probe_port` exists here: a
+/// v2 native Terminal route has no HTTP endpoint, so a declaration that names
+/// one is an unknown field and is refused.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeSurfaceTable {
+    kind: String,
+    port: String,
+    cols: u16,
+    rows: u16,
+    operations: Vec<NativeProbeOperation>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -714,7 +768,8 @@ fn parse_capsule_toml_v2_impl(
 
     // A declared Contract must still be exactly what the normal grammar
     // allows; only its absence is tolerated in candidate mode.
-    let (observations, scenarios, tls_observations) = match document.contract {
+    let (observations, scenarios, tls_observations, terminal_observations) = match document.contract
+    {
         Some(contract) => {
             if contract.mode != ContractMode::All || contract.observation.is_empty() {
                 return Err(invalid(
@@ -749,6 +804,7 @@ fn parse_capsule_toml_v2_impl(
             let mut observations = Vec::new();
             let mut scenarios = Vec::new();
             let mut tls_observations = Vec::new();
+            let mut terminal_observations = Vec::new();
             for observation in contract.observation {
                 validate_id("contract.observation.id", &observation.id)?;
                 if !observation_ids.insert(observation.id.clone()) {
@@ -886,16 +942,61 @@ fn parse_capsule_toml_v2_impl(
                             start,
                         });
                     }
+                    TERMINAL_CONTRACT_VERIFIER => {
+                        if observation.method.is_some()
+                            || observation.status.is_some()
+                            || observation.scenario.is_some()
+                            || observation.server_name.is_some()
+                            || observation.start.is_some()
+                        {
+                            return Err(invalid(
+                                "contract.observation",
+                                "a terminal observation states only `port`, `path` and an optional `body_digest`",
+                            ));
+                        }
+                        let Some(operation) = observation.path else {
+                            return Err(invalid(
+                                "contract.observation.path",
+                                "a terminal observation names the declared operation path it observes",
+                            ));
+                        };
+                        if !operation.starts_with('/') {
+                            return Err(invalid(
+                                "contract.observation.path",
+                                "a terminal operation path is an absolute probe path",
+                            ));
+                        }
+                        if let Some(digest) = &observation.body_digest
+                            && !is_sha256_ref(digest)
+                        {
+                            return Err(invalid(
+                                "contract.observation.body_digest",
+                                "must be sha256:<64 lowercase hex>",
+                            ));
+                        }
+                        terminal_observations.push(PortableTerminalObservationDraftV2 {
+                            id: observation.id,
+                            port: observation.port,
+                            operation,
+                            body_digest: observation.body_digest,
+                        });
+                    }
                     _ => {
                         return Err(invalid(
                             "contract.observation",
                             "portable v0 supports ato.contract.http@1, \
-                             ato.contract.scenario@1 and ato.contract.tls@1",
+                             ato.contract.scenario@1, ato.contract.tls@1 and \
+                             ato.contract.terminal@1",
                         ));
                     }
                 }
             }
-            (observations, scenarios, tls_observations)
+            (
+                observations,
+                scenarios,
+                tls_observations,
+                terminal_observations,
+            )
         }
         None if require_contract => {
             return Err(invalid(
@@ -905,7 +1006,7 @@ fn parse_capsule_toml_v2_impl(
         }
         // A derivation-candidate manifest binds to the frozen Contract; it
         // declares no K of its own.
-        None => (Vec::new(), Vec::new(), Vec::new()),
+        None => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
     };
 
     if document.derivation.is_empty() || document.derivation.len() > 16 {
@@ -985,6 +1086,14 @@ fn parse_capsule_toml_v2_impl(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    validate_terminal_observations(
+        &derivations,
+        &terminal_observations,
+        &observations,
+        &scenarios,
+        &tls_observations,
+    )?;
+
     Ok(PortableAuthoringDraftV2 {
         title: document.application.title,
         surface_path: document.application.surface_path,
@@ -996,6 +1105,7 @@ fn parse_capsule_toml_v2_impl(
         model_sets,
         scenarios,
         tls_observations,
+        terminal_observations,
     })
 }
 
@@ -1030,6 +1140,127 @@ fn validate_oci_platform(field: &str, platform: Option<&String>) -> Result<(), C
     Ok(())
 }
 
+/// Compile a `[derivation.native_surface]` table into the Adapter catalog the
+/// physical Adapter will validate again.
+///
+/// The bytes, the delimiter, the output bound and the deadline are checked by
+/// [`NativeSurfaceAdapter::validate_catalog`] — the same function the v1
+/// Adapter and the hosted gateway call — so a v2 declaration cannot acquire a
+/// bound the v1 one does not have.
+fn parse_native_surface(
+    table: NativeSurfaceTable,
+) -> Result<NativeSurfaceAdapter, CapsuleTomlV2Error> {
+    if table.kind != NATIVE_TERMINAL_SURFACE_KIND {
+        return Err(invalid(
+            "derivation.native_surface.kind",
+            "a v2 native route authors only a terminal surface; a pixel stream is not observed here",
+        ));
+    }
+    if !terminal_size_in_bounds(table.cols, table.rows) {
+        return Err(invalid(
+            "derivation.native_surface",
+            "terminal geometry must be 2..=500 columns and 2..=200 rows",
+        ));
+    }
+    let adapter = NativeSurfaceAdapter {
+        surface: NativePresentation::Terminal {
+            port: table.port,
+            cols: table.cols,
+            rows: table.rows,
+        },
+        probe_port: None,
+        operations: table.operations,
+    };
+    adapter
+        .validate_catalog()
+        .map_err(|error| invalid("derivation.native_surface", error))?;
+    Ok(adapter)
+}
+
+/// A terminal route is observed by exactly its declared operations.
+///
+/// K may not name an operation the Adapter will not perform, and every
+/// operation must be named by K: an operation nothing observes would let a
+/// run report `fully_satisfied` while it never typed the input. An HTTP, TLS
+/// or scenario observation cannot observe a route with no listening socket,
+/// so it is refused instead of being recorded as an unobservable promise.
+fn validate_terminal_observations(
+    derivations: &[PortableDerivationDraftV2],
+    terminal: &[PortableTerminalObservationDraftV2],
+    http: &[PortableHttpObservationDraftV2],
+    scenarios: &[PortableScenarioDraftV2],
+    tls: &[PortableTlsObservationDraftV2],
+) -> Result<(), CapsuleTomlV2Error> {
+    let routes = derivations
+        .iter()
+        .filter_map(|route| {
+            route
+                .native
+                .as_ref()
+                .and_then(|native| native.native_surface.as_ref())
+                .map(|surface| (route.label.as_str(), surface))
+        })
+        .collect::<Vec<_>>();
+    if routes.is_empty() {
+        if let Some(observation) = terminal.first() {
+            return Err(invalid(
+                "contract.observation",
+                format!(
+                    "ato.contract.terminal@1 {} observes a native terminal surface; no route \
+                     declares one",
+                    observation.id
+                ),
+            ));
+        }
+        return Ok(());
+    }
+    let [(_, adapter)] = routes.as_slice() else {
+        return Err(invalid(
+            "derivation.native_surface",
+            "a terminal native route is the only route of its Application",
+        ));
+    };
+    let port = adapter.surface.port();
+    if !http.is_empty() || !scenarios.is_empty() || !tls.is_empty() {
+        return Err(invalid(
+            "contract.observation",
+            "a native terminal surface opens no listening socket; its observations are ato.contract.terminal@1 only",
+        ));
+    }
+    let mut observed = BTreeSet::new();
+    for observation in terminal {
+        if observation.port != port {
+            return Err(invalid(
+                "contract.observation.port",
+                format!("a terminal observation names the route terminal Port {port:?}"),
+            ));
+        }
+        if !adapter
+            .operation_paths()
+            .any(|path| path == observation.operation)
+        {
+            return Err(invalid(
+                "contract.observation.path",
+                "a terminal observation names no declared operation",
+            ));
+        }
+        if !observed.insert(observation.operation.as_str()) {
+            return Err(invalid(
+                "contract.observation",
+                "each declared terminal operation is observed exactly once",
+            ));
+        }
+    }
+    let declared = adapter.operation_paths().collect::<BTreeSet<_>>();
+    if let Some(missing) = declared.difference(&observed).next() {
+        return Err(invalid(
+            "contract.observation",
+            format!("declared operation {missing:?} has no terminal observation"),
+        ));
+    }
+    Ok(())
+}
+
 fn parse_single_route(
     derivation: Derivation,
 ) -> Result<PortableDerivationDraftV2, CapsuleTomlV2Error> {
@@ -1049,6 +1280,7 @@ fn parse_single_route(
         format,
         signature,
         signature_target,
+        native_surface,
         ..
     } = derivation;
     let argv = argv.unwrap_or_default();
@@ -1062,8 +1294,13 @@ fn parse_single_route(
         || arch.is_some()
         || format.is_some()
         || signature.is_some()
-        || signature_target.is_some();
+        || signature_target.is_some()
+        || native_surface.is_some();
     let has_web_fields = entry.is_some() || spa_fallback.is_some();
+    // Validated through the same bounded catalog the physical Adapter applies,
+    // before anything is bound: an operation this build cannot honour is a
+    // declaration failure, not a launch failure.
+    let native_surface = native_surface.map(parse_native_surface).transpose()?;
     let mut static_entry = None;
     let mut static_spa_fallback = false;
     let mut native = None;
@@ -1133,18 +1370,31 @@ fn parse_single_route(
                     "spa_fallback is not a native fact; entry names the executable",
                 ));
             }
-            let guest_port = guest_port.ok_or_else(|| {
-                invalid(
-                    "derivation.guest_port",
-                    "a native route declares the loopback port its app serves",
-                )
-            })?;
-            if guest_port == 0 {
-                return Err(invalid(
-                    "derivation.guest_port",
-                    "must be between 1 and 65535",
-                ));
-            }
+            // A Terminal surface opens no listening socket, so it promises no
+            // guest port: the Adapter owns the PTY. Every other native route
+            // still declares the loopback port its app serves.
+            match (guest_port, native_surface.is_some()) {
+                (Some(port), false) if port != 0 => port,
+                (Some(_), false) => {
+                    return Err(invalid(
+                        "derivation.guest_port",
+                        "must be between 1 and 65535",
+                    ));
+                }
+                (None, false) => {
+                    return Err(invalid(
+                        "derivation.guest_port",
+                        "a native route declares the loopback port its app serves",
+                    ));
+                }
+                (None, true) => 0,
+                (Some(_), true) => {
+                    return Err(invalid(
+                        "derivation.guest_port",
+                        "a native terminal surface opens no listening socket; omit guest_port",
+                    ));
+                }
+            };
             let os = os
                 .as_deref()
                 .and_then(NativeOs::parse)
@@ -1249,6 +1499,7 @@ fn parse_single_route(
                 signature,
                 signature_target,
                 facts: runtimes.clone(),
+                native_surface,
             });
             PortableDerivationKindV2::Native
         }

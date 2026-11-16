@@ -257,7 +257,7 @@ fn the_grammar_authors_one_bounded_terminal_native_surface() {
             rows: 40,
         }
     );
-    assert_eq!(native.probe_port, "app.probe");
+    assert_eq!(native.probe_port.as_deref(), Some("app.probe"));
     match &native.operations[0] {
         NativeProbeOperation::TerminalExchange {
             path,

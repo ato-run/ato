@@ -28,7 +28,9 @@ use ato_formation::failure::{FailureStage, FormationFailure};
 use ato_formation::request::{
     AttemptFailure, AttemptOutcomes, AttemptStatus, FormationAttempt, Outcome, RuntimeProfile,
 };
-use ato_formation::verify::{ContractVerification, RuntimeHttpObservation, RuntimeTlsObservation};
+use ato_formation::verify::{
+    ContractVerification, RuntimeHttpObservation, RuntimeTerminalObservation, RuntimeTlsObservation,
+};
 
 use crate::admission::{EffectAuthorization, admit_with_model_delivery, effects_name};
 use crate::browser_verify::{BrowserVerification, verify_in_browser};
@@ -45,7 +47,7 @@ pub use crate::verification::ReceiptContext;
 use crate::verification::{
     HTTP_OBSERVATION_METHOD, RequiredObservation, RequiredTlsObservation, VerificationPoint,
     probe_tls_start, required_http_observations, required_tls_observations,
-    runtime_tls_observation, verify_observed_candidate,
+    runtime_tls_observation, verify_observed_candidate_with_terminal,
 };
 
 /// Bodies larger than this are not hashed into evidence.
@@ -503,14 +505,16 @@ fn realize_and_verify(
     let mut execution = realized.execution;
     execution.attempt_id = Some(request.attempt_id.to_owned());
     execution.request_id = Some(request.request_id.to_owned());
+    let terminal = observe_terminal(candidate.as_mut(), spec);
     let VerificationPoint {
         verification,
         receipt,
-    } = verify_observed_candidate(
+    } = verify_observed_candidate_with_terminal(
         spec,
         http,
         scenario_observations,
         tls,
+        terminal,
         execution,
         &request.receipt,
     );
@@ -698,6 +702,45 @@ fn wait_for_startup(
 
 /// Observe every declared K path. A received HTTP status is evidence, including
 /// failure statuses; only connection failures wait within the bounded deadline.
+/// Perform the declared terminal exchanges, when the selected Derivation has a
+/// Terminal surface.
+///
+/// The requirement ids are K's and the operations are the Adapter catalog's;
+/// an exchange happens only where K names an operation the catalog declares.
+/// Anything else stays unobserved, which the verifier fails closed — so an
+/// operation nothing performs can never be counted as satisfied.
+fn observe_terminal(
+    candidate: &mut dyn RunningCandidate,
+    spec: &AttemptSpec<'_>,
+) -> Vec<RuntimeTerminalObservation> {
+    let Some(adapter) = spec.derivation.native_surface.as_ref() else {
+        return Vec::new();
+    };
+    if adapter.terminal_geometry().is_none() {
+        return Vec::new();
+    }
+    let operations = spec
+        .contract
+        .requirements
+        .iter()
+        .filter(|requirement| {
+            requirement.verifier == ato_formation::authoring::TERMINAL_CONTRACT_VERIFIER
+        })
+        .filter_map(|requirement| {
+            let path = requirement.path.as_deref()?;
+            let operation = adapter
+                .operations
+                .iter()
+                .find(|operation| operation.path() == path)?;
+            Some((requirement.id.as_str(), operation))
+        })
+        .collect::<Vec<_>>();
+    if operations.is_empty() {
+        return Vec::new();
+    }
+    candidate.observe_terminal(&operations)
+}
+
 fn observe_http(
     candidate: &mut dyn RunningCandidate,
     required: &[RequiredObservation],
@@ -1116,7 +1159,7 @@ mod tests {
             )],
             instance_snapshot_ref: None,
             scenarios: Vec::new(),
-
+            terminal: Vec::new(),
             tls: Vec::new(),
         };
         let verification = verify_runtime(&contract, &runtime);
@@ -1721,11 +1764,12 @@ mod tests {
                 .clone()
                 .expect("the attempt observed its candidate");
 
-            let observed = verify_observed_candidate(
+            let observed = verify_observed_candidate_with_terminal(
                 &spec,
                 vec![RuntimeHttpObservation::from_response(
                     "app.http", "GET", "/", 200, b"ok",
                 )],
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 serde_json::from_value(serde_json::json!({
@@ -1996,7 +2040,7 @@ mod tests {
                 http: observed,
                 instance_snapshot_ref: None,
                 scenarios: Vec::new(),
-
+                terminal: Vec::new(),
                 tls: Vec::new(),
             },
         );

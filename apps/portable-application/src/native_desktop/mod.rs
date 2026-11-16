@@ -41,11 +41,15 @@ pub(crate) mod artifact;
 
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
+
 /// Streaming acquisition of a digest-pinned remote artifact.
 pub(crate) mod remote;
 /// The isolated, content-addressed build of a source route.
 #[cfg(target_os = "macos")]
 pub(crate) mod source_build;
+/// The declared terminal exchanges of a Terminal surface.
+#[cfg(target_os = "macos")]
+pub(crate) mod terminal;
 /// The managed toolchain a source build needs: policy, layout and installer.
 pub(crate) mod toolchain;
 #[cfg(target_os = "windows")]
@@ -371,6 +375,9 @@ pub(crate) struct NativeStart<'a> {
     pub provenance: NativeProvenance,
     pub descriptor: &'a NativeDescriptor,
     pub ports: &'a [ValidatedNativePort],
+    /// The Terminal surface this route drives, when it declares one. Such a
+    /// route has no ports: the Adapter owns the PTY.
+    pub terminal: Option<&'a crate::ValidatedNativeTerminal>,
     /// The materialized read-only workspace tree.
     pub workspace: PathBuf,
     /// This Run's runtime scratch root.

@@ -362,7 +362,7 @@ mod tests {
                 cols: 100,
                 rows: 30,
             },
-            probe_port: "native-results".into(),
+            probe_port: Some("native-results".into()),
             operations: vec![NativeProbeOperation::TerminalExchange {
                 path: "/result".into(),
                 input: b"compute\n".to_vec(),

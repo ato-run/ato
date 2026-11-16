@@ -17,7 +17,7 @@ use ato_formation::authoring::{
     BoundRequirement, BoundStep, ClientAddressTransport, DerivationDraft, EffectClass,
     HTTP_CONTRACT_VERIFIER, HTTP_PROTOCOL, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER, PROCESS_PROTOCOL,
     PortDraft, SCENARIO_CONTRACT_VERIFIER, STATE_FILESYSTEM_PROTOCOL, StateAccess, StepDraft,
-    TCP_EGRESS_PROTOCOL, TCP_PROTOCOL, TLS_CONTRACT_VERIFIER, TlsStart,
+    TCP_EGRESS_PROTOCOL, TCP_PROTOCOL, TERMINAL_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER, TlsStart,
     WORKSPACE_CONTRACT_VERIFIER, WORKSPACE_PROTOCOL, bind, validate_tls_server_name,
 };
 use ato_formation::capsule_toml::{CAPSULE_FILE_NAME, parse_capsule_toml};
@@ -254,6 +254,18 @@ pub struct ValidatedPortableApplication {
 pub struct ValidatedNativeDescriptor {
     pub descriptor: ato_formation::native_desktop::NativeDescriptor,
     pub ports: Vec<ValidatedNativePort>,
+    /// The Terminal surface this route drives, when it declares one. Its
+    /// catalog is validated; its PTY and physical endpoint are the Adapter's.
+    pub terminal: Option<ValidatedNativeTerminal>,
+}
+
+/// A validated Terminal native surface: the Adapter catalog and the logical
+/// Port the Application names. Physical addresses and PTY state never live
+/// here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedNativeTerminal {
+    pub port: String,
+    pub surface: ato_formation::native_surface::NativeSurfaceAdapter,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -502,6 +514,22 @@ pub struct PortableNativeRouteSpec {
     /// reference or a source build. Merged with the derived facts and
     /// validated as one descriptor.
     pub facts: BTreeMap<String, String>,
+    /// The optional Terminal surface this route drives. A route that declares
+    /// one opens no listening socket: its Port is the host-owned PTY and its
+    /// observations are terminal exchanges.
+    pub native_surface: Option<ato_formation::native_surface::NativeSurfaceAdapter>,
+}
+
+/// One `ato.contract.terminal@1` observation as the builder consumes it.
+#[derive(Debug, Clone)]
+pub struct PortableTerminalRequirementSpec {
+    pub id: String,
+    /// The logical Terminal Port the exchange runs on.
+    pub port: String,
+    /// The declared operation path this observation observes.
+    pub operation: String,
+    /// The digest the captured bytes must have, when the author pins one.
+    pub body_digest: Option<String>,
 }
 
 /// One serving step of a service group (OCI or native process).
@@ -536,6 +564,13 @@ pub struct PortableAuthoredBundleSpec {
     pub requirements: Vec<PortableHttpRequirementSpec>,
     /// `ato.contract.tls@1` observations: the certificate a port presents.
     pub tls_requirements: Vec<PortableTlsRequirementSpec>,
+    /// `ato.contract.terminal@1` observations: a declared terminal exchange of
+    /// the one Terminal native route.
+    pub terminal_requirements: Vec<PortableTerminalRequirementSpec>,
+    /// The logical Port the Application Surface names. `app.http` for every
+    /// route that answers HTTP; a Terminal native route's own Port instead,
+    /// because that is the surface its clients attach to.
+    pub surface_port: String,
     pub effects: EffectClass,
     /// `(input id, manifest path in the source, canonical manifest)` consumed
     /// by every route. The manifest file is an input, not workspace content.
@@ -1453,6 +1488,8 @@ pub fn build_dynamic_process_oci_bundle(
             bindings: spec.bindings.clone(),
             requirements: spec.requirements.clone(),
             tls_requirements: Vec::new(),
+            terminal_requirements: Vec::new(),
+            surface_port: "app.http".to_owned(),
             effects: EffectClass::Pure,
             model_sets: Vec::new(),
             scenarios: Vec::new(),
@@ -1515,6 +1552,26 @@ pub(crate) fn contract_from_spec(
             start: None,
         })
         .collect::<Vec<_>>();
+    // A Terminal observation states the operation path, the Terminal Port and
+    // the optional digest of the captured bytes. It adds no transport: the
+    // bytes come from the existing terminal_exchange operation.
+    bound.extend(
+        spec.terminal_requirements
+            .iter()
+            .map(|requirement| BoundRequirement {
+                id: requirement.id.clone(),
+                verifier: ato_formation::authoring::TERMINAL_CONTRACT_VERIFIER.to_owned(),
+                port: Some(requirement.port.clone()),
+                method: None,
+                path: Some(requirement.operation.clone()),
+                status: None,
+                body_digest: requirement.body_digest.clone(),
+                input: None,
+                digest: None,
+                server_name: None,
+                start: None,
+            }),
+    );
     bound.extend(spec.scenarios.iter().map(|input| BoundRequirement {
         id: input.id.clone(),
         verifier: SCENARIO_CONTRACT_VERIFIER.to_owned(),
@@ -1555,6 +1612,19 @@ pub(crate) fn contract_from_spec(
         schema: BOUND_CONTRACT_SCHEMA.to_owned(),
         requirements: bound,
     })
+}
+
+/// The Port a Terminal native route serves its surface on, when the authored
+/// routes declare one.
+///
+/// A Terminal native route is the only route of its Application: it opens no
+/// listening socket, so it cannot share one Surface with an HTTP route.
+fn routes_terminal_port(routes: &[PortableDynamicRouteSpec]) -> Option<String> {
+    routes
+        .iter()
+        .filter_map(|route| route.native.as_ref())
+        .find_map(|native| native.native_surface.as_ref())
+        .map(|surface| surface.surface.port().to_owned())
 }
 
 fn authored_bundle_spec_v2(
@@ -1628,6 +1698,7 @@ fn authored_bundle_spec_v2(
                         signature: native.signature,
                         signature_target: native.signature_target,
                         facts: native.facts,
+                        native_surface: native.native_surface,
                     })
                 }
             };
@@ -1684,6 +1755,9 @@ fn authored_bundle_spec_v2(
             })
         })
         .collect::<Result<Vec<_>, PortableApplicationError>>()?;
+    // A Terminal native route's clients attach to its own Port; every other
+    // route serves `app.http`.
+    let surface_port = routes_terminal_port(&routes).unwrap_or_else(|| "app.http".to_owned());
     Ok(PortableAuthoredBundleSpec {
         title: draft.title,
         surface_path: draft.surface_path,
@@ -1730,6 +1804,17 @@ fn authored_bundle_spec_v2(
                 start: observation.start,
             })
             .collect(),
+        terminal_requirements: draft
+            .terminal_observations
+            .into_iter()
+            .map(|observation| PortableTerminalRequirementSpec {
+                id: observation.id,
+                port: observation.port,
+                operation: observation.operation,
+                body_digest: observation.body_digest,
+            })
+            .collect(),
+        surface_port,
         effects: draft.effects,
         model_sets: draft
             .model_sets
@@ -1917,7 +2002,10 @@ fn build_routes_bundle(
 ) -> Result<(Vec<u8>, PortableApplicationBundle), PortableApplicationError> {
     let frozen_contract = frozen.map(|(contract, _)| contract);
     if spec.title.trim().is_empty()
-        || (frozen_contract.is_none() && spec.requirements.is_empty() && spec.scenarios.is_empty())
+        || (frozen_contract.is_none()
+            && spec.requirements.is_empty()
+            && spec.scenarios.is_empty()
+            && spec.terminal_requirements.is_empty())
     {
         return Err(profile(
             "dynamic application requires a title and at least one observation",
@@ -1926,6 +2014,20 @@ fn build_routes_bundle(
     if spec.routes.is_empty() || spec.routes.len() > 16 {
         return Err(profile(
             "dynamic application requires between one and sixteen routes",
+        ));
+    }
+    // A Terminal native route opens no listening socket, so it cannot share
+    // the Application's one Surface with a route that answers HTTP.
+    if spec.routes.len() != 1
+        && spec.routes.iter().any(|route| {
+            route
+                .native
+                .as_ref()
+                .is_some_and(|native| native.native_surface.is_some())
+        })
+    {
+        return Err(profile(
+            "a terminal native route is the only route of its Application",
         ));
     }
     let mut excluded: Vec<String> = spec
@@ -2072,7 +2174,7 @@ fn build_routes_bundle(
                 title: spec.title.clone(),
                 surfaces: vec![ApplicationSurfaceV2 {
                     id: "main".to_owned(),
-                    port: "app.http".to_owned(),
+                    port: spec.surface_port.clone(),
                     path: spec.surface_path.clone(),
                 }],
                 bindings: spec.bindings.clone(),
@@ -2226,13 +2328,26 @@ fn bound_authored_derivation(
                     bindings: Vec::new(),
                     peer_ports: Vec::new(),
                 }],
-                vec![BoundPort {
-                    id: "app.http".to_owned(),
-                    protocol: HTTP_PROTOCOL.to_owned(),
-                    from: "serve".to_owned(),
-                    guest_port: Some(route.guest_port),
-                    client_address_transport: None,
-                }],
+                // A Terminal native route opens no listening socket. Its one
+                // Port is the host-owned PTY the Adapter drives, and it
+                // promises no guest TCP port; every other native route keeps
+                // its declared loopback HTTP Port.
+                match &native.native_surface {
+                    Some(surface) => vec![BoundPort {
+                        id: surface.surface.port().to_owned(),
+                        protocol: ato_formation::native_surface::TERMINAL_PORT_PROTOCOL.to_owned(),
+                        from: "serve".to_owned(),
+                        guest_port: None,
+                        client_address_transport: None,
+                    }],
+                    None => vec![BoundPort {
+                        id: "app.http".to_owned(),
+                        protocol: HTTP_PROTOCOL.to_owned(),
+                        from: "serve".to_owned(),
+                        guest_port: Some(route.guest_port),
+                        client_address_transport: None,
+                    }],
+                },
             )
         }
         PortableRealizationKind::OciServiceGroup | PortableRealizationKind::ProcessServiceGroup => {
@@ -2324,7 +2439,10 @@ fn bound_authored_derivation(
         }
     };
     Ok(BoundDerivation {
-        native_surface: None,
+        native_surface: route
+            .native
+            .as_ref()
+            .and_then(|native| native.native_surface.clone()),
         runtime_port_operations: vec![],
         variable_bindings: vec![],
         requirements: ato_formation::requirements::ExecutionRequirements {
@@ -2520,6 +2638,14 @@ fn validate_native_route(
     native
         .validate(&derivation.ports, &derivation.steps)
         .map_err(profile)?;
+    // This profile's K is an HTTP observation of the frozen measured bytes, so
+    // the private probe Port is what it is observed on. A Terminal surface
+    // without one is the v2 native profile, not this one.
+    let Some(probe_port) = native.probe_port.as_deref() else {
+        return Err(profile(
+            "a v1 native route requires its private HTTP probe Port",
+        ));
+    };
     if application.schema != APPLICATION_V2_SCHEMA
         || application.surfaces.len() != 1
         || derivation.steps.len() != 1
@@ -2548,7 +2674,7 @@ fn validate_native_route(
         || native.operations.iter().any(|operation| {
             http.iter()
                 .filter(|requirement| {
-                    requirement.port.as_deref() == Some(native.probe_port.as_str())
+                    requirement.port.as_deref() == Some(probe_port)
                         && requirement.path.as_deref() == Some(operation.path())
                         && requirement.method.as_deref() == Some("GET")
                         && requirement.status == Some(200)
@@ -2565,12 +2691,10 @@ fn validate_native_route(
         ));
     }
     let mut probe_application = application.clone();
-    probe_application.surfaces[0].port = native.probe_port.clone();
+    probe_application.surfaces[0].port = probe_port.to_owned();
     let mut probe_route = derivation.clone();
     probe_route.native_surface = None;
-    probe_route
-        .ports
-        .retain(|port| port.id == native.probe_port);
+    probe_route.ports.retain(|port| port.id == probe_port);
     let host_native = derivation
         .ports
         .iter()
@@ -2663,9 +2787,16 @@ fn validate_native_desktop_route(
 ) -> Result<ValidatedNativeDescriptor, PortableApplicationError> {
     use ato_formation::native_desktop::NativeDescriptor;
 
-    if derivation.native_surface.is_some() {
+    // The optional Terminal surface. A route that declares one opens no
+    // listening socket: the Adapter owns the PTY and the application is
+    // reached through that terminal, so the route promises no guest TCP Port.
+    // A probe Port would be an HTTP endpoint nothing serves.
+    let terminal = derivation.native_surface.clone();
+    if let Some(surface) = &terminal
+        && (surface.terminal_geometry().is_none() || surface.probe_port.is_some())
+    {
         return Err(profile(
-            "a native desktop route does not declare a native_surface Adapter",
+            "a native desktop route declares one terminal surface and no HTTP probe",
         ));
     }
     if !matches!(
@@ -2744,25 +2875,34 @@ fn validate_native_desktop_route(
     let mut ports = Vec::with_capacity(derivation.ports.len());
     let mut port_ids = BTreeSet::new();
     for port in &derivation.ports {
-        let Some(guest_port) = port.guest_port else {
-            return Err(profile(
-                "every native logical Port declares the loopback port its app serves",
-            ));
+        // A Terminal route's one Port is the host-owned PTY: no guest TCP
+        // port is promised, and the Adapter, not the app, owns the endpoint.
+        let (protocol_ok, guest_ok) = match &terminal {
+            Some(_) => (
+                port.protocol == ato_formation::native_surface::TERMINAL_PORT_PROTOCOL,
+                port.guest_port.is_none(),
+            ),
+            None => (
+                port.protocol == HTTP_PROTOCOL,
+                port.guest_port.is_some_and(|guest_port| guest_port != 0),
+            ),
         };
         if !port_ids.insert(port.id.as_str())
-            || port.protocol != HTTP_PROTOCOL
+            || !protocol_ok
+            || !guest_ok
             || port.from != step.id
             || port.client_address_transport.is_some()
-            || guest_port == 0
         {
             return Err(profile(
-                "a native Port is one declared HTTP Port served by the native step",
+                "a native Port is one declared Port served by the native step",
             ));
         }
-        ports.push(ValidatedNativePort {
-            id: port.id.clone(),
-            guest_port,
-        });
+        if let Some(guest_port) = port.guest_port {
+            ports.push(ValidatedNativePort {
+                id: port.id.clone(),
+                guest_port,
+            });
+        }
     }
     if !port_ids.contains(surface.port.as_str()) {
         return Err(profile(
@@ -2826,6 +2966,51 @@ fn validate_native_desktop_route(
         }
     }
     validate_route_requirements(contract, workspace, &port_ids, &surface.port)?;
+    // A Terminal route is observed by exactly its declared operations. K may
+    // not name an exchange the Adapter will not perform, and every declared
+    // operation must be named: an operation nothing observes would let a Run
+    // report a fully satisfied receipt without ever typing the input.
+    if let Some(surface) = &terminal {
+        if derivation.ports.len() != 1 || derivation.requirements.startup.is_some() {
+            return Err(profile(
+                "a native terminal route declares exactly one Terminal Port and no HTTP startup condition",
+            ));
+        }
+        if contract.requirements.iter().any(|requirement| {
+            matches!(
+                requirement.verifier.as_str(),
+                HTTP_CONTRACT_VERIFIER | TLS_CONTRACT_VERIFIER | SCENARIO_CONTRACT_VERIFIER
+            )
+        }) {
+            return Err(profile(
+                "a native terminal surface opens no listening socket; its observations are ato.contract.terminal@1 only",
+            ));
+        }
+        let observations = contract
+            .requirements
+            .iter()
+            .filter(|requirement| requirement.verifier == TERMINAL_CONTRACT_VERIFIER)
+            .collect::<Vec<_>>();
+        if observations.len() != surface.operations.len() {
+            return Err(profile(
+                "every declared terminal operation requires exactly one ato.contract.terminal@1 observation",
+            ));
+        }
+        for operation in &surface.operations {
+            let matching = observations
+                .iter()
+                .filter(|requirement| {
+                    requirement.port.as_deref() == Some(surface.surface.port())
+                        && requirement.path.as_deref() == Some(operation.path())
+                })
+                .count();
+            if matching != 1 {
+                return Err(profile(
+                    "each declared terminal operation is observed exactly once, by its Port and path",
+                ));
+            }
+        }
+    }
 
     // A bundle-carried artifact is a declared blob of the digest the descriptor
     // states. The closure check already proved the reference resolves; this
@@ -2882,7 +3067,14 @@ fn validate_native_desktop_route(
         ));
     }
 
-    Ok(ValidatedNativeDescriptor { descriptor, ports })
+    Ok(ValidatedNativeDescriptor {
+        descriptor,
+        ports,
+        terminal: terminal.map(|surface| ValidatedNativeTerminal {
+            port: surface.surface.port().to_owned(),
+            surface,
+        }),
+    })
 }
 
 fn validate_route_profile(
@@ -3267,6 +3459,40 @@ fn validate_route_requirements(
                 {
                     return Err(profile(
                         "scenario requirement contains unrelated observation fields",
+                    ));
+                }
+            }
+            TERMINAL_CONTRACT_VERIFIER => {
+                if !requirement
+                    .port
+                    .as_deref()
+                    .is_some_and(|port| observation_ports.contains(port))
+                {
+                    return Err(profile(
+                        "terminal requirement does not target a declared observation Port",
+                    ));
+                }
+                if !requirement
+                    .path
+                    .as_deref()
+                    .is_some_and(|operation| operation.starts_with('/'))
+                {
+                    return Err(profile(
+                        "terminal requirement names no declared operation path",
+                    ));
+                }
+                if let Some(digest) = &requirement.body_digest {
+                    parse_ref(digest, "terminal output digest")?;
+                }
+                if requirement.method.is_some()
+                    || requirement.status.is_some()
+                    || requirement.input.is_some()
+                    || requirement.digest.is_some()
+                    || requirement.server_name.is_some()
+                    || requirement.start.is_some()
+                {
+                    return Err(profile(
+                        "terminal requirement carries only its Port, operation path and optional output digest",
                     ));
                 }
             }
@@ -5350,7 +5576,7 @@ status = 200
             )],
             instance_snapshot_ref: None,
             scenarios: Vec::new(),
-
+            terminal: Vec::new(),
             tls: Vec::new(),
         };
         assert!(!verify_runtime(&route.contract, &observation).fully_satisfied());
