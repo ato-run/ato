@@ -66,6 +66,17 @@ pub const NATIVE_FORMAT_RUNTIME: &str = "ato.native.format";
 pub const NATIVE_SIGNATURE_RUNTIME: &str = "ato.native.signature";
 /// Which filesystem object the signature policy is verified against.
 pub const NATIVE_SIGNATURE_TARGET_RUNTIME: &str = "ato.native.signature_target";
+/// The fixed argument vector a Terminal route launches its executable with.
+///
+/// A Terminal route is the one route whose program must be addressed (a CLI
+/// answers on stdin only in the mode its arguments select). The vector is a
+/// bounded, declared fact — the Adapter executes it directly, never through a
+/// shell — and only a route that declares a terminal Surface may state it.
+pub const NATIVE_ARGV_RUNTIME: &str = "ato.native.argv";
+/// Largest number of arguments a Terminal route may declare.
+pub const MAX_NATIVE_ARGV: usize = 16;
+/// Largest single argument a Terminal route may declare, in bytes.
+pub const MAX_NATIVE_ARGV_BYTES: usize = 256;
 /// An upstream URL the Run fetches instead of a bundle-carried archive.
 pub const NATIVE_REMOTE_URL_RUNTIME: &str = "ato.native.remote_url";
 /// The `sha256:` digest the fetched bytes must equal.
@@ -512,6 +523,31 @@ impl NativeArtifactSource {
     }
 }
 
+/// Parse the declared argument vector of a Terminal route.
+///
+/// The Adapter executes this vector directly with the resolved executable and
+/// never through a shell, so each argument is bounded and restricted to
+/// printable ASCII: nothing in it can become a shell word, a redirection or a
+/// path the route did not declare.
+fn parse_native_argv(value: &str) -> Result<Vec<String>, NativeDescriptorError> {
+    let argv: Vec<String> =
+        serde_json::from_str(value).map_err(|_| NativeDescriptorError("native_argv_invalid"))?;
+    if argv.len() > MAX_NATIVE_ARGV {
+        return Err(NativeDescriptorError("native_argv_too_long"));
+    }
+    for argument in &argv {
+        if argument.is_empty()
+            || argument.len() > MAX_NATIVE_ARGV_BYTES
+            || !argument
+                .bytes()
+                .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+        {
+            return Err(NativeDescriptorError("native_argv_invalid"));
+        }
+    }
+    Ok(argv)
+}
+
 /// The validated declaration of one native serving step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeDescriptor {
@@ -525,6 +561,9 @@ pub struct NativeDescriptor {
     pub signature_target: NativeSignatureTarget,
     /// Where the artifact comes from.
     pub source: NativeArtifactSource,
+    /// Arguments the executable is launched with. Empty unless declared, and
+    /// only a Terminal route may declare a non-empty vector.
+    pub argv: Vec<String>,
 }
 
 fn is_sha256_ref(value: &str) -> bool {
@@ -650,6 +689,7 @@ impl NativeDescriptor {
                     | NATIVE_TOOLCHAIN_RUNTIME
                     | NATIVE_BUILD_ARGV_RUNTIME
                     | NATIVE_BUILD_CACHE_RUNTIME
+                    | NATIVE_ARGV_RUNTIME
             ) {
                 return Err(NativeDescriptorError("native_descriptor_unknown_key"));
             }
@@ -699,6 +739,10 @@ impl NativeDescriptor {
                 "native_signature_target_not_a_bundle",
             ));
         }
+        let argv = match step.runtimes.get(NATIVE_ARGV_RUNTIME) {
+            None => Vec::new(),
+            Some(value) => parse_native_argv(value)?,
+        };
         Ok(Self {
             os,
             arch,
@@ -707,6 +751,7 @@ impl NativeDescriptor {
             signature,
             signature_target,
             source,
+            argv,
         })
     }
 
@@ -789,6 +834,12 @@ impl NativeDescriptor {
             runtimes.insert(
                 NATIVE_SIGNATURE_TARGET_RUNTIME.to_owned(),
                 self.signature_target.as_str().to_owned(),
+            );
+        }
+        if !self.argv.is_empty() {
+            runtimes.insert(
+                NATIVE_ARGV_RUNTIME.to_owned(),
+                serde_json::to_string(&self.argv).expect("a string vector serializes"),
             );
         }
         runtimes
@@ -970,6 +1021,30 @@ mod tests {
             (NATIVE_ARTIFACT_RUNTIME, sha()),
             (NATIVE_ENTRY_RUNTIME, "app/run.sh".to_owned()),
         ]
+    }
+
+    /// A Terminal route's argument vector is a bounded, printable fact: the
+    /// Adapter executes it directly, so nothing in it may become a shell word.
+    #[test]
+    fn an_argument_vector_is_bounded_and_printable() {
+        assert!(parse_native_argv("[]").unwrap().is_empty());
+        assert_eq!(
+            parse_native_argv(r#"["mcp","--headless"]"#).unwrap(),
+            vec!["mcp".to_owned(), "--headless".to_owned()]
+        );
+        assert!(parse_native_argv("not json").is_err());
+        assert!(parse_native_argv(r#"[""]"#).is_err());
+        assert!(parse_native_argv(r#"["ab"]"#).is_err());
+        let too_many = format!(
+            "[{}]",
+            (0..=MAX_NATIVE_ARGV)
+                .map(|_| "\"x\"")
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert!(parse_native_argv(&too_many).is_err());
+        let too_long = format!("[\"{}\"]", "x".repeat(MAX_NATIVE_ARGV_BYTES + 1));
+        assert!(parse_native_argv(&too_long).is_err());
     }
 
     fn valid_step() -> BoundStep {
