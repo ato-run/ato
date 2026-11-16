@@ -2018,18 +2018,23 @@ fn build_routes_bundle(
             "dynamic application requires between one and sixteen routes",
         ));
     }
-    // A Terminal native route opens no listening socket, so it cannot share
-    // the Application's one Surface with a route that answers HTTP.
-    if spec.routes.len() != 1
-        && spec.routes.iter().any(|route| {
+    // A Terminal native route opens no listening socket, so it cannot share the
+    // Application's one Surface with a route that answers HTTP. Several terminal
+    // Routes may coexist when they realize one Contract; they own the same
+    // Surface and declare the same exchanges.
+    let terminal_routes = spec
+        .routes
+        .iter()
+        .filter(|route| {
             route
                 .native
                 .as_ref()
                 .is_some_and(|native| native.native_surface.is_some())
         })
-    {
+        .count();
+    if terminal_routes != 0 && terminal_routes != spec.routes.len() {
         return Err(profile(
-            "a terminal native route is the only route of its Application",
+            "a terminal native route shares its Application Surface with terminal routes only",
         ));
     }
     let mut excluded: Vec<String> = spec
