@@ -452,7 +452,14 @@ impl CandidateRealizer for NativePortableRealizer<'_> {
         Ok(Realized {
             candidate: Box::new(NativeCandidate {
                 run: Some(run),
-                endpoints: BTreeMap::from([(declaration.adapter.probe_port, base)]),
+                endpoints: BTreeMap::from([(
+                    declaration
+                        .adapter
+                        .probe_port
+                        .clone()
+                        .context("the v1 native probe Port")?,
+                    base,
+                )]),
                 workspace,
                 runtime: attempt.join("oci-runtime"),
                 journal: RunJournal::new(

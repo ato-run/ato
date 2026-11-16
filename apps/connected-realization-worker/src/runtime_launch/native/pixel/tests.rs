@@ -221,6 +221,7 @@ fn actual_geany_owned_lease_uses_verified_application_archive() {
         instance_snapshot_ref: None,
         scenarios: vec![],
         tls: vec![],
+        terminal: vec![],
     };
     let verification = ato_formation::verify::verify_runtime(&route.contract, &runtime);
     let completion = run.stop();
@@ -530,6 +531,7 @@ async fn actual_geany_pixel_frame_changes_after_keyboard_input() {
         instance_snapshot_ref: None,
         scenarios: Vec::new(),
         tls: Vec::new(),
+        terminal: Vec::new(),
     };
     let verification = ato_formation::verify::verify_runtime(k, &runtime);
     assert!(verification.fully_satisfied(), "{verification:?}");

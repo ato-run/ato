@@ -1213,6 +1213,7 @@ mod exploration_submission_tests {
             scenarios: Vec::new(),
 
             tls: Vec::new(),
+            terminal: Vec::new(),
         };
         let mut receipt = ContractVerificationReceipt::from_attempt(
             &state.frozen.contract_ref,

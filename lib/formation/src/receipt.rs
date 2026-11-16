@@ -16,7 +16,8 @@ use std::collections::BTreeSet;
 
 use crate::authoring::{
     BoundContract, HTTP_CONTRACT_VERIFIER, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER,
-    SCENARIO_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER, WORKSPACE_CONTRACT_VERIFIER,
+    SCENARIO_CONTRACT_VERIFIER, TERMINAL_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER,
+    WORKSPACE_CONTRACT_VERIFIER,
 };
 use crate::scenario::is_scenario_ref;
 use crate::verify::{
@@ -48,6 +49,17 @@ fn reject(code: &'static str, detail: impl Into<String>) -> ReceiptRejection {
         code,
         detail: detail.into(),
     }
+}
+
+/// A `sha256:<64 lowercase hex>` reference, as terminal evidence states the
+/// digest of the bytes it captured.
+fn is_sha256_ref(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 /// A certificate serial as `ato.contract.tls@1` evidence states it: the DER
@@ -330,6 +342,47 @@ fn check_observation(
                 return inconsistent("a satisfied TLS verdict has no completed handshake");
             }
         }
+        TERMINAL_CONTRACT_VERIFIER => {
+            // A terminal verdict's evidence is the exchange, not an HTTP
+            // request: the operation path, how many bytes came back and the
+            // digest of exactly those bytes. A digest in K must be the digest
+            // that was measured, and a satisfied exchange must have captured
+            // something.
+            let operation = requirement.path.as_deref().unwrap_or_default();
+            if evidence.method.is_some()
+                || evidence.status.is_some()
+                || evidence.input.is_some()
+                || evidence.digest.is_some()
+                || evidence.tls.is_some()
+            {
+                return inconsistent(
+                    "terminal evidence carries only the operation path, the captured byte \
+                     count and its digest",
+                );
+            }
+            if evidence.path.as_deref() != Some(operation) {
+                return inconsistent("the evidence is not for the operation K observes");
+            }
+            let Some(captured) = evidence.captured_bytes else {
+                return inconsistent("no captured byte count was recorded");
+            };
+            if captured == 0 {
+                return inconsistent("a terminal exchange captured no bytes");
+            }
+            let Some(digest) = evidence.body_sha256.as_deref() else {
+                return inconsistent("no captured digest was observed");
+            };
+            if !is_sha256_ref(digest) {
+                return inconsistent("the captured digest is not a sha256 reference");
+            }
+            if requirement
+                .body_digest
+                .as_deref()
+                .is_some_and(|expected| expected != digest)
+            {
+                return inconsistent("the captured bytes are not the output K requires");
+            }
+        }
         SCENARIO_CONTRACT_VERIFIER => {
             // The receipt carries a reference, a transcript digest and the
             // requirement id; the steps themselves stay in the raw sidecar.
@@ -602,6 +655,7 @@ mod tests {
             scenarios: Vec::new(),
 
             tls: Vec::new(),
+            terminal: Vec::new(),
         };
         let mut receipt = ContractVerificationReceipt::from_attempt(
             "sha256:k",
