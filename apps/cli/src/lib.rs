@@ -3062,7 +3062,11 @@ fn run_portable_application(
         if let Some(bundle) = &receipt.bundle_sha256 {
             println!("Bundle: {bundle}");
         }
-        println!("URL: {}", runtime.base_url());
+        if !runtime.base_url().is_empty() {
+            println!("URL: {}", runtime.base_url());
+        } else {
+            println!("URL: none (a terminal route answers over its PTY)");
+        }
         if !receipt.fully_satisfied {
             bail!("{}", contract_refusal_message(&receipt));
         }
@@ -3072,7 +3076,7 @@ fn run_portable_application(
         if let Some(resolved) = hub {
             hub_public::report_successful_run(resolved, &receipt);
         }
-        if args.no_open {
+        if args.no_open || runtime.base_url().is_empty() {
             return Ok(());
         }
         open_browser(runtime.base_url())?;
@@ -3615,10 +3619,16 @@ fn start_portable_attempt(
         PortableRealizationKind::ProcessServiceGroup => "native process group",
         PortableRealizationKind::NativeDesktop => "native desktop",
     };
-    let base_url = live
-        .endpoint()
-        .map(|endpoint| endpoint.trim_end_matches('/').to_owned())
-        .context("the verified candidate answers nowhere")?;
+    // A native Terminal route is observed through the PTY the Adapter owns:
+    // it opens no listening socket, so there is no URL to hand back. Every
+    // other route still has to answer somewhere, so a missing endpoint stays
+    // an error for them.
+    let terminal_route = validated.derivation.native_surface.is_some();
+    let base_url = match live.endpoint() {
+        Some(endpoint) => endpoint.trim_end_matches('/').to_owned(),
+        None if terminal_route => String::new(),
+        None => bail!("the verified candidate answers nowhere"),
+    };
     Ok(StartedPortableApplication {
         runtime: PortableLocalRuntime {
             live,
