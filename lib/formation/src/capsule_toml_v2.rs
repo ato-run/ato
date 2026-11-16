@@ -1214,13 +1214,33 @@ fn validate_terminal_observations(
         }
         return Ok(());
     }
-    let [(_, adapter)] = routes.as_slice() else {
+    // Several Routes may realize the same Contract: a pre-built program and the
+    // same program built from source are one Contract observed through the same
+    // exchanges. They must agree on the terminal Port and on every operation, so
+    // whichever Route a Run selects observes exactly K.
+    let port = routes[0].1.surface.port();
+    if routes.iter().any(|(_, adapter)| adapter.surface.port() != port) {
         return Err(invalid(
             "derivation.native_surface",
-            "a terminal native route is the only route of its Application",
+            "native terminal routes declare the same terminal Port",
         ));
-    };
-    let port = adapter.surface.port();
+    }
+    let operations = routes[0]
+        .1
+        .operation_paths()
+        .collect::<BTreeSet<&str>>();
+    for (label, adapter) in routes.iter().skip(1) {
+        let declared = adapter.operation_paths().collect::<BTreeSet<&str>>();
+        if declared != operations {
+            return Err(invalid(
+                "derivation.native_surface",
+                format!(
+                    "native terminal route {label:?} declares different operations than the \
+                     first terminal route"
+                ),
+            ));
+        }
+    }
     if !http.is_empty() || !scenarios.is_empty() || !tls.is_empty() {
         return Err(invalid(
             "contract.observation",
@@ -1235,10 +1255,7 @@ fn validate_terminal_observations(
                 format!("a terminal observation names the route terminal Port {port:?}"),
             ));
         }
-        if !adapter
-            .operation_paths()
-            .any(|path| path == observation.operation)
-        {
+        if !operations.contains(observation.operation.as_str()) {
             return Err(invalid(
                 "contract.observation.path",
                 "a terminal observation names no declared operation",
@@ -1251,8 +1268,7 @@ fn validate_terminal_observations(
             ));
         }
     }
-    let declared = adapter.operation_paths().collect::<BTreeSet<_>>();
-    if let Some(missing) = declared.difference(&observed).next() {
+    if let Some(missing) = operations.difference(&observed).next() {
         return Err(invalid(
             "contract.observation",
             format!("declared operation {missing:?} has no terminal observation"),
