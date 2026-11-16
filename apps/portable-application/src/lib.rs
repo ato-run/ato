@@ -7405,6 +7405,7 @@ mod m2_source_build_network_tests {
             format: Some("zip".to_owned()),
             signature: None,
             signature_target: None,
+            native_surface: None,
             facts: facts
                 .iter()
                 .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
