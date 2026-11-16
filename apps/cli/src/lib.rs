@@ -3,6 +3,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod data;
+pub mod derivation_selection;
 mod desktop_control;
 mod formation_exploration;
 mod formation_input;
@@ -25,7 +26,7 @@ pub mod formation_session_mcp;
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -78,6 +79,8 @@ use ato_record_writer::{
 use ato_runtime_object_graph::standard_reference_registry;
 use ato_sandbox::{SandboxPolicy, apply_sandbox};
 use clap::{Args, Parser, Subcommand};
+
+use crate::derivation_selection::{DerivationCandidate, DerivationChoice};
 
 pub use crate::object_transport::{
     ExportedPort, HttpObjectTransportApi, ObjectGraphIndexV1, ObjectUploadReceipt, RequiredBinding,
@@ -327,9 +330,25 @@ struct RunArgs {
     /// A portable `.capsule` file, or a Hub reference
     /// `capsules/<owner>/<name>[:tag|@sha256:<hex>]`.
     capsule: PathBuf,
-    /// Select one declared DerivationRef. Required when the bundle has more than one route.
+    /// Select one declared DerivationRef explicitly.
+    ///
+    /// A bundle with several routes never picks one for you: without this flag
+    /// it either asks on a terminal or refuses with exit 2.
     #[arg(long)]
     derivation: Option<String>,
+    /// Print every declared Derivation as JSON and exit without running one.
+    ///
+    /// The document is built from the same validation and host facts a Run
+    /// uses, so a tool that shows the choice does not reimplement it.
+    #[arg(long)]
+    list_derivations: bool,
+    /// Accept the selected Derivation's declared permissions without the
+    /// interactive confirmation.
+    ///
+    /// It never selects a Derivation and never admits a route this host cannot
+    /// run.
+    #[arg(long)]
+    accept_permissions: bool,
     #[arg(long = "bind", value_parser = parse_binding)]
     bindings: Vec<(String, String)>,
     /// Verify the local realization without opening a browser, then exit.
@@ -740,6 +759,14 @@ fn version(json: bool) -> Result<()> {
     Ok(())
 }
 
+/// The process exit code a refusal asks for.
+///
+/// A missing explicit decision (a Derivation to name, a permission to accept)
+/// is a usage contract, not a crash: it exits 2 like a malformed invocation.
+pub fn cli_exit_code(error: &anyhow::Error) -> i32 {
+    derivation_selection::exit_code(error)
+}
+
 pub fn run() -> Result<()> {
     // Re-entry from INSIDE the build sandbox (Linux): bwrap execs this same
     // binary with sandbox-exec as argv[1]. Not a user-facing subcommand, so
@@ -981,41 +1008,6 @@ fn report_route_capabilities(bundle: &ato_objects::PortableApplicationBundle) {
     }
 }
 
-/// The lines `ato pack` prints for one Derivation.
-///
-/// Kept as a pure function so the wording is snapshot-tested rather than
-/// assembled in three places.
-fn capability_lines(
-    derivation: &str,
-    route: &str,
-    platform: &str,
-    connector: &str,
-    status: &ato_host_facts::CapabilityStatus,
-) -> Vec<String> {
-    let runnable = if status.state == ato_host_facts::CapabilityState::Advertised {
-        "yes"
-    } else {
-        "no"
-    };
-    let mut lines = vec![format!(
-        "capability derivation_ref={derivation} route={route} platform={platform} connector={connector} runnable={runnable} state={:?}",
-        status.state
-    )];
-    for reason in &status.reasons {
-        let kind = if reason.code.is_warning() {
-            "warning"
-        } else {
-            "reason"
-        };
-        lines.push(format!(
-            "capability {kind}={} message={}",
-            reason.code.as_str(),
-            reason.message
-        ));
-    }
-    lines
-}
-
 /// The capability lines for one validated route.
 ///
 /// `ato pack`'s report and the Hub Run preflight both print these, so a route
@@ -1028,18 +1020,11 @@ fn route_capability_lines(
     host: &ato_host_facts::HostFacts,
 ) -> Vec<String> {
     let status = ato_host_facts::execution_status(host, requirements);
-    let connector = match validated.realization {
-        ato_portable_application::PortableRealizationKind::StaticWeb => "not-applicable",
-        ato_portable_application::PortableRealizationKind::LocalProcess => "process",
-        _ => host
-            .connector_choice()
-            .map(|choice| choice.as_str())
-            .unwrap_or("none"),
-    };
+    let connector = derivation_selection::connector_for(validated, host);
     // The platform is read from the same route projection admission uses, so
     // the reported value and the admitted value cannot drift.
     let platform = requirements.platform.as_deref().unwrap_or("none");
-    capability_lines(
+    derivation_selection::capability_lines(
         derivation,
         validated.realization.label(),
         platform,
@@ -1895,6 +1880,15 @@ fn run_capsule(mut args: RunArgs) -> Result<()> {
     let bytes = fs::read(&args.capsule)?;
     match decode_capsule_bundle_document(&bytes)? {
         CapsuleBundleDocument::ComputationV2(bundle) => {
+            if args.list_derivations {
+                // A computation-root wire v2 bundle declares no Derivation; the
+                // listing surface is the portable application's, and silently
+                // starting a Run instead would be the wrong answer to a
+                // read-only request.
+                bail!(
+                    "--list-derivations requires a portable application (wire v3/v4); this is a computation-root wire v2 bundle"
+                );
+            }
             if hub.is_some() {
                 bail!(
                     "{}: the Hub served a computation-root wire v2 bundle; a Hub capsule is a portable application (wire v3/v4)",
@@ -2829,12 +2823,90 @@ fn contract_refusal_message(receipt: &ContractVerificationReceipt) -> String {
     }
 }
 
+/// Whether the numbered menu can be shown.
+///
+/// A test harness has no terminal, so `ATO_TEST_ASSUME_TTY=1` opts into the
+/// interactive path over a pipe. It only ever *adds* a prompt: the
+/// non-interactive refusal is unchanged when it is unset, and the prompt still
+/// requires an answer.
+fn stdin_is_a_terminal() -> bool {
+    std::io::stdin().is_terminal()
+        || std::env::var("ATO_TEST_ASSUME_TTY").is_ok_and(|value| value == "1")
+}
+
+/// Ask which declared Derivation to run.
+///
+/// Only called when stdin is a terminal: a non-interactive invocation never
+/// guesses, it refuses with the candidate list and exit 2.
+fn select_from_menu(candidates: &derivation_selection::DerivationCandidates) -> Result<String> {
+    for line in derivation_selection::render_candidates(candidates) {
+        println!("{line}");
+    }
+    loop {
+        print!(
+            "Select a derivation [1-{}] (q to quit): ",
+            candidates.derivations.len()
+        );
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        if std::io::stdin().read_line(&mut answer)? == 0 {
+            eprintln!();
+            return Err(derivation_selection::selection_required(candidates));
+        }
+        match derivation_selection::parse_menu_answer(&answer, candidates.derivations.len()) {
+            Some(derivation_selection::MenuAnswer::Index(index)) => {
+                return Ok(candidates.derivations[index].derivation_ref.clone());
+            }
+            Some(derivation_selection::MenuAnswer::Quit) => {
+                bail!("the Run was cancelled; nothing was started")
+            }
+            None => eprintln!(
+                "choose a number between 1 and {}",
+                candidates.derivations.len()
+            ),
+        }
+    }
+}
+
+/// Ask before exercising the selected route's declared permissions.
+///
+/// The answer is never implied: a Run that needs permissions and has no
+/// terminal is refused instead, and --accept-permissions is the only way to
+/// skip this prompt.
+fn confirm_permissions(candidate: &DerivationCandidate) -> Result<()> {
+    debug_assert!(!candidate.permissions.is_empty());
+    eprint!("Run this Derivation with these permissions? [y/N] ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    if std::io::stdin().read_line(&mut answer)? == 0 {
+        bail!("the Run was cancelled; nothing was started");
+    }
+    let answer = answer.trim();
+    if answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes") {
+        Ok(())
+    } else {
+        bail!("the Run was cancelled; nothing was started")
+    }
+}
+
 fn run_portable_application(
     args: RunArgs,
     bundle_bytes: &[u8],
     bundle: ato_objects::PortableApplicationBundle,
     hub: Option<&hub_public::ResolvedHubCapsule>,
 ) -> Result<()> {
+    if args.list_derivations {
+        // Listing reads the same bytes a Run would and probes the same host
+        // facts, but starts nothing and keeps no Run scratch.
+        let admission_root = ato_home()?.join("runs");
+        let candidates = derivation_selection::candidates(
+            &bundle,
+            &bundle_sha256(bundle_bytes),
+            &admission_root,
+        )?;
+        println!("{}", serde_json::to_string_pretty(&candidates)?);
+        return Ok(());
+    }
     #[cfg(unix)]
     let shutdown = Some({
         let flag = Arc::new(AtomicBool::new(false));
@@ -2845,19 +2917,86 @@ fn run_portable_application(
     #[cfg(not(unix))]
     let shutdown: Option<Arc<AtomicBool>> = None;
     let bindings = runtime_binding_values(args.bindings)?;
-    let selected_derivation = match args.derivation.as_deref() {
-        Some(reference) => reference.to_owned(),
-        None if bundle.index.derivations.len() == 1 => bundle.index.derivations[0].clone(),
-        None => bail!(
-            "portable Capsule declares {} derivations; select one with --derivation <sha256:...>",
-            bundle.index.derivations.len()
-        ),
-    };
+    let choice =
+        derivation_selection::resolve_choice(&bundle.index.derivations, args.derivation.as_deref());
+    // A Run that has to ask which route to start asks before it prepares
+    // anything: a non-interactive invocation is refused with the candidates and
+    // leaves no Run scratch behind.
+    if matches!(choice, DerivationChoice::NeedsSelection) && !stdin_is_a_terminal() {
+        let admission_root = ato_home()?.join("runs");
+        let candidates = derivation_selection::candidates(
+            &bundle,
+            &bundle_sha256(bundle_bytes),
+            &admission_root,
+        )?;
+        for line in derivation_selection::render_candidates(&candidates) {
+            eprintln!("{line}");
+        }
+        return Err(derivation_selection::selection_required(&candidates));
+    }
     let cache = ato_home()?.join("cache");
     fs::create_dir_all(&cache)?;
     let runtime = tempfile::Builder::new()
         .prefix("ato-portable-run-")
         .tempdir_in(cache)?;
+    // A bundle with more than one route is a choice. Every declared route is
+    // projected against these same host facts, so the screen a person answers
+    // and the admission the Run applies cannot disagree.
+    let candidates = if bundle.index.derivations.len() > 1 {
+        Some(derivation_selection::candidates(
+            &bundle,
+            &bundle_sha256(bundle_bytes),
+            runtime.path(),
+        )?)
+    } else {
+        None
+    };
+    let (selected_derivation, chosen_from_menu) = match choice {
+        DerivationChoice::Explicit(reference) | DerivationChoice::Only(reference) => {
+            (reference, false)
+        }
+        DerivationChoice::NeedsSelection => {
+            let candidates = candidates
+                .as_ref()
+                .expect("a bundle with several routes has candidates");
+            (select_from_menu(candidates)?, true)
+        }
+    };
+    // The selected route is admitted and its declared permissions are shown
+    // before anything is realized. A route this host cannot run is refused by
+    // name; no other declared route is ever tried instead.
+    if let Some(candidate) = candidates.as_ref().and_then(|candidates| {
+        candidates
+            .derivations
+            .iter()
+            .find(|candidate| candidate.derivation_ref == selected_derivation)
+    }) {
+        if let Some(invalid) = &candidate.invalid {
+            bail!("{invalid}");
+        }
+        // A Hub Run keeps its existing preflight so the refusal code and the
+        // diagnosis stay the Hub's; a local bundle is admitted here.
+        if hub.is_none() && !candidate.runnable {
+            for line in derivation_selection::candidate_capability_lines(candidate) {
+                eprintln!("{line}");
+            }
+            eprintln!("capability required {}", candidate.required_environment());
+            return Err(derivation_selection::capability_unavailable(
+                candidate,
+                &args.capsule.display().to_string(),
+            ));
+        }
+        for line in derivation_selection::render_permissions(candidate) {
+            eprintln!("{line}");
+        }
+        if derivation_selection::needs_permission_confirmation(
+            chosen_from_menu,
+            args.accept_permissions,
+            candidate,
+        ) {
+            confirm_permissions(candidate)?;
+        }
+    }
     // A Hub capsule is measured before its scratch becomes a Run: the same
     // facts the common admission uses are what the refusal is based on, and
     // nothing is realized on a host that cannot run the selected Derivation.
@@ -3765,7 +3904,7 @@ mod tests {
             )],
         };
         assert_eq!(
-            capability_lines(
+            derivation_selection::capability_lines(
                 "sha256:abc",
                 "OCI Service Group",
                 "linux/amd64",
@@ -3787,7 +3926,7 @@ mod tests {
             )],
         };
         assert_eq!(
-            capability_lines(
+            derivation_selection::capability_lines(
                 "sha256:def",
                 "OCI Container",
                 "linux/arm64",
@@ -4192,6 +4331,8 @@ mod tests {
         let args = RunArgs {
             capsule: PathBuf::from("."),
             derivation: None,
+            list_derivations: false,
+            accept_permissions: false,
             bindings: Vec::new(),
             no_open: false,
             verification_receipt: None,
