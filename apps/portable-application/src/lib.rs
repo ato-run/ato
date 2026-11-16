@@ -49,6 +49,8 @@ mod native_desktop_tests;
 mod native_surface_tests;
 #[cfg(test)]
 mod native_terminal_authoring_tests;
+#[cfg(test)]
+mod native_terminal_tests;
 pub mod oci_archive;
 pub mod portability_export;
 pub mod portability_plan;
