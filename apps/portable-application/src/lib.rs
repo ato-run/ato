@@ -2853,6 +2853,14 @@ fn validate_native_desktop_route(
     }
     let descriptor = NativeDescriptor::from_step(step)
         .map_err(|error| profile(format!("native descriptor: {}", error.0)))?;
+    // An argument vector addresses a program over the PTY the Adapter owns:
+    // only a Terminal route may state one, so an HTTP route has no way to
+    // smuggle arguments into its executable.
+    if !descriptor.argv.is_empty() && terminal.is_none() {
+        return Err(profile(
+            "a native argument vector is declared only on a Terminal route",
+        ));
+    }
     if derivation.requirements.host.is_some() {
         return Err(profile(
             "a native route states its platform as descriptor os/arch, not requirements.host",
