@@ -463,6 +463,7 @@ fn resolve_remote(client: &Client, base: &str, reference: &HubRef) -> Result<Res
         return Err(api_failure(
             "resolve",
             &reference.reference(),
+            &base,
             status,
             &body,
         ));
@@ -508,6 +509,7 @@ fn fetch_artifact(
         return Err(api_failure(
             "download the capsule artifact",
             "",
+            &base,
             status,
             &body,
         ));
@@ -678,7 +680,13 @@ fn artifact_client(base: &str) -> Result<Client> {
 }
 
 /// Map a non-success API response onto a coded error.
-fn api_failure(action: &str, target: &str, status: StatusCode, body: &str) -> anyhow::Error {
+fn api_failure(
+    action: &str,
+    target: &str,
+    base: &str,
+    status: StatusCode,
+    body: &str,
+) -> anyhow::Error {
     let detail = api_error_code(body);
     let suffix = if detail.is_empty() {
         String::new()
@@ -694,7 +702,7 @@ fn api_failure(action: &str, target: &str, status: StatusCode, body: &str) -> an
         401 => hub_error(
             ERR_UNAUTHORIZED,
             format!(
-                "the API refused to {action}{subject}{suffix}; run `ato login --api-url <url>` first"
+                "the API at {base} refused to {action}{subject}{suffix}; run `ato login --api-url {base}` first"
             ),
         ),
         403 => hub_error(
@@ -703,9 +711,12 @@ fn api_failure(action: &str, target: &str, status: StatusCode, body: &str) -> an
                 "the API refused to {action}{subject}{suffix}; this account does not own that namespace"
             ),
         ),
+        // The reference is registry-scoped: the same <owner>/<name> lives in
+        // a DIFFERENT Hub per API origin (production vs staging), so the
+        // origin is part of the answer, not decoration.
         404 => hub_error(
             ERR_NOT_FOUND,
-            format!("the Hub has no such capsule or version{subject}{suffix}"),
+            format!("the Hub at {base} has no such capsule or version{subject}{suffix}"),
         ),
         409 => hub_error(
             ERR_DIGEST_MISMATCH,
@@ -882,6 +893,7 @@ fn put_publish(
         return Err(api_failure(
             "publish",
             &format!("{HUB_REF_PREFIX}{owner}/{name}"),
+            &base,
             status,
             &body,
         ));
@@ -930,6 +942,7 @@ fn post_run(resolved: &ResolvedHubCapsule, receipt: &ContractVerificationReceipt
         return Err(api_failure(
             "record the Run",
             &resolved.reference.reference(),
+            &base,
             status,
             &text,
         ));
