@@ -870,12 +870,16 @@ pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure
             detail: "sandbox-exec disappeared between admission and launch".to_owned(),
         }))
     })?;
-    let command = vec![
+    let mut command = vec![
         launcher.display().to_string(),
         "-f".to_owned(),
         profile_path.display().to_string(),
         prepared.entry.display().to_string(),
     ];
+    // A Terminal route may declare the arguments its program is addressed
+    // with; an HTTP route never does (validation refuses it), so this is empty
+    // everywhere else.
+    command.extend(request.descriptor.argv.iter().cloned());
     let environment = environment_for(&request, &scratch_root, request.ports);
     // A Terminal route is observed through the PTY it owns, not through a
     // listening socket: there is no Port to wait for and no listener to prove.
@@ -1669,6 +1673,7 @@ time.sleep(0.3)
                 format: ato_formation::native_desktop::NativeArtifactFormat::TarGz,
                 signature: NativeSignaturePolicy::RequireValidOrLocalOverride,
                 signature_target: ato_formation::native_desktop::NativeSignatureTarget::Executable,
+                argv: Vec::new(),
             };
             let ports = vec![crate::ValidatedNativePort {
                 id: "app.http".to_owned(),
@@ -1735,6 +1740,7 @@ time.sleep(0.3)
                 format: ato_formation::native_desktop::NativeArtifactFormat::TarGz,
                 signature: NativeSignaturePolicy::RequireValidOrLocalOverride,
                 signature_target: ato_formation::native_desktop::NativeSignatureTarget::Executable,
+                argv: Vec::new(),
             };
             // The interpreter has to be inside the read-only set; use the
             // system python rather than whatever PATH this test inherited.
@@ -1878,6 +1884,7 @@ time.sleep(0.3)
             format: ato_formation::native_desktop::NativeArtifactFormat::TarGz,
             signature: NativeSignaturePolicy::RequireValidOrLocalOverride,
             signature_target: ato_formation::native_desktop::NativeSignatureTarget::Executable,
+            argv: Vec::new(),
         };
         let environment = BTreeMap::new();
         let request = NativeStart {
@@ -2071,11 +2078,11 @@ time.sleep(0.3)
             source: ato_formation::native_desktop::NativeArtifactSource::Bundled {
                 artifact: format!("sha256:{}", "a".repeat(64)),
             },
-
             entry: "MyApp.app/Contents/MacOS/MyApp".to_owned(),
             format: ato_formation::native_desktop::NativeArtifactFormat::TarGz,
             signature: policy,
             signature_target: ato_formation::native_desktop::NativeSignatureTarget::Bundle,
+            argv: Vec::new(),
         }
     }
 
