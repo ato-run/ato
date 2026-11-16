@@ -1,5 +1,8 @@
 //! `ato hub push` / `ato hub pull`: client-side capsulehub distribution.
 //!
+//! `ato hub publish` is the public Capsule Hub registry and lives in
+//! `hub_public`; it shares only the local formed-bundle validator below.
+//!
 //! The hub is a blind ciphertext store (see `services/capsulehub` and the
 //! Capsulehub RFC). This module owns the client half of the trust model:
 //!
@@ -527,7 +530,7 @@ fn is_loopback_host(authority: &str) -> bool {
     matches!(host.as_str(), "127.0.0.1" | "[::1]" | "::1" | "localhost")
 }
 
-fn sync_directory_best_effort(path: &Path) {
+pub(crate) fn sync_directory_best_effort(path: &Path) {
     // Directory fsync is unsupported on some platforms (e.g. macOS). The
     // rename itself is atomic; failure to sync the directory is not reported.
     if let Ok(directory) = fs::File::open(path) {
