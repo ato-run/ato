@@ -18,8 +18,10 @@ use crate::authoring::{
 };
 use crate::model_set::MODEL_SET_PROTOCOL;
 use crate::native_desktop::{
-    NATIVE_PROTOCOL, NativeArch, NativeArtifactFormat, NativeOs, NativeSignaturePolicy,
-    NativeSignatureTarget, native_bundle_root, valid_native_entry,
+    NATIVE_ARCH_RUNTIME, NATIVE_ARTIFACT_RUNTIME, NATIVE_ENTRY_RUNTIME, NATIVE_OS_RUNTIME,
+    NATIVE_PROTOCOL, NATIVE_REMOTE_URL_RUNTIME, NATIVE_RUNTIME_PREFIX, NATIVE_SOURCE_URL_RUNTIME,
+    NativeArch, NativeArtifactFormat, NativeOs, NativeSignaturePolicy, NativeSignatureTarget,
+    native_bundle_root, valid_native_entry,
 };
 use crate::requirements::HostRequirement;
 
@@ -148,11 +150,18 @@ pub struct PortableNativeDraftV2 {
     pub os: String,
     pub arch: String,
     pub entry: String,
-    pub artifact_path: String,
+    /// The bundle-carried artifact, when the route declares one. A remote or
+    /// source route names its artifact through `facts` instead.
+    pub artifact_path: Option<String>,
     pub format: Option<String>,
     pub signature: Option<String>,
     /// `executable` (default, omitted) or `bundle`.
     pub signature_target: Option<String>,
+    /// The optional `ato.native.*` facts this route states beyond os, arch and
+    /// entry: a remote reference, a source build, or a signature/format
+    /// override. The bundle builder merges them with the derived facts and
+    /// validates the union as one descriptor.
+    pub facts: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1090,11 +1099,32 @@ fn parse_single_route(
             PortableDerivationKindV2::StaticWeb
         }
         NATIVE_PROTOCOL => {
-            if !runtimes.is_empty() || !argv.is_empty() || !cwd.is_empty() || !env.is_empty() {
+            // A native route's optional facts are `ato.native.*` entries: the
+            // remote reference, the source build, or a format/signature
+            // override. os, arch and entry are the route's own fields, and the
+            // bundle artifact is `artifact`, so none of those may be repeated
+            // here.
+            for key in runtimes.keys() {
+                let dedicated = matches!(
+                    key.as_str(),
+                    NATIVE_OS_RUNTIME
+                        | NATIVE_ARCH_RUNTIME
+                        | NATIVE_ENTRY_RUNTIME
+                        | NATIVE_ARTIFACT_RUNTIME
+                );
+                if !key.starts_with(NATIVE_RUNTIME_PREFIX) || dedicated {
+                    return Err(invalid(
+                        "derivation.runtimes",
+                        "a native route declares only optional ato.native.* facts here; os, arch, \
+                         entry and the bundle artifact are route fields",
+                    ));
+                }
+            }
+            if !argv.is_empty() || !cwd.is_empty() || !env.is_empty() {
                 return Err(invalid(
                     "derivation",
-                    "a native route declares no runtimes, argv, cwd or env; its facts are \
-                     artifact, os, arch, entry and signature",
+                    "a native route declares no argv, cwd or env; its facts are artifact, os, \
+                     arch, entry, signature and the optional ato.native.* runtimes",
                 ));
             }
             if spa_fallback.is_some() {
@@ -1123,17 +1153,26 @@ fn parse_single_route(
                 .as_deref()
                 .and_then(NativeArch::parse)
                 .ok_or_else(|| invalid("derivation.arch", "must be `aarch64` or `x86_64`"))?;
-            let artifact = artifact.ok_or_else(|| {
-                invalid(
-                    "derivation.artifact",
-                    "a native route names the source-relative artifact file",
-                )
-            })?;
-            validate_relative(&artifact, "derivation.artifact")?;
-            if artifact == "." || !artifact.ends_with(".tar.gz") {
+            // The bundle artifact is optional because a route may name a remote
+            // reference or a source build instead. Exactly one artifact source
+            // is required and the descriptor validator decides that, so this
+            // layer only checks the shape of what is present.
+            if let Some(artifact) = artifact.as_deref() {
+                validate_relative(artifact, "derivation.artifact")?;
+                if artifact == "." || !artifact.ends_with(".tar.gz") {
+                    return Err(invalid(
+                        "derivation.artifact",
+                        "must be a .tar.gz file relative to the source root",
+                    ));
+                }
+            }
+            if artifact.is_none()
+                && !runtimes.contains_key(NATIVE_REMOTE_URL_RUNTIME)
+                && !runtimes.contains_key(NATIVE_SOURCE_URL_RUNTIME)
+            {
                 return Err(invalid(
                     "derivation.artifact",
-                    "must be a .tar.gz file relative to the source root",
+                    "a native route names a bundle artifact, a remote reference or a source build",
                 ));
             }
             let entry = entry.ok_or_else(|| {
@@ -1150,12 +1189,24 @@ fn parse_single_route(
             }
             let format = match format.as_deref() {
                 None => None,
-                Some(value) => Some(
-                    NativeArtifactFormat::parse(value)
-                        .ok_or_else(|| invalid("derivation.format", "must be `tar.gz`"))?
-                        .as_str()
-                        .to_owned(),
-                ),
+                Some(value) => {
+                    let parsed = NativeArtifactFormat::parse(value).ok_or_else(|| {
+                        invalid(
+                            "derivation.format",
+                            "must be `tar.gz`, or `zip`/`dmg` for a remote reference",
+                        )
+                    })?;
+                    // A bundle-carried artifact is a tarball; another packed
+                    // form only exists as a remote reference this Adapter
+                    // fetches and unpacks.
+                    if parsed != NativeArtifactFormat::TarGz && artifact.as_deref().is_some() {
+                        return Err(invalid(
+                            "derivation.format",
+                            "a bundle-carried artifact must be a `tar.gz`",
+                        ));
+                    }
+                    Some(parsed.as_str().to_owned())
+                }
             };
             let signature = match signature.as_deref() {
                 None => None,
@@ -1197,6 +1248,7 @@ fn parse_single_route(
                 format,
                 signature,
                 signature_target,
+                facts: runtimes.clone(),
             });
             PortableDerivationKindV2::Native
         }
@@ -2699,7 +2751,10 @@ default = "pure"
         let native = macos.native.as_ref().unwrap();
         assert_eq!(native.os, "macos");
         assert_eq!(native.arch, "aarch64");
-        assert_eq!(native.artifact_path, "dist/app-macos.tar.gz");
+        assert_eq!(
+            native.artifact_path.as_deref(),
+            Some("dist/app-macos.tar.gz")
+        );
         assert_eq!(native.entry, "app/run.sh");
         assert_eq!(
             native.signature.as_deref(),

@@ -888,8 +888,8 @@ fn one_source_declares_three_routes_over_one_contract() {
     assert_eq!(macos_native.ports[0].id, "app.http");
     assert_eq!(macos_native.ports[0].guest_port, 18080);
     assert_ne!(
-        macos_native.descriptor.artifact,
-        windows_native.descriptor.artifact
+        macos_native.descriptor.bundled_artifact().unwrap(),
+        windows_native.descriptor.bundled_artifact().unwrap()
     );
     // The macOS artifact is unsigned, which the route declares explicitly.
     assert!(macos_native.descriptor.signature.allows_local_override());
@@ -997,7 +997,10 @@ fn assert_native_evidence(
 ) {
     let native = route.native.as_ref().expect("the native descriptor");
     let evidence = &receipt["execution"]["native"];
-    assert_eq!(evidence["artifact_ref"], native.descriptor.artifact);
+    assert_eq!(
+        evidence["artifact_ref"],
+        native.descriptor.bundled_artifact().unwrap()
+    );
     assert_eq!(evidence["entry"], native.descriptor.entry);
     assert_eq!(
         evidence["signature_policy"],
@@ -1321,7 +1324,14 @@ fn an_artifact_digest_mismatch_is_refused_before_admission() {
     let bytes = fs::read(&capsule).unwrap();
     let (_, routes) = validate_bytes_all(&bytes).unwrap();
     let macos = native_route(&routes, "macos");
-    let artifact = macos.native.as_ref().unwrap().descriptor.artifact.clone();
+    let artifact = macos
+        .native
+        .as_ref()
+        .unwrap()
+        .descriptor
+        .bundled_artifact()
+        .unwrap()
+        .to_owned();
 
     let tampered = tamper_payload(&bytes, &artifact);
     let tampered_path = scratch.path().join("tampered-artifact.capsule");

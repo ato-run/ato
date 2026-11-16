@@ -343,6 +343,12 @@ struct RunArgs {
     /// relaxes filesystem, state, egress or lifecycle policy.
     #[arg(long)]
     allow_unsigned_native: bool,
+    /// Fetch a managed Rust toolchain into $ATO_HOME and build a source-backed
+    /// native route. Without this approval the Run refuses before downloading
+    /// anything; a bundle can require a toolchain but cannot grant the right to
+    /// install one.
+    #[arg(long)]
+    allow_native_source_build: bool,
     /// Ato API origin used to resolve `capsules/<owner>/<name>` references and
     /// to report a successful Run's receipt. Same origin as
     /// `ato login --api-url`.
@@ -2371,6 +2377,9 @@ fn portable_instance_worker_claimed(
         // A durable local Instance start has no unsigned-native override yet;
         // an unsigned native D is refused there rather than run silently.
         false,
+        // Likewise no source-build approval: an Instance start never installs a
+        // toolchain on its own.
+        ato_portable_application::portable_run::NativeSourceConsent::Unavailable,
     )?;
     let result = (|| -> Result<_> {
         if started.receipt.bundle_sha256.as_deref() != Some(instance.bundle_sha256.as_str())
@@ -2880,6 +2889,17 @@ fn run_portable_application(
         // The person running this bundle explicitly allowed an unsigned/ad-hoc
         // native artifact; the receipt records the decision.
         args.allow_unsigned_native,
+        // A source-backed native route needs an explicit approval before it may
+        // fetch a toolchain. Nothing is inferred from a TTY, and a
+        // non-interactive Run that has no approval is refused with its own
+        // message.
+        if args.allow_native_source_build {
+            ato_portable_application::portable_run::NativeSourceConsent::Approved
+        } else if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            ato_portable_application::portable_run::NativeSourceConsent::Denied
+        } else {
+            ato_portable_application::portable_run::NativeSourceConsent::Unavailable
+        },
     );
     // A Run that fails verification publishes nothing, exactly as it did
     // before the Formation Generalization line was integrated: the attempt
@@ -3153,8 +3173,10 @@ fn run_reform(args: ReformArgs) -> Result<()> {
             ..PortableRuntimeState::default()
         },
         // Transformation verifies a candidate; it never applies a local
-        // override to an unsigned native artifact.
+        // override to an unsigned native artifact, and never installs a
+        // toolchain to do it.
         false,
+        ato_portable_application::portable_run::NativeSourceConsent::Unavailable,
     );
 
     // The candidate directory survives the reform runtime; keep the transcript
@@ -3280,6 +3302,7 @@ fn start_portable_attempt(
     runtime_state: PortableRuntimeState<'_>,
     binding_environment: &BTreeMap<String, String>,
     native_local_override: bool,
+    native_source_consent: ato_portable_application::portable_run::NativeSourceConsent,
 ) -> Result<StartedPortableApplication> {
     use ato_runtime_attempt::admission::EffectAuthorization;
     use ato_runtime_attempt::attempt::{AttemptRequest, Continuation, ReceiptContext, run_attempt};
@@ -3290,7 +3313,8 @@ fn start_portable_attempt(
     // objects are cached, and which executable applies a portable sandbox
     // policy. The executor is shared with the hosted Formation worker, so
     // these no longer come from the CLI's own globals.
-    let cache_root = ato_home()?.join("cache");
+    let ato_home_dir = ato_home()?;
+    let cache_root = ato_home_dir.join("cache");
     let sandbox_shim = std::env::current_exe()
         .context("locate ato sandbox shim")?
         .canonicalize()
@@ -3305,6 +3329,8 @@ fn start_portable_attempt(
         // before realization on the same decision `ato pack` reported.
         host: runtime_state.host_facts,
         native_local_override,
+        ato_home: &ato_home_dir,
+        native_source_consent,
     };
     let spec = validated.attempt_spec(runtime_state.restored_snapshot_ref);
     // A local Instance's Run is the attempt; `ato run` starts a new one.
@@ -3482,6 +3508,7 @@ struct PortableRuntimeState<'a> {
     host_facts: Option<&'a ato_host_facts::HostFacts>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_and_verify_portable_application(
     bundle_bytes: &[u8],
     bundle: ato_objects::PortableApplicationBundle,
@@ -3490,6 +3517,7 @@ fn start_and_verify_portable_application(
     shutdown: Option<&AtomicBool>,
     runtime_state: PortableRuntimeState<'_>,
     native_local_override: bool,
+    native_source_consent: ato_portable_application::portable_run::NativeSourceConsent,
 ) -> Result<StartedPortableApplication> {
     let validated = validate_bundle_for_derivation(&bundle, selected_derivation)?;
     let empty_bindings = BTreeMap::new();
@@ -3506,6 +3534,7 @@ fn start_and_verify_portable_application(
         runtime_state,
         &binding_environment,
         native_local_override,
+        native_source_consent,
     )
 }
 
@@ -4166,6 +4195,7 @@ mod tests {
             bindings: Vec::new(),
             no_open: false,
             verification_receipt: None,
+            allow_native_source_build: false,
             allow_unsigned_native: false,
             api_url: auth_device::DEFAULT_API_URL.to_owned(),
         };
