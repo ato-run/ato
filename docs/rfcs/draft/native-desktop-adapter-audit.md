@@ -76,11 +76,48 @@ reported as complete.
   the common verifier alone decides `fully_satisfied` from its observations.
   This PR does not change that path.
 
+## 2.1 Added by PR3c: a Terminal surface observed without a probe Port
+
+SolidCraft's D1/D2 CLI routes open no listening socket, so the HTTP-probe K
+could not observe them. PR3c (M2 RFC section 8, decision A) connects the
+existing `terminal_exchange` mechanism to a v2 `ato.native@1` route. No new
+wire protocol and no new receipt schema version:
+
+- authoring: `[derivation.native_surface]` with `kind = "terminal"`, `port`,
+  `cols`, `rows`, and `[[derivation.native_surface.operations]]` entries that
+  use the existing `terminal_exchange` keys (`input`, `output_delimiter`,
+  `max_output_bytes`, `timeout_ms`, `ready_output`). There is no `probe_port`,
+  and a declaration that names one is an unknown field. Every bound is decided
+  by `NativeSurfaceAdapter::validate_catalog`, the same function the v1 Adapter
+  and the hosted gateway call.
+- logical transport: the route's one Port is `ato.pty@1` with no guest port,
+  and the Application surface names that Port. An HTTP native route is
+  unchanged and still requires `guest_port`.
+- K: `[[contract.observation]] use = "ato.contract.terminal@1"` with `port`,
+  the operation `path` and an optional `body_digest`. Exactly one observation
+  per declared operation, and no HTTP/TLS/scenario observation may target a
+  terminal route. This adds one Contract verifier, not a Protocol: it observes
+  bytes an existing operation produced.
+- Adapter: `lib/pty-host` owns the PTY (keeping
+  `#![forbid(unsafe_code)]` in `apps/portable-application`); the macOS Adapter
+  starts the same prepared entry under the same Seatbelt profile on that PTY.
+  Ready is the declared `ready_output`, otherwise the first output. Operations
+  run in authored order; a timeout, an output bound and a missing delimiter are
+  that operation's measurement and the sequence stops there, so the following
+  operations stay unobserved and fail closed.
+- receipt: the observation keeps the existing evidence shape — `path` is the
+  operation, `body_sha256` the digest of the captured bytes (delimiter
+  included), `captured_bytes` their size. No schema version is added; a
+  terminal run is a native run and carries `/5`'s native execution evidence.
+
 ## 3. Not implemented (recorded as incomplete)
 
 | Item | Current state | Refusal |
 | --- | --- | --- |
 | `dmg` artifact unpacking | accepted in the declaration vocabulary (remote only); no disk-image mount or copy, so D1 must reference a `zip` until this exists | `native_format_extractor_unavailable` |
+| v2 native pixel surface | a v2 native route authors a Terminal surface only; the pixel profile stays with the v1 native_surface Adapter | refused at authoring |
+| terminal ready framing | ready is the declared `ready_output`, otherwise the first output; a program that prints nothing before its input is observable only if it declares a prompt it actually prints | timeout recorded as an unsatisfied observation |
+| PTY availability | a host that cannot allocate a pseudo terminal refuses the terminal route at launch instead of falling back to a pipe | `native_terminal_start_failed` |
 | `zip` entries compressed with bzip2 / zstd / lzma, and ZIP64 archives | stored and deflate are unpacked (PR3b); another method or the ZIP64 record is refused per archive/entry, never skipped | `native_format_extractor_unavailable` |
 | build egress host filter | SBPL grants tcp/443 only; the declared host is validated against `NATIVE_BUILD_EGRESS_HOSTS`, but enforcement is port-level | recorded in the receipt's `build_network` |
 | Windows Adapter | stays fail-closed before launch because signature/sandbox cannot be enforced | `native_adapter_unavailable` family |
