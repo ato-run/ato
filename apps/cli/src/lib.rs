@@ -11,6 +11,7 @@ mod formation_session;
 mod formation_verify;
 mod hub;
 mod hub_public;
+mod hub_transfer;
 mod mcp_stdio;
 mod model_cache;
 mod object_transport;

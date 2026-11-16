@@ -28,11 +28,13 @@
 //! The HTTP layer takes its base URL as an argument so tests can point it at a
 //! loopback stub instead of the real API.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::hub_transfer::{self, TransferError};
 use anyhow::{Context, Result, bail, ensure};
 use ato_formation::native_surface::NativePresentation;
 use ato_formation::verify::ContractVerificationReceipt;
@@ -52,9 +54,13 @@ use serde::{Deserialize, Serialize};
 pub const HUB_REF_PREFIX: &str = "capsules/";
 /// The tag a reference without a selector resolves.
 pub const DEFAULT_TAG: &str = "latest";
-/// The API's per-bundle bound (8 MiB, RFC 4.5). Checked before downloading.
+/// The API's Base64 JSON per-bundle bound (8 MiB, RFC 4.5/4.6). A larger
+/// bundle only travels through the official publisher's presigned lane, whose
+/// transfer never holds the whole bundle in memory.
 pub const MAX_BUNDLE_BYTES: u64 = 8 * 1024 * 1024;
-
+/// How many times the large lane reopens a staged upload after a recoverable
+/// refusal (410 expired, 409 size/digest conflict).
+const LARGE_UPLOAD_ATTEMPTS: usize = 3;
 pub const ERR_INVALID_REF: &str = "hub-invalid-ref";
 pub const ERR_INVALID_DIGEST: &str = "hub-invalid-digest";
 pub const ERR_INVALID_TAG: &str = "hub-invalid-tag";
@@ -1021,9 +1027,31 @@ pub(crate) fn api_error_code(body: &str) -> String {
         .collect()
 }
 
-/// Publish one formed bundle: `PUT /v1/hub/capsules/<owner>/<name>`.
+/// Publish one formed bundle.
+///
+/// A bundle larger than the Base64 JSON bound (MAX_BUNDLE_BYTES) takes the
+/// official large-upload lane: a short-TTL presigned PUT, a body streamed from
+/// the file with its SHA-256 computed on the wire, then a completion that
+/// re-reads size and checksum from R2 before any version or tag is written.
+/// The lane is only tried: an account without the official publisher record is
+/// answered "403 official_publisher_required", which falls back to the Base64
+/// lane and therefore keeps the pre-M2 behaviour of every general publisher.
 pub fn publish(args: PublishArgs) -> Result<()> {
-    publish_base64(args)
+    let size = fs::metadata(&args.capsule)
+        .with_context(|| format!("cannot read {}", args.capsule.display()))?
+        .len();
+    if size <= MAX_BUNDLE_BYTES {
+        return publish_base64(args, None);
+    }
+    let prepared = prepare_publish(&args)?;
+    match publish_large(&args, &prepared, size) {
+        Ok(()) => Ok(()),
+        Err(LargePublish::Fallback(reason)) => {
+            eprintln!("warning: {reason}; publishing through the Base64 JSON lane instead");
+            publish_base64(args, Some(prepared))
+        }
+        Err(LargePublish::Fatal(error)) => Err(error),
+    }
 }
 
 /// What both publish lanes need before they touch the network.
@@ -1144,7 +1172,7 @@ fn finish_publish(
 }
 
 /// The unchanged Base64 JSON lane: PUT /v1/hub/capsules/<owner>/<name>.
-fn publish_base64(args: PublishArgs) -> Result<()> {
+fn publish_base64(args: PublishArgs, prepared: Option<PreparedPublish>) -> Result<()> {
     let bytes = fs::read(&args.capsule)
         .with_context(|| format!("cannot read {}", args.capsule.display()))?;
     if bytes.len() as u64 > MAX_BUNDLE_BYTES {
@@ -1169,7 +1197,10 @@ fn publish_base64(args: PublishArgs) -> Result<()> {
                 args.capsule.display()
             )
         })?;
-    let prepared = prepare_publish(&args)?;
+    let prepared = match prepared {
+        Some(prepared) => prepared,
+        None => prepare_publish(&args)?,
+    };
     let metadata = publish_metadata(&args, prepared.readme.as_deref(), capabilities);
     let digest = bundle_sha256(&bytes);
     let request = PublishRequest {
@@ -1188,6 +1219,356 @@ fn publish_base64(args: PublishArgs) -> Result<()> {
         &request,
     )?;
     finish_publish(&prepared, &digest, bytes.len() as u64, response)
+}
+
+/// Why the large lane stopped before publishing anything.
+enum LargePublish {
+    /// The account has no official publisher capacity (or the deployment cannot
+    /// presign at all): the Base64 lane keeps its old meaning.
+    Fallback(String),
+    Fatal(anyhow::Error),
+}
+
+/// What to do after a completion refusal.
+enum CompletionRefusal {
+    /// A fresh staged upload may settle it (410 expired, 409 size/digest).
+    Retry(String),
+    Fallback(String),
+    Fatal(anyhow::Error),
+}
+
+/// The API's answer to POST .../uploads: the staged intent, one presigned PUT
+/// and the completion path. Bytes never travel in this body.
+#[derive(Debug, Deserialize)]
+struct UploadTicket {
+    upload_id: String,
+    #[serde(rename = "ref")]
+    reference: String,
+    #[serde(default)]
+    tag: Option<String>,
+    digest: String,
+    size_bytes: u64,
+    #[serde(default)]
+    max_bytes: Option<u64>,
+    #[serde(default)]
+    method: Option<String>,
+    upload_url: String,
+    #[serde(default)]
+    upload_headers: BTreeMap<String, String>,
+    #[serde(default)]
+    complete_path: String,
+}
+
+/// Publish through the official large-upload lane.
+///
+/// Order is part of the contract: the declared digest is computed by streaming
+/// the file (nothing buffered), the bundle is validated locally so bytes the Run
+/// path would refuse are never uploaded, then each attempt opens a fresh staged
+/// upload, streams the body while hashing it, and completes with the same
+/// metadata the Base64 lane sends.
+fn publish_large(
+    args: &PublishArgs,
+    prepared: &PreparedPublish,
+    size: u64,
+) -> Result<(), LargePublish> {
+    let (scanned, digest) =
+        hub_transfer::stream_file_sha256(&args.capsule).map_err(LargePublish::Fatal)?;
+    if scanned != size {
+        return Err(LargePublish::Fatal(hub_error(
+            ERR_SIZE_MISMATCH,
+            format!(
+                "{} changed while publishing ({size} bytes, then {scanned} bytes)",
+                args.capsule.display()
+            ),
+        )));
+    }
+    // Local validation reads the bundle document once (the validator owns the
+    // 768 MiB / 256 MiB decoded bounds); the transfer below streams the file a
+    // second time and never holds it.
+    let bytes = fs::read(&args.capsule)
+        .with_context(|| format!("cannot read {}", args.capsule.display()))
+        .map_err(LargePublish::Fatal)?;
+    let formed = crate::hub::validate_formed_bundle_document(&bytes)
+        .with_context(|| format!("{} must not be published", args.capsule.display()))
+        .map_err(LargePublish::Fatal)?;
+    let capabilities = derive_capabilities(&formed.bundle, &formed.derivations)
+        .with_context(|| {
+            format!(
+                "the capabilities of {} cannot be represented in Hub metadata",
+                args.capsule.display()
+            )
+        })
+        .map_err(LargePublish::Fatal)?;
+    drop(formed);
+    drop(bytes);
+    let metadata = publish_metadata(args, prepared.readme.as_deref(), capabilities);
+    let client = api_client().map_err(LargePublish::Fatal)?;
+    let transfer = hub_transfer::transfer_client().map_err(LargePublish::Fatal)?;
+    for attempt in 1..=LARGE_UPLOAD_ATTEMPTS {
+        let ticket = start_large_upload(&client, prepared, size, &digest)?;
+        hub_transfer::stream_put(
+            &transfer,
+            &ticket.upload_url,
+            &ticket.upload_headers,
+            &args.capsule,
+            size,
+            &digest,
+        )
+        .map_err(|error| LargePublish::Fatal(upload_transfer_error(prepared, error)))?;
+        match complete_large_upload(&client, prepared, &ticket, &metadata) {
+            Ok(response) => {
+                return finish_publish(prepared, &digest, size, response)
+                    .map_err(LargePublish::Fatal);
+            }
+            Err(CompletionRefusal::Fallback(reason)) => {
+                return Err(LargePublish::Fallback(reason));
+            }
+            Err(CompletionRefusal::Fatal(error)) => return Err(LargePublish::Fatal(error)),
+            Err(CompletionRefusal::Retry(reason)) => {
+                if attempt == LARGE_UPLOAD_ATTEMPTS {
+                    return Err(LargePublish::Fatal(hub_error(
+                        ERR_API_FAILED,
+                        format!(
+                            "the large upload was not accepted after {LARGE_UPLOAD_ATTEMPTS} attempts: {reason}"
+                        ),
+                    )));
+                }
+                eprintln!(
+                    "warning: {reason}; restarting the staged upload ({attempt}/{LARGE_UPLOAD_ATTEMPTS})"
+                );
+            }
+        }
+    }
+    Err(LargePublish::Fatal(hub_error(
+        ERR_API_FAILED,
+        "the large upload was not accepted",
+    )))
+}
+
+fn start_large_upload(
+    client: &Client,
+    prepared: &PreparedPublish,
+    size: u64,
+    digest: &str,
+) -> Result<UploadTicket, LargePublish> {
+    let reference = format!("{HUB_REF_PREFIX}{}/{}", prepared.owner, prepared.name);
+    let url = format!(
+        "{}{HUB_CAPSULES_PATH}{}/{}/uploads",
+        prepared.base, prepared.owner, prepared.name
+    );
+    // The body declares INTENT only; capability fields are never sent (the API
+    // refuses a request that tries to assert them).
+    let body = serde_json::json!({
+        "size_bytes": size,
+        "digest": digest,
+        "tag": prepared.tag,
+    });
+    let response = client
+        .post(&url)
+        .header(AUTHORIZATION, format!("Bearer {}", prepared.token))
+        .header(CONTENT_TYPE, "application/json")
+        .json(&body)
+        .send()
+        .map_err(|error| {
+            LargePublish::Fatal(hub_error(
+                ERR_API_FAILED,
+                format!("failed to reach the Ato API at {}: {error}", prepared.base),
+            ))
+        })?;
+    let status = response.status();
+    let text = response.text().unwrap_or_default();
+    if !status.is_success() {
+        let code = api_error_code(&text);
+        return Err(match (status.as_u16(), code.as_str()) {
+            (403, "official_publisher_required") => {
+                LargePublish::Fallback("this account is not an official publisher".to_owned())
+            }
+            (503, "presign_unavailable") => {
+                LargePublish::Fallback("the API cannot mint a presigned upload URL".to_owned())
+            }
+            _ => LargePublish::Fatal(api_failure_code(
+                "start a large upload",
+                &reference,
+                &prepared.base,
+                status,
+                &code,
+            )),
+        });
+    }
+    let ticket: UploadTicket = serde_json::from_str(&text).map_err(|error| {
+        LargePublish::Fatal(hub_error(
+            ERR_API_FAILED,
+            format!("the upload response is malformed: {error}"),
+        ))
+    })?;
+    if ticket.reference != reference {
+        return Err(LargePublish::Fatal(hub_error(
+            ERR_API_FAILED,
+            format!(
+                "the API opened an upload for `{}` instead of `{reference}`",
+                ticket.reference
+            ),
+        )));
+    }
+    let served = parse_digest(&ticket.digest).map_err(|message| {
+        LargePublish::Fatal(hub_error(
+            ERR_API_FAILED,
+            format!("the API staged `{}`: {message}", ticket.digest),
+        ))
+    })?;
+    if served != digest {
+        return Err(LargePublish::Fatal(hub_error(
+            ERR_DIGEST_MISMATCH,
+            format!("the API staged {served}; the bundle hashes to {digest}"),
+        )));
+    }
+    if ticket.size_bytes != size {
+        return Err(LargePublish::Fatal(hub_error(
+            ERR_SIZE_MISMATCH,
+            format!(
+                "the API staged {} bytes; the bundle is {size} bytes",
+                ticket.size_bytes
+            ),
+        )));
+    }
+    if let Some(tag) = ticket.tag.as_deref()
+        && tag != prepared.tag
+    {
+        return Err(LargePublish::Fatal(hub_error(
+            ERR_API_FAILED,
+            format!("the API staged tag `{tag}` instead of `{}`", prepared.tag),
+        )));
+    }
+    if let Some(method) = ticket.method.as_deref()
+        && method != "PUT"
+    {
+        return Err(LargePublish::Fatal(hub_error(
+            ERR_API_FAILED,
+            format!("the API asked for `{method}` instead of a presigned PUT"),
+        )));
+    }
+    let expected_complete = format!(
+        "{HUB_CAPSULES_PATH}{}/{}/uploads/{}/complete",
+        prepared.owner, prepared.name, ticket.upload_id
+    );
+    if !ticket.complete_path.is_empty() && ticket.complete_path != expected_complete {
+        return Err(LargePublish::Fatal(hub_error(
+            ERR_API_FAILED,
+            format!(
+                "the API named the completion path `{}` instead of `{expected_complete}`",
+                ticket.complete_path
+            ),
+        )));
+    }
+    if let Some(max_bytes) = ticket.max_bytes
+        && size > max_bytes
+    {
+        return Err(LargePublish::Fatal(hub_error(
+            ERR_BUNDLE_TOO_LARGE,
+            format!(
+                "this publisher may upload at most {max_bytes} bytes; the bundle is {size} bytes"
+            ),
+        )));
+    }
+    Ok(ticket)
+}
+
+fn complete_large_upload(
+    client: &Client,
+    prepared: &PreparedPublish,
+    ticket: &UploadTicket,
+    metadata: &PublishMetadata,
+) -> Result<PublishResponse, CompletionRefusal> {
+    let reference = format!("{HUB_REF_PREFIX}{}/{}", prepared.owner, prepared.name);
+    let path = if ticket.complete_path.is_empty() {
+        format!(
+            "{HUB_CAPSULES_PATH}{}/{}/uploads/{}/complete",
+            prepared.owner, prepared.name, ticket.upload_id
+        )
+    } else {
+        ticket.complete_path.clone()
+    };
+    let url = format!("{}{path}", prepared.base);
+    let body = serde_json::json!({ "metadata": metadata });
+    let response = client
+        .post(&url)
+        .header(AUTHORIZATION, format!("Bearer {}", prepared.token))
+        .header(CONTENT_TYPE, "application/json")
+        .json(&body)
+        .send()
+        .map_err(|error| {
+            CompletionRefusal::Fatal(hub_error(
+                ERR_API_FAILED,
+                format!("failed to reach the Ato API at {}: {error}", prepared.base),
+            ))
+        })?;
+    let status = response.status();
+    let text = response.text().unwrap_or_default();
+    if !status.is_success() {
+        let code = api_error_code(&text);
+        return Err(match (status.as_u16(), code.as_str()) {
+            (410, _) => CompletionRefusal::Retry("the API expired the staged upload".to_owned()),
+            (409, "size_mismatch" | "digest_mismatch") => {
+                CompletionRefusal::Retry(format!("the API reported {code} for the staged bytes"))
+            }
+            (422, _) => {
+                let reason = if code.is_empty() {
+                    "bundle_index_unreadable".to_owned()
+                } else {
+                    code.clone()
+                };
+                CompletionRefusal::Fatal(hub_error(
+                    ERR_INVALID_BUNDLE,
+                    format!(
+                        "the API could not read the uploaded bundle ({reason}); the bundle is not publishable"
+                    ),
+                ))
+            }
+            (503, "presign_unavailable") => {
+                CompletionRefusal::Fallback("the API cannot mint presigned URLs".to_owned())
+            }
+            _ => CompletionRefusal::Fatal(api_failure_code(
+                "complete the large upload",
+                &reference,
+                &prepared.base,
+                status,
+                &code,
+            )),
+        });
+    }
+    serde_json::from_str(&text).map_err(|error| {
+        CompletionRefusal::Fatal(hub_error(
+            ERR_API_FAILED,
+            format!("the completion response is malformed: {error}"),
+        ))
+    })
+}
+
+/// A presigned PUT that fails is never silently retried here: the caller decides
+/// from the structured refusal. Redirects are refused outright because a
+/// presigned URL names one key on one host.
+fn upload_transfer_error(prepared: &PreparedPublish, error: TransferError) -> anyhow::Error {
+    let reference = format!("{HUB_REF_PREFIX}{}/{}", prepared.owner, prepared.name);
+    match error {
+        TransferError::Refused { status, code: _ } if (300..400).contains(&status) => hub_error(
+            ERR_REDIRECT_REFUSED,
+            format!("the presigned upload for {reference} was redirected (HTTP {status})"),
+        ),
+        TransferError::Refused { status, code } => {
+            let suffix = if code.is_empty() {
+                String::new()
+            } else {
+                format!(" ({code})")
+            };
+            hub_error(
+                ERR_API_FAILED,
+                format!(
+                    "the presigned upload for {reference} was refused (HTTP {status}{suffix}); the sent bytes or their signed checksum did not match the declared digest"
+                ),
+            )
+        }
+        TransferError::Failed(error) => error,
+    }
 }
 
 fn api_failure_code(
