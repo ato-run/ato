@@ -338,6 +338,20 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
         self.validated.realization == PortableRealizationKind::LocalProcess
     }
 
+    /// This executor owns the host's PTY for the selected native Derivation.
+    ///
+    /// Admission refuses a native Surface declaration unless the realizer that
+    /// will actually run it names the exact Adapter profile and Derivation it
+    /// can own; this is that statement, and admit() still establishes the
+    /// physical availability and boundaries before anything starts.
+    fn native_surface_binding(&self) -> Option<(&str, &str)> {
+        let surface = self.validated.derivation.native_surface.as_ref()?;
+        Some((
+            surface.surface.profile(),
+            self.validated.derivation_ref.as_str(),
+        ))
+    }
+
     fn admit(&self, _profile: &RuntimeProfile) -> Option<AttemptFailure> {
         if !self.validated.model_sets.is_empty() {
             let checked = resolve_model_inputs(
