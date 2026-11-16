@@ -1869,14 +1869,23 @@ fn native_build_network_for(
     if !is_source_route {
         return Vec::new();
     }
-    ato_formation::native_desktop::NATIVE_BUILD_EGRESS_HOSTS
-        .iter()
-        .map(|host| ato_formation::requirements::NetworkRequirement {
-            phase: ato_formation::requirements::ExecutionPhase::Build,
-            host: (*host).to_owned(),
-            port: 443,
-        })
-        .collect()
+    // Requirements are compared in canonical form, so the host list is sorted
+    // by (host, port) rather than by the constant's declaration order.
+    let mut network: Vec<ato_formation::requirements::NetworkRequirement> =
+        ato_formation::native_desktop::NATIVE_BUILD_EGRESS_HOSTS
+            .iter()
+            .map(|host| ato_formation::requirements::NetworkRequirement {
+                phase: ato_formation::requirements::ExecutionPhase::Build,
+                host: (*host).to_owned(),
+                port: 443,
+            })
+            .collect();
+    network.sort_by(|left, right| {
+        left.host
+            .cmp(&right.host)
+            .then_with(|| left.port.cmp(&right.port))
+    });
+    network
 }
 
 pub fn build_dynamic_routes_bundle(
@@ -7186,10 +7195,9 @@ mod m2_source_build_network_tests {
         )]);
         let network = native_build_network_for(Some(&route));
         let hosts: Vec<&str> = network.iter().map(|entry| entry.host.as_str()).collect();
-        assert_eq!(
-            hosts,
-            ato_formation::native_desktop::NATIVE_BUILD_EGRESS_HOSTS.to_vec()
-        );
+        let mut expected = ato_formation::native_desktop::NATIVE_BUILD_EGRESS_HOSTS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(hosts, expected, "requirements are canonical, so hosts sort");
         assert!(network.iter().all(|entry| entry.port == 443));
         assert!(
             network
