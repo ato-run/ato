@@ -21,7 +21,7 @@ use ato_formation::verify::{
     CONTRACT_VERIFICATION_RECEIPT_SCHEMA, CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V2,
     CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V3, CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V4,
     CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V5, ContractVerification, ContractVerificationReceipt,
-    RuntimeHttpObservation, RuntimeObservation, RuntimeTlsObservation,
+    RuntimeHttpObservation, RuntimeObservation, RuntimeTerminalObservation, RuntimeTlsObservation,
     VerificationExecutionEvidence, VerificationTargetKind, verify_runtime,
 };
 
@@ -255,6 +255,32 @@ pub fn verify_observed_candidate(
     http: Vec<RuntimeHttpObservation>,
     scenarios: Vec<ScenarioObservation>,
     tls: Vec<RuntimeTlsObservation>,
+    execution: VerificationExecutionEvidence,
+    context: &ReceiptContext<'_>,
+) -> VerificationPoint {
+    verify_observed_candidate_with_terminal(
+        spec,
+        http,
+        scenarios,
+        tls,
+        Vec::new(),
+        execution,
+        context,
+    )
+}
+
+/// The same decision, with the terminal exchanges a native route measured.
+///
+/// Kept separate from [`verify_observed_candidate`] so every caller that has no
+/// Terminal surface states that by construction rather than by passing an empty
+/// list at each site.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_observed_candidate_with_terminal(
+    spec: &AttemptSpec<'_>,
+    http: Vec<RuntimeHttpObservation>,
+    scenarios: Vec<ScenarioObservation>,
+    tls: Vec<RuntimeTlsObservation>,
+    terminal: Vec<RuntimeTerminalObservation>,
     mut execution: VerificationExecutionEvidence,
     context: &ReceiptContext<'_>,
 ) -> VerificationPoint {
@@ -264,6 +290,7 @@ pub fn verify_observed_candidate(
         instance_snapshot_ref: spec.instance_snapshot_ref.clone(),
         scenarios,
         tls,
+        terminal,
     };
     let verification = verify_runtime(spec.contract, &observation);
     let mut receipt = ContractVerificationReceipt::for_attempt(
@@ -710,7 +737,7 @@ mod tests {
                 body_sha256: Some(digest(PROOF)),
                 input: None,
                 digest: None,
-
+                captured_bytes: None,
                 tls: None,
             })
         );

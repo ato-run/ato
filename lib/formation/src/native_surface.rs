@@ -28,7 +28,16 @@ pub const PIXEL_PORT_PROTOCOL: &str = TCP_PROTOCOL;
 #[serde(deny_unknown_fields)]
 pub struct NativeSurfaceAdapter {
     pub surface: NativePresentation,
-    pub probe_port: String,
+    /// The private HTTP probe Port the measured result is retrieved from.
+    ///
+    /// A v1 native route (an OCI workload serving a Surface) always declares
+    /// one: its K is an HTTP observation of the frozen measured bytes. A v2
+    /// native route whose Surface is a Terminal has no HTTP endpoint at all —
+    /// its K is the declared terminal exchange itself — so it declares none.
+    /// The value is omitted from the wire when absent, so every existing v1
+    /// Adapter keeps byte-identical canonical bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_port: Option<String>,
     pub operations: Vec<NativeProbeOperation>,
 }
 
@@ -148,6 +157,22 @@ impl NativeProbeOperation {
 }
 
 impl NativeSurfaceAdapter {
+    /// The Terminal geometry this Adapter drives, when its presentation is a
+    /// Terminal. A pixel stream is not driven by an exchange.
+    pub fn terminal_geometry(&self) -> Option<(u16, u16)> {
+        match self.surface {
+            NativePresentation::Terminal { cols, rows, .. } => Some((cols, rows)),
+            NativePresentation::PixelStream { .. } => None,
+        }
+    }
+
+    /// Every declared operation path, in authored order. These are the
+    /// exchanges a Run performs, and the identities a Terminal Contract
+    /// observation names.
+    pub fn operation_paths(&self) -> impl Iterator<Item = &str> {
+        self.operations.iter().map(NativeProbeOperation::path)
+    }
+
     /// Bounded Adapter catalog validation, shared with the physical Adapter.
     /// This grants no execution, endpoint access or Contract satisfaction.
     pub fn validate_catalog(&self) -> Result<(), &'static str> {
@@ -166,11 +191,17 @@ impl NativeSurfaceAdapter {
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
         };
-        if !presentation_valid
-            || !valid_port_id(self.surface.port())
-            || !valid_port_id(&self.probe_port)
-            || self.surface.port() == self.probe_port
-        {
+        let probe_valid = match &self.probe_port {
+            Some(probe_port) => {
+                valid_port_id(probe_port) && self.surface.port() != probe_port.as_str()
+            }
+            // Without a probe the measured result is never retrieved over
+            // HTTP. Only the Terminal presentation has that shape; a pixel
+            // stream is observed through its frozen frame endpoint, so it must
+            // still name the private probe it is retrieved by.
+            None => matches!(self.surface, NativePresentation::Terminal { .. }),
+        };
+        if !presentation_valid || !valid_port_id(self.surface.port()) || !probe_valid {
             return Err("native presentation and probe must be distinct valid Ports");
         }
         if self.operations.is_empty() || self.operations.len() > 8 {
@@ -264,18 +295,34 @@ impl NativeSurfaceAdapter {
             matching.next().is_none().then_some(port)
         };
         let surface = find(self.surface.port()).ok_or("native Surface Port is not unique")?;
-        let probe = find(&self.probe_port).ok_or("native probe Port is not unique")?;
+        if surface.protocol != self.surface.protocol()
+            || surface.from.is_empty()
+            || surface.client_address_transport.is_some()
+        {
+            return Err(
+                "native Surface and private HTTP probe must declare one consistent producer and transport binding",
+            );
+        }
+        let Some(probe_port) = self.probe_port.as_deref() else {
+            // A host-owned Terminal: the Adapter owns the PTY and no guest TCP
+            // listener is promised, so a declared guest port would be a
+            // promise nothing honours.
+            if surface.guest_port.is_some() {
+                return Err(
+                    "a native terminal surface without an HTTP probe declares no guest TCP Port",
+                );
+            }
+            return Ok(());
+        };
+        let probe = find(probe_port).ok_or("native probe Port is not unique")?;
         let transport = match (surface.guest_port, probe.guest_port) {
             (None, None) => true,
             (Some(surface), Some(probe)) => surface != 0 && probe != 0 && surface != probe,
             _ => false,
         };
-        if surface.protocol != self.surface.protocol()
-            || probe.protocol != HTTP_PROTOCOL
-            || surface.from.is_empty()
+        if probe.protocol != HTTP_PROTOCOL
             || surface.from != probe.from
             || !transport
-            || surface.client_address_transport.is_some()
             || probe.client_address_transport.is_some()
         {
             return Err(

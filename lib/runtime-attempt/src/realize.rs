@@ -29,6 +29,20 @@ pub trait RunningCandidate: Any {
     fn endpoints(&self) -> &BTreeMap<String, String>;
     /// `Some(description)` once the candidate has exited on its own.
     fn exited(&mut self) -> Result<Option<String>>;
+    /// Perform the declared terminal exchanges of a native Terminal surface,
+    /// in authored order, and report what each one measured.
+    ///
+    /// The default is "this candidate has no Terminal surface": it performs no
+    /// exchange, so every ato.contract.terminal@1 requirement it was handed
+    /// fails closed as unobserved. Only an Adapter that owns a PTY overrides
+    /// this, and it may not report an exchange it did not type.
+    fn observe_terminal(
+        &mut self,
+        _operations: &[(&str, &ato_formation::native_surface::NativeProbeOperation)],
+    ) -> Vec<ato_formation::verify::RuntimeTerminalObservation> {
+        Vec::new()
+    }
+
     /// Stop the candidate and remove the runtime scratch its realization
     /// owns (not a build workspace, not an unpublished artifact).
     fn stop(self: Box<Self>) -> Result<()>;

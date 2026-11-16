@@ -17,6 +17,7 @@ members = [
     "lib/objects",
     "lib/sandbox",
     "lib/ato-host-facts",
+    "lib/pty-host",
     "lib/tls-observe",
     "extensions/adapters/api",
     "extensions/adapters/process",

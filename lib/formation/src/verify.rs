@@ -40,7 +40,8 @@ use sha2::{Digest, Sha256};
 
 use crate::authoring::{
     BoundContract, HTTP_CONTRACT_VERIFIER, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER,
-    SCENARIO_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER, TlsStart, WORKSPACE_CONTRACT_VERIFIER,
+    SCENARIO_CONTRACT_VERIFIER, TERMINAL_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER, TlsStart,
+    WORKSPACE_CONTRACT_VERIFIER,
 };
 use crate::scenario::{
     SCENARIO_VERIFIER_VERSION, ScenarioObservation, ScenarioResult, is_scenario_ref,
@@ -237,12 +238,38 @@ pub struct RuntimeTlsObservation {
     pub within_validity: bool,
 }
 
+/// One declared terminal exchange, as a Run measured it.
+///
+/// The input, the delimiter and the deadline are the Adapter catalog's; this
+/// records what came back from the PTY. Nothing here is a verdict:
+/// [`verify_runtime`] decides whether it satisfies K.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeTerminalObservation {
+    /// The K requirement this exchange answers.
+    pub requirement_id: String,
+    /// The logical Terminal Port the exchange ran on.
+    pub port: String,
+    /// The declared operation path the exchange ran.
+    pub operation: String,
+    /// How many bytes were captured (delimiter included), within the
+    /// operation's declared bound.
+    pub captured_bytes: u64,
+    /// sha256 of exactly those captured bytes.
+    pub captured_sha256: String,
+    /// Whether the declared delimiter was observed at the end of the capture.
+    pub delimiter_found: bool,
+    /// Why the exchange did not complete, when it did not.
+    pub failure: Option<String>,
+}
+
 /// Evidence gathered from an actual running candidate.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RuntimeObservation {
     pub input_refs: BTreeMap<String, String>,
     pub http: Vec<RuntimeHttpObservation>,
     pub instance_snapshot_ref: Option<String>,
+    /// What the runtime measured on each declared terminal exchange.
+    pub terminal: Vec<RuntimeTerminalObservation>,
     /// What the runtime's scenario executor established, by requirement id.
     /// Empty on paths that do not execute scenarios (Formation, hosted), where
     /// a scenario requirement then fails closed as unobserved.
@@ -289,6 +316,11 @@ pub struct VerificationEvidence {
     pub input: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digest: Option<String>,
+    /// `ato.contract.terminal@1` only: how many bytes the exchange captured.
+    /// The captured bytes themselves stay in the run; the receipt states their
+    /// digest and their size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_bytes: Option<u64>,
     /// `ato.contract.tls@1` only: the certificate that port presented.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<TlsEvidence>,
@@ -539,7 +571,7 @@ impl ContractVerificationReceipt {
                                 body_sha256: Some(observation.body_digest.clone()),
                                 input: None,
                                 digest: None,
-
+                                captured_bytes: None,
                                 tls: None,
                             }),
                         WORKSPACE_CONTRACT_VERIFIER => {
@@ -553,7 +585,7 @@ impl ContractVerificationReceipt {
                                     body_sha256: None,
                                     input: Some(input.clone()),
                                     digest: runtime.input_refs.get(input).cloned(),
-
+                                    captured_bytes: None,
                                     tls: None,
                                 })
                         }
@@ -567,7 +599,7 @@ impl ContractVerificationReceipt {
                                 body_sha256: None,
                                 input: None,
                                 digest: Some(digest.clone()),
-
+                                captured_bytes: None,
                                 tls: None,
                             }),
                         SCENARIO_CONTRACT_VERIFIER => runtime
@@ -581,7 +613,7 @@ impl ContractVerificationReceipt {
                                 body_sha256: Some(observation.transcript_digest.clone()),
                                 input: None,
                                 digest: Some(observation.scenario_ref.clone()),
-
+                                captured_bytes: None,
                                 tls: None,
                             }),
                         TLS_CONTRACT_VERIFIER => runtime
@@ -595,6 +627,7 @@ impl ContractVerificationReceipt {
                                 body_sha256: None,
                                 input: None,
                                 digest: None,
+                                captured_bytes: None,
                                 tls: Some(TlsEvidence {
                                     server_name: observation.server_name.clone(),
                                     start: observation.start,
@@ -607,6 +640,20 @@ impl ContractVerificationReceipt {
                                     trust_anchor: observation.trust_anchor.clone(),
                                     handshake_completed: observation.handshake_completed,
                                 }),
+                            }),
+                        TERMINAL_CONTRACT_VERIFIER => runtime
+                            .terminal
+                            .iter()
+                            .find(|observation| observation.requirement_id == requirement.id)
+                            .map(|observation| VerificationEvidence {
+                                method: None,
+                                path: Some(observation.operation.clone()),
+                                status: None,
+                                body_sha256: Some(observation.captured_sha256.clone()),
+                                input: None,
+                                digest: None,
+                                captured_bytes: Some(observation.captured_bytes),
+                                tls: None,
                             }),
                         _ => None,
                     });
@@ -799,6 +846,14 @@ pub fn verify(contract: &BoundContract, candidate: &CandidateObservation) -> Con
                     // names the runtime gate that will decide this.
                     ObservationOutcome::Deferred {
                         by: format!("runtime tls verifier {}", requirement.id),
+                    }
+                }
+                TERMINAL_CONTRACT_VERIFIER => {
+                    // A terminal exchange is typed into a running PTY. The
+                    // native Adapter owns that exchange, so Formation names the
+                    // gate that will decide it — never that it passed.
+                    ObservationOutcome::Deferred {
+                        by: format!("runtime terminal exchange verifier {}", requirement.id),
                     }
                 }
                 other => ObservationOutcome::Failed {
@@ -1054,6 +1109,68 @@ pub fn verify_runtime(
                                 code: "tls_handshake_incomplete",
                                 detail: format!(
                                     "a certificate valid for {server_name} was presented on                                      {port}, but the TLS handshake did not complete"
+                                ),
+                            }
+                        }
+                        Some(_) => ObservationOutcome::Satisfied,
+                    }
+                }
+                TERMINAL_CONTRACT_VERIFIER => {
+                    let port = requirement.port.as_deref().unwrap_or_default();
+                    let operation = requirement.path.as_deref().unwrap_or_default();
+                    match candidate
+                        .terminal
+                        .iter()
+                        .find(|observation| observation.requirement_id == requirement.id)
+                    {
+                        None => ObservationOutcome::Failed {
+                            code: "terminal_observation_missing",
+                            detail: format!(
+                                "the runtime performed no terminal exchange for {}",
+                                requirement.id
+                            ),
+                        },
+                        Some(observation)
+                            if observation.port != port || observation.operation != operation =>
+                        {
+                            ObservationOutcome::Failed {
+                                code: "terminal_observation_mismatch",
+                                detail: format!(
+                                    "the exchange ran on {} {}; K observes {port} {operation}",
+                                    observation.port, observation.operation
+                                ),
+                            }
+                        }
+                        Some(observation) if observation.failure.is_some() => {
+                            ObservationOutcome::Failed {
+                                code: "terminal_exchange_failed",
+                                detail: observation
+                                    .failure
+                                    .clone()
+                                    .unwrap_or_else(|| "the exchange did not complete".to_owned()),
+                            }
+                        }
+                        Some(observation) if !observation.delimiter_found => {
+                            ObservationOutcome::Failed {
+                                code: "terminal_delimiter_missing",
+                                detail: format!(
+                                    "the exchange on {port} {operation} captured {} bytes without its declared delimiter",
+                                    observation.captured_bytes
+                                ),
+                            }
+                        }
+                        Some(observation)
+                            if requirement
+                                .body_digest
+                                .as_ref()
+                                .is_some_and(|digest| *digest != observation.captured_sha256) =>
+                        {
+                            ObservationOutcome::Failed {
+                                code: "terminal_output_digest_mismatch",
+                                detail: format!(
+                                    "the exchange on {port} {operation} captured {}; expected {}",
+                                    observation.captured_sha256,
+                                    requirement.body_digest.as_deref().expect("checked as some")
                                 ),
                             }
                         }
