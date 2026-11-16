@@ -969,34 +969,7 @@ fn report_route_capabilities(bundle: &ato_objects::PortableApplicationBundle) {
         .collect();
     let host = ato_host_facts::HostFacts::probe(&requirements);
     for (derivation, validated, requirement) in &routes {
-        let status = ato_host_facts::execution_status(&host, requirement);
-        let connector = match validated.realization {
-            ato_portable_application::PortableRealizationKind::StaticWeb => "not-applicable",
-            ato_portable_application::PortableRealizationKind::LocalProcess => "process",
-            _ => host
-                .connector_choice()
-                .map(|choice| choice.as_str())
-                .unwrap_or("none"),
-        };
-        let platform = validated
-            .derivation
-            .runtimes
-            .get(ato_portable_application::OCI_PLATFORM_RUNTIME)
-            .or_else(|| {
-                validated.derivation.steps.iter().find_map(|step| {
-                    step.runtimes
-                        .get(ato_portable_application::OCI_PLATFORM_RUNTIME)
-                })
-            })
-            .map(String::as_str)
-            .unwrap_or("none");
-        for line in capability_lines(
-            derivation,
-            validated.realization.label(),
-            platform,
-            connector,
-            &status,
-        ) {
+        for line in route_capability_lines(derivation, validated, requirement, &host) {
             println!("{line}");
         }
     }
@@ -1035,6 +1008,89 @@ fn capability_lines(
         ));
     }
     lines
+}
+
+/// The capability lines for one validated route.
+///
+/// `ato pack`'s report and the Hub Run preflight both print these, so a route
+/// is diagnosed with one vocabulary whether it was packed locally or fetched
+/// from the Hub.
+fn route_capability_lines(
+    derivation: &str,
+    validated: &ValidatedPortableApplication,
+    requirements: &ato_host_facts::ExecutionRequirements,
+    host: &ato_host_facts::HostFacts,
+) -> Vec<String> {
+    let status = ato_host_facts::execution_status(host, requirements);
+    let connector = match validated.realization {
+        ato_portable_application::PortableRealizationKind::StaticWeb => "not-applicable",
+        ato_portable_application::PortableRealizationKind::LocalProcess => "process",
+        _ => host
+            .connector_choice()
+            .map(|choice| choice.as_str())
+            .unwrap_or("none"),
+    };
+    // The platform is read from the same route projection admission uses, so
+    // the reported value and the admitted value cannot drift.
+    let platform = requirements.platform.as_deref().unwrap_or("none");
+    capability_lines(
+        derivation,
+        validated.realization.label(),
+        platform,
+        connector,
+        &status,
+    )
+}
+
+/// The host conditions a refused Hub Run is missing.
+///
+/// Kept beside [`capability_lines`] so the required environment is printed in
+/// the same `field=value` vocabulary as the rest of the diagnosis.
+fn required_environment(requirements: &ato_host_facts::ExecutionRequirements) -> String {
+    format!(
+        "platform={} native_platform={} container={} state={}",
+        requirements.platform.as_deref().unwrap_or("none"),
+        requirements.native_platform.as_deref().unwrap_or("none"),
+        requirements.needs_container,
+        requirements.needs_state,
+    )
+}
+
+/// Refuse a Hub-resolved Run before anything is executed when this host cannot
+/// run the selected Derivation.
+///
+/// The decision is the existing `ato_host_facts` admission, never a Hub-side
+/// judgement, and the returned `HostFacts` is the measurement the Run attempt
+/// then uses, so the printed diagnosis and admission cannot disagree. A local
+/// (non-Hub) Run keeps its existing path unchanged.
+fn preflight_hub_route(
+    bundle: &PortableApplicationBundle,
+    derivation_ref: &str,
+    runtime_root: &Path,
+    reference: &str,
+) -> Result<ato_host_facts::HostFacts> {
+    let validated = validate_bundle_for_derivation(bundle, derivation_ref)?;
+    let requirements = ato_portable_application::portable_run::execution_requirements_for(
+        &validated,
+        runtime_root,
+    );
+    let host = ato_host_facts::HostFacts::probe(std::slice::from_ref(&requirements));
+    let status = ato_host_facts::execution_status(&host, &requirements);
+    if status.state == ato_host_facts::CapabilityState::Advertised {
+        return Ok(host);
+    }
+    for line in route_capability_lines(derivation_ref, &validated, &requirements, &host) {
+        eprintln!("{line}");
+    }
+    eprintln!(
+        "capability required {}",
+        required_environment(&requirements)
+    );
+    bail!(
+        "{}: {reference} cannot run {derivation_ref} on this host; required {}; the Run was not started",
+        hub_public::ERR_CAPABILITY_UNAVAILABLE,
+        required_environment(&requirements)
+    )
 }
 
 fn native_bundle(args: NativeBundleArgs) -> Result<()> {
@@ -2310,6 +2366,7 @@ fn portable_instance_worker_claimed(
             filesystem_state: Some(&filesystem_state),
             bindings: Some(bindings),
             run_id: Some(&claimed.run_id),
+            host_facts: None,
         },
         // A durable local Instance start has no unsigned-native override yet;
         // an unsigned native D is refused there rather than run silently.
@@ -2792,6 +2849,18 @@ fn run_portable_application(
     let runtime = tempfile::Builder::new()
         .prefix("ato-portable-run-")
         .tempdir_in(cache)?;
+    // A Hub capsule is measured before its scratch becomes a Run: the same
+    // facts the common admission uses are what the refusal is based on, and
+    // nothing is realized on a host that cannot run the selected Derivation.
+    let host_facts = match hub {
+        Some(resolved) => Some(preflight_hub_route(
+            &bundle,
+            &selected_derivation,
+            runtime.path(),
+            &resolved.reference.reference(),
+        )?),
+        None => None,
+    };
     let runtime_root = runtime.keep();
     // A Run that fails verification publishes nothing: `--verification-receipt`
     // names the receipt of a Run that was accepted. The attempt record (and,
@@ -2805,6 +2874,7 @@ fn run_portable_application(
         shutdown.as_deref(),
         PortableRuntimeState {
             bindings: Some(&bindings),
+            host_facts: host_facts.as_ref(),
             ..PortableRuntimeState::default()
         },
         // The person running this bundle explicitly allowed an unsigned/ad-hoc
@@ -3229,10 +3299,11 @@ fn start_portable_attempt(
         cache_root: &cache_root,
         sandbox_shim: &sandbox_shim,
         sandbox_subcommand: "__portable-sandbox-exec",
-        // Admission probes this host with the selected route's own
-        // requirements; `ato run` refuses before realization on the same
-        // decision `ato pack` reported.
-        host: None,
+        // Admission uses the caller's measurement when it has one (a
+        // Hub-resolved Run preflight) and otherwise probes this host with the
+        // selected route's own requirements. Either way `ato run` refuses
+        // before realization on the same decision `ato pack` reported.
+        host: runtime_state.host_facts,
         native_local_override,
     };
     let spec = validated.attempt_spec(runtime_state.restored_snapshot_ref);
@@ -3406,6 +3477,9 @@ struct PortableRuntimeState<'a> {
     /// The Run this start belongs to, when the caller keeps one (a local
     /// Instance). The receipt names it from the start.
     run_id: Option<&'a str>,
+    /// Host facts the caller already measured for this Run. `None` lets the
+    /// common admission probe for itself.
+    host_facts: Option<&'a ato_host_facts::HostFacts>,
 }
 
 fn start_and_verify_portable_application(
@@ -3698,6 +3772,59 @@ mod tests {
         );
     }
 
+    /// A Hub Run of a route this host cannot run is refused with the same
+    /// `capability_lines` vocabulary `ato pack` prints, before anything starts.
+    #[test]
+    fn a_hub_run_refusal_reuses_the_pack_capability_vocabulary() {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/native-desktop-multi-d");
+        let (_, bundle) = ato_portable_application::build_authored_bundle_v2(&source)
+            .expect("the native desktop fixture packs");
+        let routes: Vec<_> = bundle
+            .index
+            .derivations
+            .iter()
+            .map(|derivation| validate_bundle_for_derivation(&bundle, derivation).unwrap())
+            .collect();
+        let windows = routes
+            .iter()
+            .find(|route| {
+                route
+                    .native
+                    .as_ref()
+                    .is_some_and(|native| native.descriptor.os.as_str() == "windows")
+            })
+            .expect("the fixture declares a Windows route");
+        let derivation_ref = windows.derivation_ref.to_string();
+        let requirements = ato_portable_application::portable_run::execution_requirements_for(
+            windows,
+            Path::new("run"),
+        );
+        let host = ato_host_facts::HostFacts::probe(std::slice::from_ref(&requirements));
+        let lines = route_capability_lines(&derivation_ref, windows, &requirements, &host);
+        // A Windows native route is fail-closed on every host: another OS has
+        // no adapter for it, and Windows lacks the mandatory containment.
+        assert_ne!(
+            ato_host_facts::execution_status(&host, &requirements).state,
+            ato_host_facts::CapabilityState::Advertised
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("runnable=no") && line.contains("state=Unavailable")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("capability reason=")),
+            "{lines:?}"
+        );
+        assert_eq!(
+            required_environment(&requirements),
+            "platform=none native_platform=windows/x86_64 container=false state=false"
+        );
+    }
     fn receipt_with(
         observations: Vec<ato_formation::verify::ReceiptObservation>,
     ) -> ContractVerificationReceipt {
