@@ -31,7 +31,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// Bumped when the on-disk schema changes in a way that needs a migration.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Default per-owner quota (64 MiB) and operation-result retention (30 days).
 pub const DEFAULT_QUOTA_BYTES: i64 = 64 * 1024 * 1024;
@@ -96,6 +96,15 @@ CREATE TABLE IF NOT EXISTS operation_results (
   created_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (resource_id, operation_id)
+);
+-- A relay decision, kept so a redelivered request_id is answered with the
+-- original reply instead of being applied a second time.
+CREATE TABLE IF NOT EXISTS relay_receipts (
+  request_id TEXT PRIMARY KEY,
+  request_digest TEXT NOT NULL,
+  status INTEGER NOT NULL,
+  body TEXT NOT NULL,
+  created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS workspace_leases (
   workspace_id TEXT PRIMARY KEY,
@@ -206,6 +215,15 @@ pub struct CommitInput {
     pub expected_revision: i64,
     pub expected_generation: i64,
     pub document: Value,
+}
+
+/// The decision recorded for one relay envelope, keyed by its request_id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayReceipt {
+    /// Digest of the request that produced this decision.
+    pub request_digest: String,
+    pub status: u16,
+    pub body: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -486,6 +504,54 @@ impl Coordinator {
             resources.push(row?);
         }
         Ok(resources)
+    }
+
+    /// The decision already recorded for a relay request_id, if any.
+    pub fn relay_receipt(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<RelayReceipt>, CoordinatorError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT request_digest,status,body FROM relay_receipts WHERE request_id=?",
+                params![request_id],
+                |row| {
+                    let status: i64 = row.get(1)?;
+                    Ok(RelayReceipt {
+                        request_digest: row.get(0)?,
+                        status: u16::try_from(status).unwrap_or(500),
+                        body: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Record the decision for a relay request_id. A redelivery of the same
+    /// request is answered from this row instead of running again.
+    pub fn record_relay_receipt(
+        &mut self,
+        request_id: &str,
+        request_digest: &str,
+        status: u16,
+        body: &str,
+    ) -> Result<(), CoordinatorError> {
+        let now = now();
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO relay_receipts(request_id,request_digest,status,body,created_at)
+             VALUES (?,?,?,?,?)",
+            params![request_id, request_digest, i64::from(status), body, now],
+        )?;
+        // A receipt is only useful while a redelivery is plausible; keep the
+        // table bounded by the same retention as operation results.
+        tx.execute(
+            "DELETE FROM relay_receipts WHERE created_at < ?",
+            params![now - self.retention_seconds],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Commit a new document under compare-and-set, exactly once per

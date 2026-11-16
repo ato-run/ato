@@ -1,5 +1,8 @@
 //! `ato hub push` / `ato hub pull`: client-side capsulehub distribution.
 //!
+//! `ato hub publish` is the public Capsule Hub registry and lives in
+//! `hub_public`; it shares only the local formed-bundle validator below.
+//!
 //! The hub is a blind ciphertext store (see `services/capsulehub` and the
 //! Capsulehub RFC). This module owns the client half of the trust model:
 //!
@@ -82,6 +85,12 @@ pub enum HubCommands {
     ///
     /// The capsule is never run or imported by this command.
     Pull(PullArgs),
+    /// Publish a formed `.capsule` to the public Capsule Hub registry.
+    ///
+    /// This is not the encrypted capsulehub: the bundle and its metadata are
+    /// stored publicly under `capsules/<owner>/<name>`, and the local
+    /// validator admits exactly what `ato run` would accept.
+    Publish(Box<crate::hub_public::PublishArgs>),
 }
 
 #[derive(Args)]
@@ -129,6 +138,7 @@ pub fn run(command: HubCommands) -> Result<()> {
     match command {
         HubCommands::Push(args) => push(args),
         HubCommands::Pull(args) => pull(args),
+        HubCommands::Publish(args) => crate::hub_public::publish(*args),
     }
 }
 
@@ -385,7 +395,7 @@ fn pull(args: PullArgs) -> Result<()> {
 /// different reference domain and must never be relabelled as a capsule
 /// identity. The returned value is the `ContractRef` recomputed by the
 /// portable-application validator from canonical `ato.contract/1` bytes.
-fn validate_formed_bundle(bytes: &[u8]) -> Result<String> {
+pub(crate) fn validate_formed_bundle(bytes: &[u8]) -> Result<String> {
     let document = decode_capsule_bundle_document(bytes)
         .context("the file is not a supported portable application bundle (wire v3/v4)")?;
     match document {
@@ -527,7 +537,7 @@ fn is_loopback_host(authority: &str) -> bool {
     matches!(host.as_str(), "127.0.0.1" | "[::1]" | "::1" | "localhost")
 }
 
-fn sync_directory_best_effort(path: &Path) {
+pub(crate) fn sync_directory_best_effort(path: &Path) {
     // Directory fsync is unsupported on some platforms (e.g. macOS). The
     // rename itself is atomic; failure to sync the directory is not reported.
     if let Ok(directory) = fs::File::open(path) {

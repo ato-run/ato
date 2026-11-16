@@ -9,6 +9,7 @@ mod formation_input;
 mod formation_session;
 mod formation_verify;
 mod hub;
+mod hub_public;
 mod mcp_stdio;
 mod model_cache;
 mod object_transport;
@@ -323,6 +324,8 @@ struct PackArgs {
 
 #[derive(Debug, Args)]
 struct RunArgs {
+    /// A portable `.capsule` file, or a Hub reference
+    /// `capsules/<owner>/<name>[:tag|@sha256:<hex>]`.
     capsule: PathBuf,
     /// Select one declared DerivationRef. Required when the bundle has more than one route.
     #[arg(long)]
@@ -340,6 +343,11 @@ struct RunArgs {
     /// relaxes filesystem, state, egress or lifecycle policy.
     #[arg(long)]
     allow_unsigned_native: bool,
+    /// Ato API origin used to resolve `capsules/<owner>/<name>` references and
+    /// to report a successful Run's receipt. Same origin as
+    /// `ato login --api-url`.
+    #[arg(long, env = "ATO_API_URL", default_value = auth_device::DEFAULT_API_URL)]
+    api_url: String,
 }
 
 #[derive(Debug, Args)]
@@ -1802,7 +1810,19 @@ fn load_run_record_frontier(
     ))
 }
 
-fn run_capsule(args: RunArgs) -> Result<()> {
+fn run_capsule(mut args: RunArgs) -> Result<()> {
+    // `capsules/<owner>/<name>[:tag|@digest]` is a Hub reference only when no
+    // such local path exists: an existing file keeps exactly its old meaning.
+    let hub = hub_public::resolve_for_run(&args.capsule, &args.api_url, &ato_home()?)?;
+    if let Some(resolved) = &hub {
+        eprintln!(
+            "Resolved {} [{}] -> {}",
+            resolved.reference.reference(),
+            resolved.reference.query(),
+            resolved.digest
+        );
+        args.capsule = resolved.bundle_path.clone();
+    }
     if args.capsule.extension().and_then(|value| value.to_str()) != Some("capsule")
         || !args.capsule.is_file()
     {
@@ -1812,12 +1832,20 @@ fn run_capsule(args: RunArgs) -> Result<()> {
     }
     let bytes = fs::read(&args.capsule)?;
     match decode_capsule_bundle_document(&bytes)? {
-        CapsuleBundleDocument::ComputationV2(bundle) => run_computation_bundle(args, bundle),
+        CapsuleBundleDocument::ComputationV2(bundle) => {
+            if hub.is_some() {
+                bail!(
+                    "{}: the Hub served a computation-root wire v2 bundle; a Hub capsule is a portable application (wire v3/v4)",
+                    hub_public::ERR_INVALID_BUNDLE
+                );
+            }
+            run_computation_bundle(args, bundle)
+        }
         CapsuleBundleDocument::PortableApplicationV3(bundle) => {
-            run_portable_application(args, &bytes, bundle)
+            run_portable_application(args, &bytes, bundle, hub.as_ref())
         }
         CapsuleBundleDocument::PortableApplicationV4(bundle) => {
-            run_portable_application(args, &bytes, bundle)
+            run_portable_application(args, &bytes, bundle, hub.as_ref())
         }
     }
 }
@@ -2739,6 +2767,7 @@ fn run_portable_application(
     args: RunArgs,
     bundle_bytes: &[u8],
     bundle: ato_objects::PortableApplicationBundle,
+    hub: Option<&hub_public::ResolvedHubCapsule>,
 ) -> Result<()> {
     #[cfg(unix)]
     let shutdown = Some({
@@ -2806,6 +2835,12 @@ fn run_portable_application(
         println!("URL: {}", runtime.base_url());
         if !receipt.fully_satisfied {
             bail!("{}", contract_refusal_message(&receipt));
+        }
+        // Run accounting is evidence from this Run only: a fully satisfied
+        // receipt for the bytes the Hub resolved. Best-effort, after the Run
+        // was accepted, and it never changes the exit code.
+        if let Some(resolved) = hub {
+            hub_public::report_successful_run(resolved, &receipt);
         }
         if args.no_open {
             return Ok(());
@@ -4005,6 +4040,7 @@ mod tests {
             no_open: false,
             verification_receipt: None,
             allow_unsigned_native: false,
+            api_url: auth_device::DEFAULT_API_URL.to_owned(),
         };
         assert!(
             run_capsule(args)

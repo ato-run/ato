@@ -103,9 +103,11 @@ enum Command {
         /// Fencing epoch the origin was registered with.
         #[arg(long)]
         origin_epoch: i64,
-        /// Coordinator token (the origin's own API bearer).
-        #[arg(long, env = "ATO_COORDINATOR_TOKEN")]
-        token: String,
+        /// Relay-only data capability. Every envelope must present it as
+        /// `authorization: Bearer <data-token>`. The Coordinator admin
+        /// bearer is not accepted through the relay.
+        #[arg(long, env = "ATO_RELAY_DATA_TOKEN")]
+        data_token: String,
         /// Origin token issued by the relay registration.
         #[arg(long, env = "ATO_RELAY_TOKEN")]
         relay_token: String,
@@ -163,12 +165,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             relay_url,
             origin_id,
             origin_epoch,
-            token,
+            data_token,
             relay_token,
             once,
         } => {
+            if data_token.is_empty() {
+                return Err("--data-token must not be empty".into());
+            }
             let coordinator = Coordinator::open(&db)?;
-            let origin = ato_coordinator::relay::Origin::new(coordinator, origin_epoch, token);
+            let origin = ato_coordinator::relay::Origin::new(coordinator, origin_epoch, data_token);
             let mut transport = ato_coordinator::relay::HttpRelayTransport::new(
                 &relay_url,
                 &origin_id,
