@@ -14,6 +14,7 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
+use ato_formation::native_desktop::NativeArtifactFormat;
 use sha2::{Digest, Sha256};
 
 /// Total bytes a Run may materialize from one artifact.
@@ -33,6 +34,11 @@ pub struct ExtractedArtifact {
 
 /// Unpack a `tar.gz` artifact under `destination`, which must not exist yet.
 pub fn extract_tar_gz(archive: &[u8], destination: &Path) -> Result<ExtractedArtifact> {
+    extract_tar_reader(std::io::Cursor::new(archive), destination)
+}
+
+/// Unpack a `tar.gz` from any reader under `destination`.
+pub fn extract_tar_reader<R: Read>(archive: R, destination: &Path) -> Result<ExtractedArtifact> {
     ensure!(
         !destination.exists(),
         "artifact destination already exists: {}",
@@ -139,8 +145,16 @@ pub fn extract_tar_gz(archive: &[u8], destination: &Path) -> Result<ExtractedArt
         !files.is_empty(),
         "the native artifact carries no regular file"
     );
-    files.sort_by(|left, right| left.path.cmp(&right.path));
+    finish(destination, files, total_bytes)
+}
 
+/// Digest what was placed, in one canonical form.
+fn finish(
+    destination: &Path,
+    mut files: Vec<PlacedFile>,
+    total_bytes: u64,
+) -> Result<ExtractedArtifact> {
+    files.sort_by(|left, right| left.path.cmp(&right.path));
     let mut canonical = String::new();
     for file in &files {
         canonical.push_str(&file.path);
@@ -208,6 +222,118 @@ fn set_mode(path: &Path, mode: u32) -> Result<()> {
 #[cfg(not(unix))]
 fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
     Ok(())
+}
+
+/// Unpack a remote payload of the declared format under `destination`.
+///
+/// The format vocabulary belongs to the Adapter, so an unsupported packed form
+/// is a named refusal here rather than a bundle-validation failure: the
+/// declaration is well-formed, this Adapter just cannot unpack it.
+pub fn extract_archive(
+    bytes: &[u8],
+    format: NativeArtifactFormat,
+    destination: &Path,
+) -> Result<ExtractedArtifact> {
+    match format {
+        NativeArtifactFormat::TarGz => extract_tar_gz(bytes, destination),
+        other => bail!(
+            "native_format_extractor_unavailable: this Adapter unpacks tar.gz only, and the route \
+             declares {}",
+            other.as_str()
+        ),
+    }
+}
+
+/// Unpack a payload that is on disk, streaming it instead of holding it.
+pub fn extract_archive_file(
+    path: &Path,
+    format: NativeArtifactFormat,
+    destination: &Path,
+) -> Result<ExtractedArtifact> {
+    match format {
+        NativeArtifactFormat::TarGz => {
+            let file = File::open(path)
+                .with_context(|| format!("open the verified payload {}", path.display()))?;
+            extract_tar_reader(file, destination)
+        }
+        // The Adapter owns the packed formats it can unpack. A zip or a disk
+        // image is a well-formed declaration this build cannot materialize;
+        // saying so keeps "declared" and "implemented" apart.
+        NativeArtifactFormat::Zip | NativeArtifactFormat::Dmg => bail!(
+            "native_format_extractor_unavailable: this Adapter unpacks a tar.gz payload and has \
+             no {} extractor, so the reference cannot be materialized",
+            format.as_str()
+        ),
+    }
+}
+
+/// Adopt a directory a source build produced, as the artifact tree.
+///
+/// The build wrote this tree in this Run, so nothing is unpacked; the digest is
+/// still recomputed from the bytes on disk so the receipt names what was
+/// actually launched.
+pub fn adopt_tree(root: &Path) -> Result<ExtractedArtifact> {
+    ensure!(
+        root.is_dir(),
+        "the built artifact root {} is not a directory",
+        root.display()
+    );
+    let mut files = Vec::new();
+    let mut total_bytes = 0_u64;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory)
+            .with_context(|| format!("read the built tree {}", directory.display()))?
+        {
+            let entry = entry.context("read a built-tree entry")?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)
+                .with_context(|| format!("inspect the built file {}", path.display()))?;
+            if metadata.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            ensure!(
+                metadata.is_file(),
+                "the built tree carries {}, which is not a regular file",
+                path.display()
+            );
+            ensure!(
+                (files.len() as u64) < MAX_EXTRACTED_ENTRIES,
+                "the built tree carries more than {MAX_EXTRACTED_ENTRIES} entries"
+            );
+            let mode = built_mode(&metadata);
+            let bytes = fs::read(&path)
+                .with_context(|| format!("read the built file {}", path.display()))?;
+            total_bytes = total_bytes.saturating_add(bytes.len() as u64);
+            ensure!(
+                total_bytes <= MAX_EXTRACTED_BYTES,
+                "the built tree is larger than {MAX_EXTRACTED_BYTES} bytes"
+            );
+            let relative = path.strip_prefix(root).with_context(|| {
+                format!("the built file {} is outside its root", path.display())
+            })?;
+            files.push(PlacedFile {
+                path: slash_path(relative),
+                mode,
+                size: bytes.len() as u64,
+                digest: format!("{:x}", Sha256::digest(&bytes)),
+            });
+        }
+    }
+    ensure!(!files.is_empty(), "the built tree carries no regular file");
+    finish(root, files, total_bytes)
+}
+
+#[cfg(unix)]
+fn built_mode(metadata: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o777
+}
+
+#[cfg(not(unix))]
+fn built_mode(_metadata: &fs::Metadata) -> u32 {
+    0o644
 }
 
 #[cfg(test)]
@@ -439,6 +565,79 @@ mod tests {
 
         let not_an_archive = b"not a gzip";
         assert!(extract_tar_gz(not_an_archive, &scratch.path().join("c")).is_err());
+    }
+
+    #[test]
+    fn a_payload_on_disk_is_streamed_and_a_foreign_format_is_named() {
+        let bytes = archive(&[Entry::File("app/run.sh", b"#!/bin/sh\n", 0o755)]);
+        let scratch = temp_root();
+        let payload = scratch.path().join("artifact.tar.gz");
+        fs::write(&payload, &bytes).unwrap();
+        let extracted = extract_archive_file(
+            &payload,
+            ato_formation::native_desktop::NativeArtifactFormat::TarGz,
+            &scratch.path().join("disk"),
+        )
+        .unwrap();
+        assert_eq!(extracted.file_count, 1);
+
+        for format in [
+            ato_formation::native_desktop::NativeArtifactFormat::Zip,
+            ato_formation::native_desktop::NativeArtifactFormat::Dmg,
+        ] {
+            let error =
+                extract_archive_file(&payload, format, &scratch.path().join("other")).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("native_format_extractor_unavailable"),
+                "{format:?}: {error}"
+            );
+        }
+        let error = extract_archive(
+            &bytes,
+            ato_formation::native_desktop::NativeArtifactFormat::Zip,
+            &scratch.path().join("memory"),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("native_format_extractor_unavailable")
+        );
+    }
+
+    #[test]
+    fn a_built_tree_is_adopted_with_its_own_digest_and_nothing_else() {
+        let scratch = temp_root();
+        let root = scratch.path().join("staging");
+        let release = root.join(".ato-build/target/release");
+        fs::create_dir_all(&release).unwrap();
+        fs::write(release.join("app"), b"built binary").unwrap();
+        let adopted = adopt_tree(&root).unwrap();
+        assert_eq!(adopted.file_count, 1);
+        assert_eq!(adopted.total_bytes, 12);
+        assert_eq!(adopted.root, root);
+        assert_eq!(
+            adopted.tree_digest,
+            adopt_tree(&root).unwrap().tree_digest,
+            "the same tree digests the same way"
+        );
+
+        // A change to the built bytes changes the digest the receipt records.
+        fs::write(release.join("app"), b"other binary").unwrap();
+        assert_ne!(adopted.tree_digest, adopt_tree(&root).unwrap().tree_digest);
+
+        // A link is not a regular file, and an empty tree is not an artifact.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/etc/passwd", release.join("link")).unwrap();
+            assert!(adopt_tree(&root).is_err());
+            fs::remove_file(release.join("link")).unwrap();
+        }
+        let empty = scratch.path().join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        assert!(adopt_tree(&empty).is_err());
     }
 
     #[test]

@@ -81,6 +81,35 @@ pub struct PortableRunContext<'a> {
     /// mandatory filesystem, state, egress or lifecycle policy. A route whose
     /// signature policy is `require-valid` refuses it regardless.
     pub native_local_override: bool,
+    /// The Ato home a native source route installs its managed toolchain and
+    /// build cache under. It is never a bundle fact.
+    pub ato_home: &'a Path,
+    /// The explicit decision a Run needs before it may fetch a managed
+    /// toolchain and build a source route. A bundle can require a toolchain but
+    /// cannot grant the right to install one.
+    pub native_source_consent: NativeSourceConsent,
+}
+
+/// The explicit decision before a native source build may acquire anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NativeSourceConsent {
+    /// No approval was given; an interactive caller could still ask for it.
+    #[default]
+    Denied,
+    /// No approval, and no one to ask (a non-interactive Run).
+    Unavailable,
+    /// The user approved fetching a managed toolchain and building.
+    Approved,
+}
+
+impl NativeSourceConsent {
+    pub(crate) fn toolchain_consent(self) -> crate::native_desktop::toolchain::ToolchainConsent {
+        match self {
+            Self::Approved => crate::native_desktop::toolchain::ToolchainConsent::Approved,
+            Self::Denied => crate::native_desktop::toolchain::ToolchainConsent::Denied,
+            Self::Unavailable => crate::native_desktop::toolchain::ToolchainConsent::Unavailable,
+        }
+    }
 }
 
 /// Project a validated native OCI route into the existing Runner wire contract.
@@ -723,25 +752,41 @@ impl PortableBundleExecutor<'_> {
                 "the selected native route carries no validated descriptor",
             )
         })?;
-        let artifact_ref = ato_computation::ContentRef::parse(native.descriptor.artifact.clone())
-            .map_err(|error| {
-            native_refusal(
-                "native_artifact_invalid",
-                format!("the artifact reference is invalid: {error}"),
-            )
-        })?;
-        let artifact_bytes = self.bundle.payload_bytes(&artifact_ref).map_err(|error| {
-            native_refusal(
-                "native_artifact_invalid",
-                format!("the verified artifact payload is unreadable: {error}"),
-            )
-        })?;
+        // A bundled artifact is the one the verified closure carries. A remote
+        // reference or a source build carries no blob, and the acquisition
+        // stage proves the pinned digest instead.
+        let bundled = match native.descriptor.bundled_artifact() {
+            None => None,
+            Some(reference) => {
+                let artifact_ref = ato_computation::ContentRef::parse(reference.to_owned())
+                    .map_err(|error| {
+                        native_refusal(
+                            "native_artifact_invalid",
+                            format!("the artifact reference is invalid: {error}"),
+                        )
+                    })?;
+                Some(self.bundle.payload_bytes(&artifact_ref).map_err(|error| {
+                    native_refusal(
+                        "native_artifact_invalid",
+                        format!("the verified artifact payload is unreadable: {error}"),
+                    )
+                })?)
+            }
+        };
+        let acquired = crate::native_desktop::acquire(
+            &native.descriptor,
+            bundled,
+            self.runtime_root,
+            self.context.ato_home,
+            self.context.native_source_consent.toolchain_consent(),
+        )?;
         let state_paths = state_mounts
             .iter()
             .map(|state| (state.id.clone(), state.host_path.clone()))
             .collect::<Vec<_>>();
         crate::native_desktop::start(NativeStart {
-            artifact_bytes,
+            payload: acquired.payload,
+            provenance: acquired.provenance,
             descriptor: &native.descriptor,
             ports: &native.ports,
             workspace,
@@ -2494,6 +2539,10 @@ pub fn run_portable_bundle_attempt(
         host: request.host,
         // A hosted/Formation attempt never carries a local override decision.
         native_local_override: false,
+        // A hosted attempt has no local approval path, so a source build is
+        // refused before it would read this directory.
+        ato_home: request.cache_root.parent().unwrap_or(request.cache_root),
+        native_source_consent: NativeSourceConsent::Denied,
     };
     let executor = PortableBundleExecutor {
         bundle: request.bundle,
@@ -2641,6 +2690,8 @@ default = "pure"
             sandbox_subcommand: "__portable-sandbox-exec",
             host: None,
             native_local_override: false,
+            ato_home: root.path(),
+            native_source_consent: NativeSourceConsent::Denied,
         };
         let executor = PortableBundleExecutor {
             bundle: &bundle,
@@ -2824,6 +2875,8 @@ Server(("127.0.0.1", int(os.environ["ATO_ENDPOINT_APP_HTTP_PORT"])), Handler).se
                 sandbox_subcommand: "__portable-sandbox-exec",
                 host: None,
                 native_local_override: false,
+                ato_home: &runtime_root,
+                native_source_consent: NativeSourceConsent::Denied,
             };
             let executor = PortableBundleExecutor {
                 bundle: &bundle,

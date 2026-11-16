@@ -488,14 +488,20 @@ pub struct PortableNativeRouteSpec {
     pub os: String,
     pub arch: String,
     pub entry: String,
-    /// Source-relative path of the artifact file. Used only to exclude the
-    /// file from the workspace tree; it is never written into the bundle.
-    pub artifact_path: String,
-    pub artifact: Vec<u8>,
+    /// Source-relative path of a bundle-carried artifact. Used only to exclude
+    /// the file from the workspace tree; it is never written into the bundle.
+    pub artifact_path: Option<String>,
+    /// The bytes of a bundle-carried artifact. Absent for a remote reference
+    /// or a source build.
+    pub artifact: Option<Vec<u8>>,
     pub format: Option<String>,
     pub signature: Option<String>,
     /// `executable` (default, omitted) or `bundle`.
     pub signature_target: Option<String>,
+    /// The optional `ato.native.*` facts the route declared: a remote
+    /// reference or a source build. Merged with the derived facts and
+    /// validated as one descriptor.
+    pub facts: BTreeMap<String, String>,
 }
 
 /// One serving step of a service group (OCI or native process).
@@ -1597,17 +1603,21 @@ fn authored_bundle_spec_v2(
             let native = match derivation.native {
                 None => None,
                 Some(native) => {
-                    // The artifact is read once, here, and becomes a payload
-                    // blob of the bundle. It is never fetched at run time and
-                    // never part of the workspace tree: the file path is
-                    // authoring metadata, and the digest is the declaration.
-                    let bytes = read(source_root.join(&native.artifact_path))?;
-                    if bytes.is_empty() {
-                        return Err(profile(format!(
-                            "native artifact {} is empty",
-                            native.artifact_path
-                        )));
-                    }
+                    // A bundle-carried artifact is read once, here, and becomes
+                    // a payload blob of the bundle. It is never fetched at run
+                    // time and never part of the workspace tree: the file path
+                    // is authoring metadata, and the digest is the declaration.
+                    // A remote reference or a source build names no bytes here.
+                    let bytes = match &native.artifact_path {
+                        None => None,
+                        Some(path) => {
+                            let bytes = read(source_root.join(path))?;
+                            if bytes.is_empty() {
+                                return Err(profile(format!("native artifact {path} is empty")));
+                            }
+                            Some(bytes)
+                        }
+                    };
                     Some(PortableNativeRouteSpec {
                         os: native.os,
                         arch: native.arch,
@@ -1617,6 +1627,7 @@ fn authored_bundle_spec_v2(
                         format: native.format,
                         signature: native.signature,
                         signature_target: native.signature_target,
+                        facts: native.facts,
                     })
                 }
             };
@@ -1888,7 +1899,7 @@ fn build_routes_bundle(
         spec.routes
             .iter()
             .filter_map(|route| route.native.as_ref())
-            .map(|native| native.artifact_path.clone()),
+            .filter_map(|native| native.artifact_path.clone()),
     );
     let (mut objects, tree_ref) =
         build_portable_tree_with_schema(source_root, PORTABLE_TREE_V2_SCHEMA, &excluded)?;
@@ -2303,53 +2314,82 @@ fn bound_authored_derivation(
     })
 }
 
-/// Hash the carrier bytes and declare them as the artifact blob. The digest a
-/// descriptor states is therefore always the digest of what is in the bundle.
+/// Declare the native step's facts and validate the union as one descriptor.
+///
+/// A bundle-carried artifact is hashed here, so the digest the descriptor
+/// states is always the digest of what the bundle carries. A remote reference
+/// or a source build states its own pinned digest, which cannot be checked
+/// against local bytes at authoring time and is therefore checked by the Run
+/// that acquires it. In both cases the declaration is validated exactly once,
+/// by the same `NativeDescriptor` parser the bundle validator uses.
 fn bind_native_descriptor(
     native: &PortableNativeRouteSpec,
     objects: &mut BTreeMap<String, ObjectToEncode>,
 ) -> Result<ato_formation::native_desktop::NativeDescriptor, PortableApplicationError> {
     use ato_formation::native_desktop::{
-        NativeArch, NativeArtifactFormat, NativeDescriptor, NativeOs, NativeSignaturePolicy,
-        NativeSignatureTarget, native_bundle_root,
+        NATIVE_ARCH_RUNTIME, NATIVE_ARTIFACT_RUNTIME, NATIVE_ENTRY_RUNTIME, NATIVE_FORMAT_RUNTIME,
+        NATIVE_OS_RUNTIME, NATIVE_SIGNATURE_RUNTIME, NATIVE_SIGNATURE_TARGET_RUNTIME,
+        NativeDescriptor,
     };
-    let os = NativeOs::parse(&native.os)
-        .ok_or_else(|| profile("a native route declares os = macos or windows"))?;
-    let arch = NativeArch::parse(&native.arch)
-        .ok_or_else(|| profile("a native route declares arch = aarch64 or x86_64"))?;
-    let format = match native.format.as_deref() {
-        None => NativeArtifactFormat::TarGz,
-        Some(value) => NativeArtifactFormat::parse(value)
-            .ok_or_else(|| profile("a native route declares format = tar.gz"))?,
-    };
-    let signature = match native.signature.as_deref() {
-        None => NativeSignaturePolicy::RequireValid,
-        Some(value) => NativeSignaturePolicy::parse(value)
-            .ok_or_else(|| profile("a native route declares a defined signature policy"))?,
-    };
-    let signature_target = match native.signature_target.as_deref() {
-        None => NativeSignatureTarget::Executable,
-        Some(value) => NativeSignatureTarget::parse(value).ok_or_else(|| {
-            profile("a native route declares signature_target = executable or bundle")
-        })?,
-    };
-    if signature_target.is_bundle() && native_bundle_root(&native.entry).is_none() {
-        return Err(profile(
-            "a bundle signature target requires the entry to be inside an `.app` bundle",
-        ));
-    }
-    let reference = add_blob(objects, &native.artifact)?;
-    Ok(NativeDescriptor {
-        os,
-        arch,
-        artifact: reference,
-        entry: native.entry.clone(),
-        format,
-        signature,
-        signature_target,
-    })
-}
 
+    let mut facts = native.facts.clone();
+    for (key, value) in [
+        (NATIVE_OS_RUNTIME, Some(native.os.clone())),
+        (NATIVE_ARCH_RUNTIME, Some(native.arch.clone())),
+        (NATIVE_ENTRY_RUNTIME, Some(native.entry.clone())),
+        (NATIVE_FORMAT_RUNTIME, native.format.clone()),
+        (NATIVE_SIGNATURE_RUNTIME, native.signature.clone()),
+        (
+            NATIVE_SIGNATURE_TARGET_RUNTIME,
+            native.signature_target.clone(),
+        ),
+    ] {
+        let Some(value) = value else { continue };
+        if facts.get(key).is_some_and(|declared| declared != &value) {
+            return Err(profile(format!(
+                "native fact {key} is declared twice with different values"
+            )));
+        }
+        facts.insert(key.to_owned(), value);
+    }
+    if let Some(bytes) = &native.artifact {
+        let reference = add_blob(objects, bytes)?;
+        if facts
+            .get(NATIVE_ARTIFACT_RUNTIME)
+            .is_some_and(|declared| declared != &reference)
+        {
+            return Err(profile(
+                "the declared native artifact digest is not the digest of the bundled bytes",
+            ));
+        }
+        facts.insert(NATIVE_ARTIFACT_RUNTIME.to_owned(), reference);
+    }
+    // The same parser the bundle validator runs, so authoring cannot accept a
+    // descriptor the Run would refuse.
+    let step = ato_formation::authoring::BoundStep {
+        id: "serve".to_owned(),
+        protocol: NATIVE_PROTOCOL.to_owned(),
+        op: "serve".to_owned(),
+        argv: Vec::new(),
+        cwd: String::new(),
+        env: BTreeMap::new(),
+        source: None,
+        root: None,
+        entry: None,
+        spa_fallback: None,
+        network: Default::default(),
+        runtimes: facts.clone(),
+        state: Vec::new(),
+        bindings: Vec::new(),
+        peer_ports: Vec::new(),
+    };
+    let descriptor = NativeDescriptor::from_step(&step)
+        .map_err(|error| profile(format!("native descriptor: {}", error.0)))?;
+    // A declaration may repeat a default (for example `format = "tar.gz"`).
+    // The step binds the descriptor's canonical map, so both forms produce the
+    // same bytes and nothing is silently dropped.
+    Ok(descriptor)
+}
 fn add_blob(
     objects: &mut BTreeMap<String, ObjectToEncode>,
     bytes: &[u8],
@@ -2710,11 +2750,26 @@ fn validate_native_desktop_route(
             ));
         }
     }
+    let source_route = matches!(
+        descriptor.source,
+        ato_formation::native_desktop::NativeArtifactSource::Source(_)
+    );
     for requirement in &derivation.requirements.network {
-        if requirement.phase != ato_formation::requirements::ExecutionPhase::Runtime {
-            return Err(profile(
-                "a native route declares only runtime egress; the artifact is not built at run time",
-            ));
+        match requirement.phase {
+            ato_formation::requirements::ExecutionPhase::Runtime => {}
+            // A source build acquires crates and source bytes before the
+            // artifact exists, and only a source route does.
+            ato_formation::requirements::ExecutionPhase::Build if source_route => {}
+            ato_formation::requirements::ExecutionPhase::Build => {
+                return Err(profile(
+                    "only a source-built native route declares a build-phase network requirement",
+                ));
+            }
+            ato_formation::requirements::ExecutionPhase::Dependencies => {
+                return Err(profile(
+                    "a native route declares runtime egress and, for a source build, its build                      egress; a dependency phase belongs to another Adapter",
+                ));
+            }
         }
     }
     if let Some(startup) = &derivation.requirements.startup {
@@ -2727,25 +2782,60 @@ fn validate_native_desktop_route(
     }
     validate_route_requirements(contract, workspace, &port_ids, &surface.port)?;
 
-    // The artifact is a declared blob of the digest the descriptor states. The
-    // closure check already proved the reference resolves; this proves it is
-    // an opaque blob inside the size bound, so no reader can mistake it for a
-    // structured object or fetch it at run time.
-    let artifact_ref = parse_ref(&descriptor.artifact, "native artifact reference")?;
-    let artifact = bundle
-        .descriptor(&artifact_ref)
-        .ok_or_else(|| PortableBundleError::IncompleteClosure(artifact_ref.clone()))?;
-    if artifact.kind != PortableBundleObjectKind::Blob || artifact.schema.is_some() {
+    // A bundle-carried artifact is a declared blob of the digest the descriptor
+    // states. The closure check already proved the reference resolves; this
+    // proves it is an opaque blob inside the size bound, so no reader can
+    // mistake it for a structured object.
+    //
+    // A remote reference and a source build carry no bundle blob at all: their
+    // identity is the pinned digest the descriptor states, and the Run that
+    // acquires them proves it. That is a different acquisition path, not a
+    // missing artifact, so it is not an error here.
+    if let Some(artifact) = descriptor.bundled_artifact() {
+        let artifact_ref = parse_ref(artifact, "native artifact reference")?;
+        let entry = bundle
+            .descriptor(&artifact_ref)
+            .ok_or_else(|| PortableBundleError::IncompleteClosure(artifact_ref.clone()))?;
+        if entry.kind != PortableBundleObjectKind::Blob || entry.schema.is_some() {
+            return Err(profile(
+                "the native artifact reference must name an opaque blob",
+            ));
+        }
+        if entry.size == 0 || entry.size > MAX_NATIVE_ARTIFACT_BYTES {
+            return Err(profile(
+                "the native artifact is empty or larger than the supported bound",
+            ));
+        }
+        bundle.payload_bytes(&artifact_ref)?;
+    }
+    // A source build needs network at build time, and the build may only reach
+    // the crate and source hosts this build defines. A route that asks for
+    // anything else is refused here, before a host is asked to enforce it.
+    for requirement in &derivation.requirements.network {
+        if requirement.phase != ato_formation::requirements::ExecutionPhase::Build {
+            continue;
+        }
+        if requirement.port != 443
+            || !ato_formation::native_desktop::NATIVE_BUILD_EGRESS_HOSTS
+                .contains(&requirement.host.as_str())
+        {
+            return Err(profile(format!(
+                "a native source build may reach HTTPS on {:?} only",
+                ato_formation::native_desktop::NATIVE_BUILD_EGRESS_HOSTS
+            )));
+        }
+    }
+    if source_route
+        && !derivation
+            .requirements
+            .network
+            .iter()
+            .any(|req| req.phase == ato_formation::requirements::ExecutionPhase::Build)
+    {
         return Err(profile(
-            "the native artifact reference must name an opaque blob",
+            "a native source build declares the build-phase network it requires",
         ));
     }
-    if artifact.size == 0 || artifact.size > MAX_NATIVE_ARTIFACT_BYTES {
-        return Err(profile(
-            "the native artifact is empty or larger than the supported bound",
-        ));
-    }
-    bundle.payload_bytes(&artifact_ref)?;
 
     Ok(ValidatedNativeDescriptor { descriptor, ports })
 }
@@ -3973,10 +4063,11 @@ impl PortableReferenceExtractor for DerivationReferences {
                     schema: BOUND_DERIVATION_SCHEMA.to_owned(),
                     reason: format!("ato.native@1 descriptor: {}", error.0),
                 })?;
-            outgoing.push(parse_for_extraction_ref(
-                BOUND_DERIVATION_SCHEMA,
-                &descriptor.artifact,
-            )?);
+            // A remote or source route carries no artifact blob, so there is
+            // no reference to extract and no closure edge to add.
+            if let Some(artifact) = descriptor.bundled_artifact() {
+                outgoing.push(parse_for_extraction_ref(BOUND_DERIVATION_SCHEMA, artifact)?);
+            }
         }
         Ok(outgoing)
     }
