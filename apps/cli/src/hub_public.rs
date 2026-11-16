@@ -84,6 +84,12 @@ pub const MAX_CAPABILITY_SURFACES: usize = 8;
 pub const MAX_CAPABILITY_DOCUMENT_BYTES: usize = 16 * 1024;
 /// The API's bound on a surface's declared logical path.
 pub const MAX_CAPABILITY_SURFACE_PATH_BYTES: usize = 2048;
+/// The API's bound on a surface label (UTF-16 code units, like the API).
+pub const MAX_CAPABILITY_SURFACE_ID_UTF16_UNITS: usize = 128;
+/// The API's bound on a logical Port token.
+pub const MAX_CAPABILITY_PORT_BYTES: usize = 128;
+/// The API's bound on an os/arch platform value.
+pub const MAX_CAPABILITY_PLATFORM_BYTES: usize = 64;
 /// `metadata.capabilities.source` for metadata derived from the bundle bytes.
 pub const CAPABILITIES_SOURCE_BUNDLE: &str = "bundle";
 
@@ -460,6 +466,15 @@ pub fn derive_capabilities(
         }
         let mut surfaces = Vec::with_capacity(route.application.surfaces.len());
         for surface in &route.application.surfaces {
+            if !is_capability_surface_id(&surface.id) {
+                bail!(hub_error(
+                    ERR_CAPABILITIES_UNREPRESENTABLE,
+                    format!(
+                        "`{declared}` declares the surface label `{}`, which Hub metadata cannot carry",
+                        surface.id
+                    )
+                ));
+            }
             if !is_capability_port_token(&surface.port) {
                 bail!(hub_error(
                     ERR_CAPABILITIES_UNREPRESENTABLE,
@@ -539,22 +554,40 @@ pub fn derive_capabilities(
     Ok(capabilities)
 }
 
-/// `[A-Za-z0-9._:-]+`: the API's logical Port token shape.
+/// A control character the API refuses: C0 controls except tab and newline,
+/// plus DEL. Mirrors the API's metadata rule exactly.
+fn is_capability_forbidden_control(character: char) -> bool {
+    character.is_control() && !matches!(character, '\t' | '\n')
+}
+
+/// A surface label: 1–128 UTF-16 code units, without refused controls.
+///
+/// The bundle validator does not constrain an Application surface's label
+/// shape, and the API accepts it as a label rather than a token, so only the
+/// API's code-unit bound and control rule apply.
+fn is_capability_surface_id(value: &str) -> bool {
+    let units = value.encode_utf16().count();
+    (1..=MAX_CAPABILITY_SURFACE_ID_UTF16_UNITS).contains(&units)
+        && !value.chars().any(is_capability_forbidden_control)
+}
+
+/// `[A-Za-z0-9._:-]{1,128}`: the API's logical Port token shape and bound.
 fn is_capability_port_token(value: &str) -> bool {
     !value.is_empty()
+        && value.len() <= MAX_CAPABILITY_PORT_BYTES
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
 }
 
-/// A declared logical path: absolute, no control characters, bounded.
+/// A declared logical path: absolute, ≤2048 UTF-8 bytes, no refused controls.
 fn is_capability_surface_path(value: &str) -> bool {
     value.starts_with('/')
         && value.len() <= MAX_CAPABILITY_SURFACE_PATH_BYTES
-        && !value.chars().any(char::is_control)
+        && !value.chars().any(is_capability_forbidden_control)
 }
 
-/// A lowercase `os/arch` platform, the only shape the API accepts.
+/// A lowercase `os/arch` pair, ≤64 UTF-8 bytes, without refused controls.
 fn is_capability_platform(value: &str) -> bool {
     let Some((os, arch)) = value.split_once('/') else {
         return false;
@@ -562,8 +595,9 @@ fn is_capability_platform(value: &str) -> bool {
     !os.is_empty()
         && !arch.is_empty()
         && !arch.contains('/')
-        && value == value.to_ascii_lowercase()
-        && !value.chars().any(char::is_control)
+        && value.len() <= MAX_CAPABILITY_PLATFORM_BYTES
+        && value == value.to_lowercase()
+        && !value.chars().any(is_capability_forbidden_control)
 }
 
 #[derive(Debug, Serialize)]
@@ -2133,19 +2167,60 @@ mod tests {
         for invalid in ["", "app http", "app/http", "app?x", "app\n"] {
             assert!(!is_capability_port_token(invalid), "{invalid}");
         }
+        assert!(!is_capability_port_token(
+            &"a".repeat(MAX_CAPABILITY_PORT_BYTES + 1)
+        ));
+        // A surface label is a label, not a token: spaces, tabs and newlines
+        // are allowed; only the UTF-16 code-unit bound and refused controls
+        // apply.
+        assert!(is_capability_surface_id("main"));
+        assert!(is_capability_surface_id("My Surface 1"));
+        assert!(is_capability_surface_id("a\tb\nc"));
+        assert!(!is_capability_surface_id(""));
+        assert!(!is_capability_surface_id("a\rb"));
+        assert!(!is_capability_surface_id("a\x7fb"));
+        assert!(!is_capability_surface_id(
+            &"a".repeat(MAX_CAPABILITY_SURFACE_ID_UTF16_UNITS + 1)
+        ));
+        // An astral character is one Rust `char` but two UTF-16 code units, so
+        // 64 of them fill the bound and 65 overflow it.
+        assert!(is_capability_surface_id(&"😀".repeat(64)));
+        assert!(!is_capability_surface_id(&"😀".repeat(65)));
         assert!(is_capability_surface_path("/"));
         assert!(is_capability_surface_path("/proof.txt"));
+        assert!(is_capability_surface_path("/a\nb"));
         assert!(!is_capability_surface_path("proof.txt"));
-        assert!(!is_capability_surface_path("/a\nb"));
+        assert!(!is_capability_surface_path("/a\rb"));
+        assert!(!is_capability_surface_path("/a\x7fb"));
         assert!(!is_capability_surface_path(&format!(
             "/{}",
             "a".repeat(MAX_CAPABILITY_SURFACE_PATH_BYTES)
+        )));
+        // The path bound is UTF-8 bytes: 682 `あ` are 2046 bytes plus `/` =
+        // 2047, while 683 are 2049 plus `/` = 2050.
+        assert!(is_capability_surface_path(&format!(
+            "/{}",
+            "あ".repeat(682)
+        )));
+        assert!(!is_capability_surface_path(&format!(
+            "/{}",
+            "あ".repeat(683)
         )));
         assert!(is_capability_platform("linux/amd64"));
         assert!(is_capability_platform("macos/aarch64"));
         assert!(!is_capability_platform("Linux/amd64"));
         assert!(!is_capability_platform("linux/amd64/extra"));
         assert!(!is_capability_platform("amd64"));
+        assert!(!is_capability_platform(&format!(
+            "{}/amd64",
+            "o".repeat(MAX_CAPABILITY_PLATFORM_BYTES)
+        )));
+        // 21 `あ` + `/` + 21 `い` are 43 code units but 129 UTF-8 bytes.
+        assert!(!is_capability_platform(&format!(
+            "{}/{}",
+            "あ".repeat(21),
+            "い".repeat(21)
+        )));
     }
 
     #[test]
