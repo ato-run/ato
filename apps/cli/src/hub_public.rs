@@ -1003,58 +1003,11 @@ fn api_failure(
     status: StatusCode,
     body: &str,
 ) -> anyhow::Error {
-    let detail = api_error_code(body);
-    let suffix = if detail.is_empty() {
-        String::new()
-    } else {
-        format!(" ({detail})")
-    };
-    let subject = if target.is_empty() {
-        String::new()
-    } else {
-        format!(" for {target}")
-    };
-    match status.as_u16() {
-        401 => hub_error(
-            ERR_UNAUTHORIZED,
-            format!(
-                "the API at {base} refused to {action}{subject}{suffix}; run `ato login --api-url {base}` first"
-            ),
-        ),
-        403 => hub_error(
-            ERR_FORBIDDEN,
-            format!(
-                "the API refused to {action}{subject}{suffix}; this account does not own that namespace"
-            ),
-        ),
-        // The reference is registry-scoped: the same <owner>/<name> lives in
-        // a DIFFERENT Hub per API origin (production vs staging), so the
-        // origin is part of the answer, not decoration.
-        404 => hub_error(
-            ERR_NOT_FOUND,
-            format!("the Hub at {base} has no such capsule or version{subject}{suffix}"),
-        ),
-        409 => hub_error(
-            ERR_DIGEST_MISMATCH,
-            format!("the API reported a conflict while trying to {action}{subject}{suffix}"),
-        ),
-        413 => hub_error(
-            ERR_BUNDLE_TOO_LARGE,
-            format!("the API refused the bundle as too large{subject}{suffix}"),
-        ),
-        400 => hub_error(
-            ERR_INVALID_REQUEST,
-            format!("the API rejected the request to {action}{subject}{suffix}"),
-        ),
-        _ => hub_error(
-            ERR_API_FAILED,
-            format!("failed to {action}{subject}: HTTP {status}{suffix}"),
-        ),
-    }
+    api_failure_code(action, target, base, status, &api_error_code(body))
 }
 
 /// The `error` member of an API error body, bounded and never echoed blindly.
-fn api_error_code(body: &str) -> String {
+pub(crate) fn api_error_code(body: &str) -> String {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
         return String::new();
     };
@@ -1070,30 +1023,20 @@ fn api_error_code(body: &str) -> String {
 
 /// Publish one formed bundle: `PUT /v1/hub/capsules/<owner>/<name>`.
 pub fn publish(args: PublishArgs) -> Result<()> {
-    let bytes = fs::read(&args.capsule)
-        .with_context(|| format!("cannot read {}", args.capsule.display()))?;
-    if bytes.len() as u64 > MAX_BUNDLE_BYTES {
-        bail!(hub_error(
-            ERR_BUNDLE_TOO_LARGE,
-            format!(
-                "{} is {} bytes; a Hub bundle carries at most {MAX_BUNDLE_BYTES} bytes",
-                args.capsule.display(),
-                bytes.len()
-            )
-        ));
-    }
-    // Only a bundle the local Run path would accept is ever published, and
-    // the Hub capability metadata is derived from exactly those validated
-    // routes rather than from any publisher-declared value.
-    let formed = crate::hub::validate_formed_bundle_document(&bytes)
-        .with_context(|| format!("{} must not be published", args.capsule.display()))?;
-    let capabilities =
-        derive_capabilities(&formed.bundle, &formed.derivations).with_context(|| {
-            format!(
-                "the capabilities of {} cannot be represented in Hub metadata",
-                args.capsule.display()
-            )
-        })?;
+    publish_base64(args)
+}
+
+/// What both publish lanes need before they touch the network.
+struct PreparedPublish {
+    owner: String,
+    name: String,
+    tag: String,
+    base: String,
+    token: String,
+    readme: Option<String>,
+}
+
+fn prepare_publish(args: &PublishArgs) -> Result<PreparedPublish> {
     let (owner, name) = parse_owner_name(&args.name)?;
     if !is_valid_tag(&args.tag) {
         bail!(hub_error(
@@ -1105,32 +1048,47 @@ pub fn publish(args: PublishArgs) -> Result<()> {
         Some(path) => Some(read_readme(path)?),
         None => None,
     };
-    let base = api_base(&args.api_url)?;
-    let token = crate::auth_device::resolve_token(args.token, &args.api_url)?;
-    let digest = bundle_sha256(&bytes);
-    let request = PublishRequest {
+    Ok(PreparedPublish {
+        owner,
+        name,
         tag: args.tag.clone(),
-        digest: digest.clone(),
-        bundle_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
-        metadata: PublishMetadata {
-            display_name: args.display_name,
-            summary: args.summary,
-            readme_markdown: readme,
-            license_spdx: args.license,
-            homepage: args.homepage,
-            repository: args.repository,
-            porter: args.porter,
-            surfaces: args.surfaces,
-            tags: Vec::new(),
-            environments: args.environments,
-            capabilities,
-        },
-    };
-    let client = api_client()?;
-    let response = put_publish(&client, &base, &token, &owner, &name, &request)?;
-    // The API echoes what it stored. Refuse to print a success line for
-    // different bytes or a different identity than the ones just sent.
-    let expected_reference = format!("{HUB_REF_PREFIX}{owner}/{name}");
+        base: api_base(&args.api_url)?,
+        token: crate::auth_device::resolve_token(args.token.clone(), &args.api_url)?,
+        readme,
+    })
+}
+
+/// The metadata both lanes send: the publisher's declared fields, the README,
+/// and capabilities derived from the validated bundle (never a declaration).
+fn publish_metadata(
+    args: &PublishArgs,
+    readme: Option<&str>,
+    capabilities: HubCapabilities,
+) -> PublishMetadata {
+    PublishMetadata {
+        display_name: args.display_name.clone(),
+        summary: args.summary.clone(),
+        readme_markdown: readme.map(str::to_owned),
+        license_spdx: args.license.clone(),
+        homepage: args.homepage.clone(),
+        repository: args.repository.clone(),
+        porter: args.porter.clone(),
+        surfaces: args.surfaces.clone(),
+        tags: Vec::new(),
+        environments: args.environments.clone(),
+        capabilities,
+    }
+}
+
+/// Refuse to print a success line for different bytes or a different identity
+/// than the ones just sent, in either lane.
+fn finish_publish(
+    prepared: &PreparedPublish,
+    digest: &str,
+    size: u64,
+    response: PublishResponse,
+) -> Result<()> {
+    let expected_reference = format!("{HUB_REF_PREFIX}{}/{}", prepared.owner, prepared.name);
     if response.reference != expected_reference {
         bail!(hub_error(
             ERR_API_FAILED,
@@ -1152,24 +1110,23 @@ pub fn publish(args: PublishArgs) -> Result<()> {
             format!("the API stored {published}; the uploaded bundle hashes to {digest}")
         ));
     }
-    if response.size_bytes != bytes.len() as u64 {
+    if response.size_bytes != size {
         bail!(hub_error(
             ERR_SIZE_MISMATCH,
             format!(
-                "the API stored {} bytes; the uploaded bundle is {} bytes",
-                response.size_bytes,
-                bytes.len()
+                "the API stored {} bytes; the uploaded bundle is {size} bytes",
+                response.size_bytes
             )
         ));
     }
     if let Some(served_tag) = response.tag.as_deref()
-        && served_tag != args.tag
+        && served_tag != prepared.tag
     {
         bail!(hub_error(
             ERR_API_FAILED,
             format!(
                 "the API published tag `{served_tag}` instead of `{}`",
-                args.tag
+                prepared.tag
             )
         ));
     }
@@ -1180,12 +1137,123 @@ pub fn publish(args: PublishArgs) -> Result<()> {
     if response.created == Some(false) {
         eprintln!(
             "the same bytes were already published; the `{}` tag now points at {published}",
-            args.tag
+            prepared.tag
         );
     }
     Ok(())
 }
 
+/// The unchanged Base64 JSON lane: PUT /v1/hub/capsules/<owner>/<name>.
+fn publish_base64(args: PublishArgs) -> Result<()> {
+    let bytes = fs::read(&args.capsule)
+        .with_context(|| format!("cannot read {}", args.capsule.display()))?;
+    if bytes.len() as u64 > MAX_BUNDLE_BYTES {
+        bail!(hub_error(
+            ERR_BUNDLE_TOO_LARGE,
+            format!(
+                "{} is {} bytes; a Base64 JSON publish carries at most {MAX_BUNDLE_BYTES} bytes",
+                args.capsule.display(),
+                bytes.len()
+            )
+        ));
+    }
+    // Only a bundle the local Run path would accept is ever published, and
+    // the Hub capability metadata is derived from exactly those validated
+    // routes rather than from any publisher-declared value.
+    let formed = crate::hub::validate_formed_bundle_document(&bytes)
+        .with_context(|| format!("{} must not be published", args.capsule.display()))?;
+    let capabilities =
+        derive_capabilities(&formed.bundle, &formed.derivations).with_context(|| {
+            format!(
+                "the capabilities of {} cannot be represented in Hub metadata",
+                args.capsule.display()
+            )
+        })?;
+    let prepared = prepare_publish(&args)?;
+    let metadata = publish_metadata(&args, prepared.readme.as_deref(), capabilities);
+    let digest = bundle_sha256(&bytes);
+    let request = PublishRequest {
+        tag: prepared.tag.clone(),
+        digest: digest.clone(),
+        bundle_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        metadata,
+    };
+    let client = api_client()?;
+    let response = put_publish(
+        &client,
+        &prepared.base,
+        &prepared.token,
+        &prepared.owner,
+        &prepared.name,
+        &request,
+    )?;
+    finish_publish(&prepared, &digest, bytes.len() as u64, response)
+}
+
+fn api_failure_code(
+    action: &str,
+    target: &str,
+    base: &str,
+    status: StatusCode,
+    detail: &str,
+) -> anyhow::Error {
+    let suffix = if detail.is_empty() {
+        String::new()
+    } else {
+        format!(" ({detail})")
+    };
+    let subject = if target.is_empty() {
+        String::new()
+    } else {
+        format!(" for {target}")
+    };
+    match status.as_u16() {
+        300..=399 => hub_error(
+            ERR_REDIRECT_REFUSED,
+            format!("the API redirected the request to {action}{subject} ({status})"),
+        ),
+        401 => hub_error(
+            ERR_UNAUTHORIZED,
+            format!(
+                "the API at {base} refused to {action}{subject}{suffix}; run ato login --api-url {base} first"
+            ),
+        ),
+        403 => hub_error(
+            ERR_FORBIDDEN,
+            format!(
+                "the API refused to {action}{subject}{suffix}; this account does not own that namespace"
+            ),
+        ),
+        404 => hub_error(
+            ERR_NOT_FOUND,
+            format!("the Hub at {base} has no such capsule or version{subject}{suffix}"),
+        ),
+        410 => hub_error(
+            ERR_API_FAILED,
+            format!("the API expired the request to {action}{subject}{suffix}"),
+        ),
+        409 => hub_error(
+            ERR_DIGEST_MISMATCH,
+            format!("the API reported a conflict while trying to {action}{subject}{suffix}"),
+        ),
+        413 => hub_error(
+            ERR_BUNDLE_TOO_LARGE,
+            format!("the API refused the bundle as too large{subject}{suffix}"),
+        ),
+        422 => hub_error(
+            ERR_INVALID_BUNDLE,
+            format!("the API refused the bundle as unreadable{subject}{suffix}"),
+        ),
+        400 => hub_error(
+            ERR_INVALID_REQUEST,
+            format!("the API rejected the request to {action}{subject}{suffix}"),
+        ),
+        _ => hub_error(
+            ERR_API_FAILED,
+            format!("failed to {action}{subject}: HTTP {status}{suffix}"),
+        ),
+    }
+}
 fn read_readme(path: &Path) -> Result<String> {
     if path == Path::new("-") {
         let mut text = String::new();
