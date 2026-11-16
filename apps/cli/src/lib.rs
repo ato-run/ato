@@ -3509,8 +3509,21 @@ fn start_portable_attempt(
             // The person ran exactly this Derivation. That authorizes running
             // it; it confirms no effect beyond the disposable ones, and the
             // validator admits only pure single-step routes here.
-            authorization: EffectAuthorization::UserInvoked {
-                derivation_ref: validated.derivation_ref.as_str(),
+            // A person ran exactly this Derivation. When they also accepted
+            // the declared requirements (a native source build's fixed crate
+            // egress), that consent travels with the attempt; otherwise the
+            // common policy still refuses a D that declares any.
+            authorization: if matches!(
+                native_source_consent,
+                ato_portable_application::portable_run::NativeSourceConsent::Approved
+            ) {
+                EffectAuthorization::UserAuthorizedDeclaredRequirements {
+                    derivation_ref: validated.derivation_ref.as_str(),
+                }
+            } else {
+                EffectAuthorization::UserInvoked {
+                    derivation_ref: validated.derivation_ref.as_str(),
+                }
             },
             // A Run builds nothing.
             network: NetworkPolicy::Denied,
