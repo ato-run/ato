@@ -224,3 +224,31 @@ Not verified (no run on a host that can enforce the native policy):
   `codesign`/`spctl` on the materialized artifact are checked.
 - Upstream's written position on name use and redistribution (`LICENSE-BRAND`)
   should be confirmed with its maintainers before this sample is published anywhere.
+
+## Update 2026-11-16: the Contract is a terminal exchange
+
+The earlier revision of this sample could only declare the surface, because a
+v2 native Route had no way to observe a program that opens no listening socket.
+That gap is closed: a v2 native Route may now declare a **terminal Surface**
+(`[derivation.native_surface]`), the Adapter owns the PTY, and K is
+`ato.contract.terminal@1` — the CLI must answer one declared exchange. The
+Route is launched with its declared argument vector
+(`ato.native.argv = ["mcp","--headless"]`), types the pinned JSON-RPC
+`initialize` line, and must frame the reply with `serverInfo` before the
+deadline. The delimiter is chosen so the echoed input cannot produce it, which
+the authoring validation enforces.
+
+No `body_digest` is pinned: the CLI's startup notice embeds a run-local
+temporary path, so the captured bytes differ per Run while the exchange is the
+same. A digest that was never observed would be a claim, not evidence.
+
+Both Routes declare the same terminal Port and the same operation, so whichever
+Derivation a Run selects observes exactly this K. The current pack is
+`bundle_sha256=sha256:1f1895ec…` (24,101 bytes),
+`contract_ref=sha256:34d52388…`, with `derivation_ref=sha256:80118875…`
+(prebuilt) and `sha256:97d008d7…` (from source).
+
+Still not verified here: launching either Route on a host that can apply the
+Seatbelt policy (this workstation refuses it), the D1 fetch and signature, the
+D2 consent/toolchain/build/cache path, and the resulting receipts.
+

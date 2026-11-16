@@ -122,3 +122,18 @@ cargo fmt -p ato-portable-application -- --check               # clean
   cache reuse.
 - Any K observation, and therefore `fully_satisfied`.
 - Upstream's written position on name use and redistribution before publication.
+
+## 8. Update 2026-11-16 (later): terminal K, declared argv, two terminal Routes
+
+- `ato.contract.terminal@1` added for v2 native Routes (PR #1838), plus
+  `ato.native.argv` for a bounded, directly-exec'd argument vector (PR #1840).
+- Several terminal Routes may now realize one Contract when they declare the
+  same terminal Port and operation set (PR #1842).
+- Re-packed sample: `bundle_sha256=sha256:1f1895ecdcff6a3cedbdc381ea769a6effb70e38d4945897fde8e2afa268e4ee`
+  (24,101 bytes), `contract_ref=sha256:34d52388678111292fa890603110c23b47ce51220f452a28c233a2259e174c98`,
+  D1 `derivation_ref=sha256:80118875305df06ea1b43e8681ff0399c0408c492fcb89d84c85cc8afcb0db99`,
+  D2 `derivation_ref=sha256:97d008d778db2ea77049aa915133f78e51ea1b7ab43f21864b0d854bb899ef76`.
+- `--list-derivations` reports both Routes as `native_terminal`; both are
+  `runnable=false` on this workstation only because it cannot apply the
+  Seatbelt policy (`native_sandbox_unavailable`).
+
