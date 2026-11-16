@@ -1,6 +1,6 @@
 # ato.native@1 Adapter audit (M2 / PR3)
 
-Status: Draft (2026-11-16). Target: the native desktop D implementation of `ato run`.
+Status: Draft (2026-11-16, PR3b). Target: the native desktop D implementation of `ato run`.
 Contract: workspace `docs/rfcs/draft/capsule-hub-m2-native.md` section 2.
 
 This document is an audit record. It separates what is *declared*, what is
@@ -34,6 +34,25 @@ reported as complete.
   `cargo_lock` / `toolchain` / `build_argv` / `build_cache`. `build_argv` is the
   fixed `cargo build --locked --release [-p <pkg>]` vocabulary; there is no
   shell and no arbitrary token.
+- D1 `zip`: a remote reference whose `ato.native.format` is `zip` is unpacked
+  by `native_desktop/zip.rs` (PR3b). The central directory is the record the
+  plan is built from, so every name, size, CRC32 and method is checked before
+  the first byte is placed:
+  - names must be relative and traversal-free with `/` separators; `..`,
+    absolute paths, backslash separators, symlinks, devices, fifos, encrypted
+    entries and duplicate names are refused;
+  - the running uncompressed total is bounded by `MAX_EXTRACTED_BYTES`, and an
+    entry whose declared size is not the size its stream produces is refused;
+  - each entry's CRC32 in the central directory must match the bytes produced;
+  - stored and deflate are decompressed; bzip2, zstd, lzma and ZIP64 are
+    `native_format_extractor_unavailable` refusals, not a partial unpack;
+  - the recorded UNIX mode is preserved with setuid/setgid/sticky stripped, and
+    an entry with no recorded mode is not made executable by inference. The
+    declared entry is resolved by the same `resolve_entry` the `tar.gz` path
+    uses (exists, regular file, executable, inside the root).
+  The unpacked tree lands in the same Run scratch directory and digests into
+  the same canonical tree form as a `tar.gz`, so the receipt names what was
+  actually launched.
 - Acquire, unpack, verify the signature and launch are separate stages, and
   each names its own failure. An unpacks-unknown format is not reported as a
   corrupted artifact (`native_format_extractor_unavailable` vs
@@ -61,8 +80,8 @@ reported as complete.
 
 | Item | Current state | Refusal |
 | --- | --- | --- |
-| `zip` artifact unpacking | accepted in the declaration vocabulary (remote only); no extractor | `native_format_extractor_unavailable` |
-| `dmg` artifact unpacking | same; no disk-image mount or copy | `native_format_extractor_unavailable` |
+| `dmg` artifact unpacking | accepted in the declaration vocabulary (remote only); no disk-image mount or copy, so D1 must reference a `zip` until this exists | `native_format_extractor_unavailable` |
+| `zip` entries compressed with bzip2 / zstd / lzma, and ZIP64 archives | stored and deflate are unpacked (PR3b); another method or the ZIP64 record is refused per archive/entry, never skipped | `native_format_extractor_unavailable` |
 | build egress host filter | SBPL grants tcp/443 only; the declared host is validated against `NATIVE_BUILD_EGRESS_HOSTS`, but enforcement is port-level | recorded in the receipt's `build_network` |
 | Windows Adapter | stays fail-closed before launch because signature/sandbox cannot be enforced | `native_adapter_unavailable` family |
 | signature scope | macOS `codesign --verify --deep --strict` + `spctl --assess` only; no notarization ticket, stapling or revocation check | — |
@@ -87,7 +106,8 @@ source  = count of source_url / source_commit / source_sha256 /
   blob and adds no artifact edge to the closure
   (`a_remote_native_route_validates_and_carries_no_bundle_blob`).
 - `format` is `tar.gz` for a bundled artifact and a source archive; a remote
-  reference may also declare `zip` or `dmg`.
+  reference may also declare `zip` or `dmg`. `zip` is unpacked (PR3b); `dmg`
+  is a named, unimplemented refusal.
 
 ## 5. M1 real-host procedure for the Lead (not run in this PR)
 
@@ -100,16 +120,34 @@ access.
    - swap the upstream asset: `native_fetch_digest_mismatch`;
    - remove the upstream asset: `native_fetch_not_found`;
    - unsigned/ad-hoc under `require-valid`: `native_signature_policy_unsatisfied`.
-2. D2 (source) without approval: `native_toolchain_consent_required`, and
+2. D1 with `ato.native.format = "zip"` (the upstream `*-macos-universal.zip`
+   asset): the same stages, with the extractor reading the central directory.
+   - the real upstream zip fetches under its pinned digest and the declared
+     `SolidCraft.app/Contents/MacOS/solidcraft` (or the CLI binary) is
+     executable after unpacking;
+   - a zip that names `../evil` or an absolute path is refused before anything
+     is placed (`native_artifact_invalid`);
+   - a zip whose stored bytes do not match its central-directory CRC32 is
+     refused (`native_artifact_invalid`), not launched;
+   - a zip that records no executable bit on the entry is refused at
+     `native_entry_not_executable`, and an absent entry at
+     `native_entry_missing`;
+   - a `dmg` route still stops at `native_format_extractor_unavailable`.
+3. D1 signature: run `codesign --verify --deep --strict` and `spctl --assess` on
+   the unpacked `.app`; an ad-hoc binary under `require-valid` must fail. The
+   upstream zip's signature is a property of the unpacked bundle, so this is
+   the stage the Lead must observe on the real artifact.
+4. D2 (source) without approval: `native_toolchain_consent_required`, and
    nothing created under `$ATO_HOME/toolchains`.
-3. Re-run with `--allow-native-source-build`: rustup-init checksum verification,
+5. Re-run with `--allow-native-source-build`: rustup-init checksum verification,
    toolchain under `$ATO_HOME/toolchains/rust/<version>-<target>`, source
    tarball digest, Cargo.lock digest, sandboxed build, launch, K observations.
-4. Re-run the same D2: build cache hit (`build_cache: hit`) and no build.
-5. A tarball for another commit (with a matching digest):
+6. Re-run the same D2: build cache hit (`build_cache: hit`) and no build.
+7. A tarball for another commit (with a matching digest):
    `native_build_source_commit_mismatch`.
-6. Teardown: no process group left behind, Run scratch removed.
-7. Receipt: selected D (`derivation_ref`), `realization: native_desktop`, the
+8. Teardown: no process group left behind, Run scratch removed, and no
+   `*.part` file beside a fetched artifact.
+9. Receipt: selected D (`derivation_ref`), `realization: native_desktop`, the
    materialization sentence in `workspace`, `build_network`, signature verdicts,
    and `fully_satisfied`. A successful build alone must not satisfy K.
 
