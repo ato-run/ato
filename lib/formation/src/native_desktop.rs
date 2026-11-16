@@ -1034,7 +1034,7 @@ mod tests {
         );
         assert!(parse_native_argv("not json").is_err());
         assert!(parse_native_argv(r#"[""]"#).is_err());
-        assert!(parse_native_argv(r#"["ab"]"#).is_err());
+        assert!(parse_native_argv(r#"["a\u0001b"]"#).is_err());
         let too_many = format!(
             "[{}]",
             (0..=MAX_NATIVE_ARGV)
@@ -1045,6 +1045,31 @@ mod tests {
         assert!(parse_native_argv(&too_many).is_err());
         let too_long = format!("[\"{}\"]", "x".repeat(MAX_NATIVE_ARGV_BYTES + 1));
         assert!(parse_native_argv(&too_long).is_err());
+    }
+
+    /// The declared vector is a descriptor fact, not a launch-only aside: it
+    /// must serialize back to the exact statement a Run later reads.
+    #[test]
+    fn an_argument_vector_round_trips_through_the_descriptor() {
+        let mut runtimes = valid_runtimes();
+        runtimes.push((NATIVE_ARGV_RUNTIME, r#"["mcp","--headless"]"#.to_owned()));
+        let borrowed: Vec<(&str, &str)> = runtimes
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect();
+        let descriptor =
+            NativeDescriptor::from_step(&step(&borrowed)).expect("a declared vector parses");
+        assert_eq!(
+            descriptor.argv,
+            vec!["mcp".to_owned(), "--headless".to_owned()]
+        );
+        assert_eq!(
+            descriptor
+                .runtimes()
+                .get(NATIVE_ARGV_RUNTIME)
+                .map(String::as_str),
+            Some(r#"["mcp","--headless"]"#)
+        );
     }
 
     fn valid_step() -> BoundStep {
