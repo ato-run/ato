@@ -29,17 +29,19 @@
 //! loopback stub instead of the real API.
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail, ensure};
 use ato_formation::verify::ContractVerificationReceipt;
 use ato_portable_application::bundle_sha256;
+use base64::Engine;
+use clap::Args;
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
-use reqwest::header::{ACCEPT, CONTENT_TYPE};
-use serde::Deserialize;
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use serde::{Deserialize, Serialize};
 
 /// Reserved first-argument prefix for a Hub reference.
 pub const HUB_REF_PREFIX: &str = "capsules/";
@@ -50,6 +52,7 @@ pub const MAX_BUNDLE_BYTES: u64 = 8 * 1024 * 1024;
 
 pub const ERR_INVALID_REF: &str = "hub-invalid-ref";
 pub const ERR_INVALID_DIGEST: &str = "hub-invalid-digest";
+pub const ERR_INVALID_TAG: &str = "hub-invalid-tag";
 pub const ERR_DIGEST_MISMATCH: &str = "hub-digest-mismatch";
 pub const ERR_SIZE_MISMATCH: &str = "hub-size-mismatch";
 pub const ERR_NOT_FOUND: &str = "hub-not-found";
@@ -219,6 +222,33 @@ pub fn parse_digest(value: &str) -> Result<String, String> {
     Ok(format!("sha256:{}", hex.to_ascii_lowercase()))
 }
 
+/// Parse `<owner>/<name>` as given to `ato hub publish --name`.
+pub fn parse_owner_name(value: &str) -> Result<(String, String)> {
+    let (owner, name) = value.split_once('/').ok_or_else(|| {
+        hub_error(
+            ERR_INVALID_REF,
+            format!("`{value}` must be `<owner>/<name>`"),
+        )
+    })?;
+    if !is_kebab_identifier(owner) {
+        bail!(hub_error(
+            ERR_INVALID_REF,
+            format!("`{owner}` is not a publisher handle (lowercase letters, digits and hyphens)")
+        ));
+    }
+    // The Store creates slugs with a three-character minimum; reject a name the
+    // server could not create rather than uploading first.
+    if !is_kebab_identifier(name) || name.len() < 3 {
+        bail!(hub_error(
+            ERR_INVALID_REF,
+            format!(
+                "`{name}` is not a capsule name (lowercase letters, digits and hyphens, at least 3 characters)"
+            )
+        ));
+    }
+    Ok((owner.to_owned(), name.to_owned()))
+}
+
 /// A capsule resolved from the Hub and stored locally.
 #[derive(Debug, Clone)]
 pub struct ResolvedHubCapsule {
@@ -240,6 +270,90 @@ pub struct ResolveResponse {
     pub digest: String,
     pub size_bytes: u64,
     pub artifact_path: String,
+}
+
+/// One immutable release as the API lists it.
+#[derive(Debug, Deserialize)]
+pub struct PublishResponse {
+    #[serde(rename = "ref")]
+    pub reference: String,
+    #[serde(default)]
+    pub tag: Option<String>,
+    pub digest: String,
+    pub size_bytes: u64,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub created: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PublishMetadata {
+    pub display_name: Option<String>,
+    pub summary: Option<String>,
+    pub readme_markdown: Option<String>,
+    pub license_spdx: Option<String>,
+    pub homepage: Option<String>,
+    pub repository: Option<String>,
+    pub porter: Option<String>,
+    pub surfaces: Vec<String>,
+    pub tags: Vec<String>,
+    pub environments: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PublishRequest {
+    pub tag: String,
+    pub digest: String,
+    pub bundle_base64: String,
+    pub metadata: PublishMetadata,
+}
+
+/// `ato hub publish <file.capsule> --name <owner>/<name>`.
+#[derive(Debug, Args)]
+pub struct PublishArgs {
+    /// Formed `.capsule` bundle to publish.
+    pub capsule: PathBuf,
+    /// Registry identity: `<owner>/<name>`.
+    #[arg(long)]
+    pub name: String,
+    /// Release tag the new version becomes. Defaults to `latest`.
+    #[arg(long, default_value = DEFAULT_TAG)]
+    pub tag: String,
+    /// SPDX license identifier (for example `MPL-2.0`).
+    #[arg(long)]
+    pub license: Option<String>,
+    /// README markdown file; `-` reads standard input.
+    #[arg(long)]
+    pub readme: Option<PathBuf>,
+    /// Source repository URL (http/https).
+    #[arg(long)]
+    pub repository: Option<String>,
+    /// Project homepage URL (http/https).
+    #[arg(long)]
+    pub homepage: Option<String>,
+    /// Declared surface (repeatable, e.g. `web_ui`).
+    #[arg(long = "surface")]
+    pub surfaces: Vec<String>,
+    /// Supported environment (repeatable, e.g. `macos-arm64`).
+    #[arg(long = "environment")]
+    pub environments: Vec<String>,
+    /// One-line plain-text summary.
+    #[arg(long)]
+    pub summary: Option<String>,
+    /// Human-readable display name.
+    #[arg(long)]
+    pub display_name: Option<String>,
+    /// Free-form porter credit.
+    #[arg(long)]
+    pub porter: Option<String>,
+    /// Ato API origin. Same origin as `ato login --api-url`.
+    #[arg(long, env = "ATO_API_URL", default_value = crate::auth_device::DEFAULT_API_URL)]
+    pub api_url: String,
+    /// Bearer token. Falls back to `ATO_API_TOKEN`, then to the credential
+    /// saved by `ato login` for this API origin.
+    #[arg(long, env = "ATO_API_TOKEN", hide_env_values = true)]
+    pub token: Option<String>,
 }
 
 /// Resolve a Hub reference for `ato run`, if the argument is one.
@@ -627,6 +741,159 @@ fn api_error_code(body: &str) -> String {
         .collect()
 }
 
+/// Publish one formed bundle: `PUT /v1/hub/capsules/<owner>/<name>`.
+pub fn publish(args: PublishArgs) -> Result<()> {
+    let bytes = fs::read(&args.capsule)
+        .with_context(|| format!("cannot read {}", args.capsule.display()))?;
+    if bytes.len() as u64 > MAX_BUNDLE_BYTES {
+        bail!(hub_error(
+            ERR_BUNDLE_TOO_LARGE,
+            format!(
+                "{} is {} bytes; a Hub bundle carries at most {MAX_BUNDLE_BYTES} bytes",
+                args.capsule.display(),
+                bytes.len()
+            )
+        ));
+    }
+    // Only a bundle the local Run path would accept is ever published.
+    crate::hub::validate_formed_bundle(&bytes)
+        .with_context(|| format!("{} must not be published", args.capsule.display()))?;
+    let (owner, name) = parse_owner_name(&args.name)?;
+    if !is_valid_tag(&args.tag) {
+        bail!(hub_error(
+            ERR_INVALID_TAG,
+            format!("`{}` is not a valid tag", args.tag)
+        ));
+    }
+    let readme = match args.readme.as_deref() {
+        Some(path) => Some(read_readme(path)?),
+        None => None,
+    };
+    let base = api_base(&args.api_url)?;
+    let token = crate::auth_device::resolve_token(args.token, &args.api_url)?;
+    let digest = bundle_sha256(&bytes);
+    let request = PublishRequest {
+        tag: args.tag.clone(),
+        digest: digest.clone(),
+        bundle_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        metadata: PublishMetadata {
+            display_name: args.display_name,
+            summary: args.summary,
+            readme_markdown: readme,
+            license_spdx: args.license,
+            homepage: args.homepage,
+            repository: args.repository,
+            porter: args.porter,
+            surfaces: args.surfaces,
+            tags: Vec::new(),
+            environments: args.environments,
+        },
+    };
+    let client = api_client()?;
+    let response = put_publish(&client, &base, &token, &owner, &name, &request)?;
+    // The API echoes what it stored. Refuse to print a success line for
+    // different bytes or a different identity than the ones just sent.
+    let expected_reference = format!("{HUB_REF_PREFIX}{owner}/{name}");
+    if response.reference != expected_reference {
+        bail!(hub_error(
+            ERR_API_FAILED,
+            format!(
+                "the API published `{}` instead of `{expected_reference}`",
+                response.reference
+            )
+        ));
+    }
+    let published = parse_digest(&response.digest).map_err(|message| {
+        hub_error(
+            ERR_API_FAILED,
+            format!("the API published `{}`: {message}", response.digest),
+        )
+    })?;
+    if published != digest {
+        bail!(hub_error(
+            ERR_DIGEST_MISMATCH,
+            format!("the API stored {published}; the uploaded bundle hashes to {digest}")
+        ));
+    }
+    if response.size_bytes != bytes.len() as u64 {
+        bail!(hub_error(
+            ERR_SIZE_MISMATCH,
+            format!(
+                "the API stored {} bytes; the uploaded bundle is {} bytes",
+                response.size_bytes,
+                bytes.len()
+            )
+        ));
+    }
+    if let Some(served_tag) = response.tag.as_deref()
+        && served_tag != args.tag
+    {
+        bail!(hub_error(
+            ERR_API_FAILED,
+            format!(
+                "the API published tag `{served_tag}` instead of `{}`",
+                args.tag
+            )
+        ));
+    }
+    println!("{expected_reference}@{published}");
+    if let Some(url) = response.url.as_deref() {
+        println!("{url}");
+    }
+    if response.created == Some(false) {
+        eprintln!(
+            "the same bytes were already published; the `{}` tag now points at {published}",
+            args.tag
+        );
+    }
+    Ok(())
+}
+
+fn read_readme(path: &Path) -> Result<String> {
+    if path == Path::new("-") {
+        let mut text = String::new();
+        io::stdin()
+            .read_to_string(&mut text)
+            .context("read the README from standard input")?;
+        return Ok(text);
+    }
+    fs::read_to_string(path).with_context(|| format!("read the README {}", path.display()))
+}
+
+fn put_publish(
+    client: &Client,
+    base: &str,
+    token: &str,
+    owner: &str,
+    name: &str,
+    request: &PublishRequest,
+) -> Result<PublishResponse> {
+    let url = format!("{base}{HUB_CAPSULES_PATH}{owner}/{name}");
+    let response = client
+        .put(&url)
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .header(CONTENT_TYPE, "application/json")
+        .json(request)
+        .send()
+        .with_context(|| format!("failed to reach the Ato API at {base}"))?;
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+    if !status.is_success() {
+        return Err(api_failure(
+            "publish",
+            &format!("{HUB_REF_PREFIX}{owner}/{name}"),
+            status,
+            &body,
+        ));
+    }
+    serde_json::from_str(&body).map_err(|error| {
+        hub_error(
+            ERR_API_FAILED,
+            format!("the publish response is malformed: {error}"),
+        )
+    })
+}
+
 /// Report a resolved Run's receipt. Best-effort: the caller's exit code is the
 /// Run's, and a failure is a warning only.
 pub fn report_successful_run(resolved: &ResolvedHubCapsule, receipt: &ContractVerificationReceipt) {
@@ -720,7 +987,7 @@ fn is_reportable_attempt_id(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{self, Read, Write};
+    use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -729,6 +996,7 @@ mod tests {
     use ato_formation::verify::{
         VerificationExecutionEvidence, VerificationTarget, VerificationTargetKind,
     };
+    use base64::Engine;
 
     use super::*;
 
@@ -845,6 +1113,28 @@ mod tests {
             "a".repeat(65),
         ] {
             assert!(!is_valid_tag(&tag), "{tag}");
+        }
+    }
+
+    #[test]
+    fn publish_names_are_owner_and_name() {
+        assert_eq!(
+            parse_owner_name("koh0920/interop-static").unwrap(),
+            ("koh0920".to_owned(), "interop-static".to_owned())
+        );
+        for value in [
+            "koh0920",
+            "koh0920/ab",
+            "Koh0920/interop-static",
+            "koh0920/interop_static",
+            "/interop-static",
+            "koh0920/",
+        ] {
+            let error = parse_owner_name(value).expect_err(value);
+            assert!(
+                error.to_string().starts_with(ERR_INVALID_REF),
+                "{value}: {error}"
+            );
         }
     }
 
@@ -1391,6 +1681,120 @@ mod tests {
             &resolved_at("http://127.0.0.1:9"),
             &receipt(SAMPLE_DIGEST, true, Some("attempt-1")),
         );
+    }
+
+    // ---- publishing -------------------------------------------------------
+
+    fn publish_request(bytes: &[u8]) -> PublishRequest {
+        PublishRequest {
+            tag: "latest".to_owned(),
+            digest: SAMPLE_DIGEST.to_owned(),
+            bundle_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            metadata: PublishMetadata {
+                display_name: Some("Interop Static".to_owned()),
+                summary: Some("Static web proof capsule".to_owned()),
+                readme_markdown: Some("# Interop Static".to_owned()),
+                license_spdx: Some("MPL-2.0".to_owned()),
+                homepage: None,
+                repository: Some("https://github.com/ato-run/ato".to_owned()),
+                porter: None,
+                surfaces: vec!["web_ui".to_owned()],
+                tags: Vec::new(),
+                environments: vec!["macos-arm64".to_owned()],
+            },
+        }
+    }
+
+    #[test]
+    fn a_readme_file_is_read_verbatim() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("README.md");
+        fs::write(&path, "# Interop Static\n\nMPL-2.0\n").unwrap();
+        assert_eq!(read_readme(&path).unwrap(), "# Interop Static\n\nMPL-2.0\n");
+    }
+
+    #[test]
+    fn publishing_sends_the_bundle_metadata_and_bearer_credential() {
+        let bytes = sample_bundle();
+        let api = StubApi::new(vec![json_response(
+            "200 OK",
+            serde_json::json!({
+                "ref": "capsules/koh0920/interop-static",
+                "tag": "latest",
+                "digest": SAMPLE_DIGEST,
+                "size_bytes": bytes.len(),
+                "url": "https://stg-app.ato.run/capsules/koh0920/interop-static",
+                "created": true,
+            }),
+        )]);
+        let client = api_client().unwrap();
+        let response = put_publish(
+            &client,
+            &api.base,
+            "ato_dev_test_token",
+            "koh0920",
+            "interop-static",
+            &publish_request(&bytes),
+        )
+        .expect("the publish succeeds");
+        assert_eq!(response.digest, SAMPLE_DIGEST);
+        assert_eq!(response.size_bytes, bytes.len() as u64);
+
+        let requests = api.wait_requests(1);
+        assert!(
+            requests[0].starts_with("PUT /v1/hub/capsules/koh0920/interop-static "),
+            "{}",
+            requests[0]
+        );
+        assert!(
+            requests[0]
+                .to_ascii_lowercase()
+                .contains("authorization: bearer ato_dev_test_token"),
+            "{}",
+            requests[0]
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(requests[0].split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["tag"], "latest");
+        assert_eq!(body["digest"], SAMPLE_DIGEST);
+        assert_eq!(body["metadata"]["license_spdx"], "MPL-2.0");
+        assert_eq!(body["metadata"]["surfaces"][0], "web_ui");
+        assert_eq!(body["metadata"]["environments"][0], "macos-arm64");
+        let encoded = body["bundle_base64"].as_str().unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn publish_failures_are_coded_and_never_echo_the_credential() {
+        let bytes = sample_bundle();
+        for (status, code) in [
+            ("401 Unauthorized", ERR_UNAUTHORIZED),
+            ("403 Forbidden", ERR_FORBIDDEN),
+            ("409 Conflict", ERR_DIGEST_MISMATCH),
+            ("413 Payload Too Large", ERR_BUNDLE_TOO_LARGE),
+            ("400 Bad Request", ERR_INVALID_REQUEST),
+        ] {
+            let api = StubApi::new(vec![json_response(
+                status,
+                serde_json::json!({"error": "no"}),
+            )]);
+            let client = api_client().unwrap();
+            let error = put_publish(
+                &client,
+                &api.base,
+                "ato_dev_secret",
+                "koh0920",
+                "interop-static",
+                &publish_request(&bytes),
+            )
+            .expect_err("a refused publish fails");
+            let message = error.to_string();
+            assert!(message.starts_with(code), "{status}: {message}");
+            assert!(!message.contains("ato_dev_secret"), "{status}: {message}");
+        }
     }
 
     #[test]

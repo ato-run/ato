@@ -29,6 +29,10 @@ fn repo_sample() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-static.capsule")
 }
 
+fn readme_sample() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-static-README.md")
+}
+
 fn sample_bytes() -> Vec<u8> {
     fs::read(repo_sample()).expect("the interop-static fixture is committed")
 }
@@ -209,6 +213,146 @@ fn body_of(request: &str) -> Value {
         .nth(1)
         .expect("the request has a body");
     serde_json::from_str(body).expect("the request body is JSON")
+}
+
+// ---- ato hub publish ------------------------------------------------------
+
+#[test]
+fn publishing_a_valid_capsule_reports_the_reference_and_web_url() {
+    let bytes = sample_bytes();
+    let api = StubApi::new(vec![json_response(
+        "200 OK",
+        json!({
+            "ref": "capsules/koh0920/interop-static",
+            "tag": "latest",
+            "digest": SAMPLE_DIGEST,
+            "size_bytes": bytes.len(),
+            "url": "https://stg-app.ato.run/capsules/koh0920/interop-static",
+            "created": true,
+        }),
+    )]);
+    let home = tempfile::tempdir().unwrap();
+    let output = ato_with_home(home.path())
+        .arg("hub")
+        .arg("publish")
+        .arg(repo_sample())
+        .args(["--name", "koh0920/interop-static", "--tag", "latest"])
+        .args(["--license", "MPL-2.0"])
+        .arg("--readme")
+        .arg(readme_sample())
+        .args(["--repository", "https://github.com/ato-run/ato"])
+        .args(["--surface", "web_ui"])
+        .args(["--environment", "macos-arm64"])
+        .args(["--summary", "Static web proof capsule"])
+        .args(["--display-name", "Interop Static"])
+        .args(["--api-url", &api.base])
+        .args(["--token", "ato_dev_test_token"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "the publish failed: {}",
+        stderr(&output)
+    );
+    let printed = stdout(&output);
+    assert!(
+        printed.contains(&format!("capsules/koh0920/interop-static@{SAMPLE_DIGEST}")),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("https://stg-app.ato.run/capsules/koh0920/interop-static"),
+        "{printed}"
+    );
+    assert!(!printed.contains("ato_dev_test_token"), "{printed}");
+    assert!(!stderr(&output).contains("ato_dev_test_token"));
+
+    let requests = api.wait_requests(1);
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    let request = &requests[0];
+    assert!(
+        request.starts_with("PUT /v1/hub/capsules/koh0920/interop-static "),
+        "{request}"
+    );
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer ato_dev_test_token"),
+        "{request}"
+    );
+    let body = body_of(request);
+    assert_eq!(body["tag"], "latest");
+    assert_eq!(body["digest"], SAMPLE_DIGEST);
+    assert_eq!(body["metadata"]["license_spdx"], "MPL-2.0");
+    assert_eq!(body["metadata"]["display_name"], "Interop Static");
+    assert_eq!(body["metadata"]["summary"], "Static web proof capsule");
+    assert_eq!(
+        body["metadata"]["repository"],
+        "https://github.com/ato-run/ato"
+    );
+    assert_eq!(body["metadata"]["surfaces"][0], "web_ui");
+    assert_eq!(body["metadata"]["environments"][0], "macos-arm64");
+    assert!(
+        body["metadata"]["readme_markdown"]
+            .as_str()
+            .unwrap()
+            .contains("# Interop Static")
+    );
+    let decoded = {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(body["bundle_base64"].as_str().unwrap())
+            .unwrap()
+    };
+    assert_eq!(decoded, bytes);
+}
+
+#[test]
+fn publishing_without_a_credential_points_at_ato_login() {
+    let home = tempfile::tempdir().unwrap();
+    let output = ato_with_home(home.path())
+        .arg("hub")
+        .arg("publish")
+        .arg(repo_sample())
+        .args(["--name", "koh0920/interop-static"])
+        .args(["--api-url", "https://staging.api.ato.run"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let message = stderr(&output);
+    assert!(
+        message.contains("ato login --api-url https://staging.api.ato.run"),
+        "{message}"
+    );
+}
+
+#[test]
+fn publishing_rejects_a_bundle_the_run_path_would_not_accept() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("computation-v2.capsule");
+    fs::write(
+        &path,
+        format!(
+            "{{\"index\":{{\"objects\":[],\"root\":\"blake3:{}\",\"version\":2}},\"payloads\":[]}}",
+            "0".repeat(64)
+        ),
+    )
+    .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let output = ato_with_home(home.path())
+        .arg("hub")
+        .arg("publish")
+        .arg(&path)
+        .args(["--name", "koh0920/interop-static"])
+        .args(["--api-url", "http://127.0.0.1:9"])
+        .args(["--token", "ato_dev_test_token"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("must not be published"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 // ---- ato run capsules/<owner>/<name> --------------------------------------
