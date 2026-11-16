@@ -12,7 +12,7 @@ use ato_computation::ContentRef;
 use ato_formation::authoring::{BoundDerivation, BoundState, BoundStep, StateAccess};
 use ato_objects::{PortableApplicationBundle, PortableBundleObjectKind};
 
-use crate::portable_run::{PortableBundleExecutor, PortableRunContext};
+use crate::portable_run::{NativeSourceConsent, PortableBundleExecutor, PortableRunContext};
 use crate::{
     BOUND_DERIVATION_SCHEMA, BundleShape, NATIVE_PROTOCOL, ObjectToEncode, PortableRealizationKind,
     add_structured, bundle_sha256, finish_bundle, validate_all_derivations, validate_bytes_all,
@@ -108,6 +108,172 @@ fn reseal(
         BundleShape::v3(),
     );
     encode(&filtered)
+}
+
+fn remote_native_step(derivation: &BoundDerivation) -> BoundStep {
+    let mut step = native_step(derivation);
+    step.runtimes
+        .remove(ato_formation::native_desktop::NATIVE_ARTIFACT_RUNTIME);
+    step.runtimes.insert(
+        ato_formation::native_desktop::NATIVE_REMOTE_URL_RUNTIME.to_owned(),
+        "https://github.com/example/app/releases/download/v1.0.0/app.tar.gz".to_owned(),
+    );
+    step.runtimes.insert(
+        ato_formation::native_desktop::NATIVE_REMOTE_SHA256_RUNTIME.to_owned(),
+        format!("sha256:{}", "b".repeat(64)),
+    );
+    step.runtimes.insert(
+        ato_formation::native_desktop::NATIVE_REMOTE_BYTES_RUNTIME.to_owned(),
+        "1024".to_owned(),
+    );
+    step
+}
+
+fn source_native_step(derivation: &BoundDerivation) -> BoundStep {
+    let mut step = native_step(derivation);
+    step.runtimes
+        .remove(ato_formation::native_desktop::NATIVE_ARTIFACT_RUNTIME);
+    step.runtimes.insert(
+        ato_formation::native_desktop::NATIVE_ENTRY_RUNTIME.to_owned(),
+        ".ato-build/target/release/app".to_owned(),
+    );
+    for (key, value) in [
+        (
+            ato_formation::native_desktop::NATIVE_SOURCE_URL_RUNTIME,
+            "https://codeload.github.com/example/app/tar.gz/8ba46e9e2181396a9b5903b98031399aef61cf26",
+        ),
+        (
+            ato_formation::native_desktop::NATIVE_SOURCE_COMMIT_RUNTIME,
+            "8ba46e9e2181396a9b5903b98031399aef61cf26",
+        ),
+        (
+            ato_formation::native_desktop::NATIVE_TOOLCHAIN_RUNTIME,
+            "rust:1.83.0",
+        ),
+        (
+            ato_formation::native_desktop::NATIVE_BUILD_ARGV_RUNTIME,
+            "cargo build --locked --release",
+        ),
+        (
+            ato_formation::native_desktop::NATIVE_BUILD_CACHE_RUNTIME,
+            "content-hash",
+        ),
+    ] {
+        step.runtimes.insert(key.to_owned(), value.to_owned());
+    }
+    step.runtimes.insert(
+        ato_formation::native_desktop::NATIVE_SOURCE_SHA256_RUNTIME.to_owned(),
+        format!("sha256:{}", "c".repeat(64)),
+    );
+    step.runtimes.insert(
+        ato_formation::native_desktop::NATIVE_CARGO_LOCK_RUNTIME.to_owned(),
+        format!("sha256:{}", "d".repeat(64)),
+    );
+    step
+}
+
+#[test]
+fn a_remote_native_route_validates_and_carries_no_bundle_blob() {
+    let (bytes, bundle) = sample_bundle();
+    let (_, validated) = validate_bytes_all(&bytes).unwrap();
+    let native = derivation_for(&validated, PortableRealizationKind::NativeDesktop);
+    let artifact_ref = native
+        .native
+        .as_ref()
+        .and_then(|native| native.descriptor.bundled_artifact())
+        .unwrap()
+        .to_owned();
+    let mut derivation = native.derivation.clone();
+    derivation.steps = vec![remote_native_step(&derivation)];
+    let resealed = reseal(&bundle, vec![derivation], &[]);
+    let (_, all) = validate_bytes_all(&resealed).expect("a remote route validates");
+    let remote = all
+        .iter()
+        .find(|route| route.realization == PortableRealizationKind::NativeDesktop)
+        .unwrap();
+    let descriptor = &remote.native.as_ref().unwrap().descriptor;
+    assert!(matches!(
+        descriptor.source,
+        ato_formation::native_desktop::NativeArtifactSource::Remote(_)
+    ));
+    assert_eq!(descriptor.bundled_artifact(), None);
+    assert_eq!(
+        descriptor.platform(),
+        native.native.as_ref().unwrap().descriptor.platform()
+    );
+    // The closure no longer reaches the artifact blob: a remote route is an
+    // external reference, not a redistributed payload.
+    let (resealed_bundle, _) = crate::validate_bytes_all(&resealed).unwrap();
+    assert!(
+        !resealed_bundle
+            .index
+            .objects
+            .iter()
+            .any(|object| object.reference == artifact_ref),
+        "a remote native route must not carry its artifact in the bundle"
+    );
+}
+
+#[test]
+fn a_source_native_route_needs_its_build_egress_and_only_for_a_source_route() {
+    let (bytes, bundle) = sample_bundle();
+    let (_, validated) = validate_bytes_all(&bytes).unwrap();
+    let native = derivation_for(&validated, PortableRealizationKind::NativeDesktop);
+    let mut derivation = native.derivation.clone();
+    derivation.steps = vec![source_native_step(&derivation)];
+
+    // No declared build egress: refused before any host would build.
+    let without_egress = reseal(&bundle, vec![derivation.clone()], &[]);
+    let error = validate_bytes_all(&without_egress).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("source build declares the build-phase network"),
+        "{error}"
+    );
+
+    // A declared build egress on a crate host is admitted.
+    let mut with_egress = derivation.clone();
+    with_egress
+        .requirements
+        .network
+        .push(ato_formation::requirements::NetworkRequirement {
+            phase: ato_formation::requirements::ExecutionPhase::Build,
+            host: "static.crates.io".to_owned(),
+            port: 443,
+        });
+    let admitted = reseal(&bundle, vec![with_egress], &[]);
+    let (_, all) = validate_bytes_all(&admitted).expect("the source route validates");
+    let source = all
+        .iter()
+        .find(|route| route.realization == PortableRealizationKind::NativeDesktop)
+        .unwrap();
+    assert!(matches!(
+        source.native.as_ref().unwrap().descriptor.source,
+        ato_formation::native_desktop::NativeArtifactSource::Source(_)
+    ));
+
+    // A build that asks for another host is refused, and so is one that asks
+    // for another port: the declaration is checked, not trusted.
+    for (host, port, expected) in [
+        ("example.com", 443, "may reach HTTPS on"),
+        ("static.crates.io", 80, "may reach HTTPS on"),
+    ] {
+        let mut candidate = derivation.clone();
+        candidate
+            .requirements
+            .network
+            .push(ato_formation::requirements::NetworkRequirement {
+                phase: ato_formation::requirements::ExecutionPhase::Build,
+                host: host.to_owned(),
+                port,
+            });
+        let error = validate_bytes_all(&reseal(&bundle, vec![candidate], &[])).unwrap_err();
+        assert!(
+            error.to_string().contains(expected),
+            "{host}:{port}: {error}"
+        );
+    }
 }
 
 fn native_step(derivation: &BoundDerivation) -> BoundStep {
@@ -235,6 +401,8 @@ fn admit(
         sandbox_subcommand: "__portable-sandbox-exec",
         host: Some(host),
         native_local_override: false,
+        ato_home: runtime_root,
+        native_source_consent: NativeSourceConsent::Denied,
     };
     let binding_environment = BTreeMap::new();
     let executor = PortableBundleExecutor {
@@ -377,7 +545,14 @@ fn a_descriptor_the_validator_cannot_honour_fails_closed() {
         })
         .unwrap();
     let native_ref = macos.derivation_ref.as_str().to_owned();
-    let artifact_ref = macos.native.as_ref().unwrap().descriptor.artifact.clone();
+    let artifact_ref = macos
+        .native
+        .as_ref()
+        .unwrap()
+        .descriptor
+        .bundled_artifact()
+        .unwrap()
+        .to_owned();
 
     let original = macos.derivation.clone();
     let mut cases: Vec<(&str, BoundDerivation, Vec<String>, &str)> = Vec::new();
@@ -563,7 +738,14 @@ fn a_native_route_whose_artifact_has_no_digest_carrying_blob_is_refused() {
                 .is_some_and(|n| n.descriptor.os.as_str() == "macos")
         })
         .unwrap();
-    let artifact = macos.native.as_ref().unwrap().descriptor.artifact.clone();
+    let artifact = macos
+        .native
+        .as_ref()
+        .unwrap()
+        .descriptor
+        .bundled_artifact()
+        .unwrap()
+        .to_owned();
     let resealed = reseal(&bundle, vec![macos.derivation.clone()], &[artifact]);
     let error = validate_bytes_all(&resealed).unwrap_err();
     assert!(error.to_string().to_lowercase().contains("closure"));
@@ -577,12 +759,16 @@ fn the_native_artifact_is_part_of_the_verified_closure() {
         .iter()
         .filter_map(|route| route.native.as_ref())
     {
-        let reference = ContentRef::parse(native.descriptor.artifact.clone()).unwrap();
+        let reference =
+            ContentRef::parse(native.descriptor.bundled_artifact().unwrap().to_owned()).unwrap();
         let descriptor = bundle.descriptor(&reference).expect("artifact descriptor");
         assert_eq!(descriptor.kind, PortableBundleObjectKind::Blob);
         assert!(descriptor.schema.is_none());
         let payload = bundle.payload_bytes(&reference).unwrap();
-        assert_eq!(bundle_sha256(&payload), native.descriptor.artifact);
+        assert_eq!(
+            bundle_sha256(&payload),
+            native.descriptor.bundled_artifact().unwrap()
+        );
     }
     // Removing the artifact from a bundle whose derivation still names it is a
     // broken closure, not a bundle without a native route.
@@ -594,7 +780,12 @@ fn the_native_artifact_is_part_of_the_verified_closure() {
     let resealed = reseal(
         &bundle,
         vec![first.derivation.clone()],
-        &[first.native.unwrap().descriptor.artifact],
+        &[first
+            .native
+            .as_ref()
+            .and_then(|native| native.descriptor.bundled_artifact())
+            .unwrap()
+            .to_owned()],
     );
     assert!(validate_bytes_all(&resealed).is_err());
     drop(bytes);

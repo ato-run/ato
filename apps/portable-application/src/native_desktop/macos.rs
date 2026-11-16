@@ -21,8 +21,10 @@ use ato_runtime_attempt::launch::process_executor::state_path_env_name;
 use ato_runtime_attempt::realize::{RealizeFailure, Realized, RunningCandidate};
 use ato_sandbox::SandboxPolicy;
 
-use super::artifact::{ExtractedArtifact, extract_tar_gz};
-use super::{NativeRefusal, NativeStart, resolve_entry};
+use super::artifact::{ExtractedArtifact, adopt_tree, extract_archive, extract_archive_file};
+use super::{
+    NativeArchiveSource, NativeArtifactPayload, NativeRefusal, NativeStart, resolve_entry,
+};
 use crate::portable_run::{endpoint_port_env_name, remove_owned};
 use crate::process_group::{ProcessServiceGroup, ServiceSpec};
 
@@ -399,11 +401,19 @@ pub(crate) fn prepare(
         });
     }
     let artifact_root = native_root.join("artifact");
-    let extracted =
-        extract_tar_gz(&request.artifact_bytes, &artifact_root).map_err(|error| NativeRefusal {
-            code: "native_artifact_invalid",
-            detail: format!("{error:#}"),
-        })?;
+    // Acquisition already happened; this stage only materializes what it
+    // produced. A format this Adapter cannot unpack keeps its own code so it is
+    // not reported as a corrupted artifact.
+    let extracted = match &request.payload {
+        NativeArtifactPayload::Archive(NativeArchiveSource::Memory(bytes)) => {
+            extract_archive(bytes, request.descriptor.format, &artifact_root)
+        }
+        NativeArtifactPayload::Archive(NativeArchiveSource::File(path)) => {
+            extract_archive_file(path, request.descriptor.format, &artifact_root)
+        }
+        NativeArtifactPayload::BuiltTree(root) => adopt_tree(root),
+    }
+    .map_err(super::artifact_refusal)?;
     let entry = resolve_entry(&extracted.root, &request.descriptor.entry)?;
     let signature = prepare_signature(
         request.descriptor,
@@ -893,7 +903,7 @@ pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure
         pid,
         endpoint: Some(first_endpoint),
         native: Some(VerificationNativeEvidence {
-            artifact_ref: request.descriptor.artifact.clone(),
+            artifact_ref: request.provenance.artifact_ref.clone(),
             materialized_tree_digest: prepared.extracted.tree_digest.clone(),
             entry: request.descriptor.entry.clone(),
             signature_policy: request.descriptor.signature.as_str().to_owned(),
@@ -920,8 +930,17 @@ pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure
         containment: "seatbelt: read-only artifact/workspace, Run-scoped state writes, \
                       declared loopback Ports only; window/display not enforced"
             .to_owned(),
-        workspace: "artifact and workspace mounted read-only".to_owned(),
-        build_network: "not applicable: the artifact is a verified bundle payload".to_owned(),
+        workspace: format!(
+            "artifact and workspace mounted read-only; {}",
+            request.provenance.materialization()
+        ),
+        build_network: match request.provenance.kind {
+            "source" => "build sandbox: source read-only, Run-scoped target directory, TCP egress                          on 443 only; host-name filtering is not part of this Seatbelt grant"
+                .to_owned(),
+            "remote" => "not applicable: the artifact is a digest-pinned upstream payload this Run                          fetched and verified"
+                .to_owned(),
+            _ => "not applicable: the artifact is a verified bundle payload".to_owned(),
+        },
         candidate_network: "inbound on declared loopback Ports only; TCP egress denied".to_owned(),
         endpoints: endpoints.clone(),
         destroyed: false,
@@ -944,10 +963,24 @@ pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native_desktop::NativeProvenance;
     use ato_formation::native_desktop::NativeSignaturePolicy;
 
     fn codesign_available() -> bool {
         codesign_tool().is_some() && spctl_tool().is_some()
+    }
+
+    /// The provenance a bundle-carried artifact reports in these tests.
+    fn provenance() -> NativeProvenance {
+        NativeProvenance {
+            kind: "bundled",
+            artifact_ref: format!("sha256:{}", "a".repeat(64)),
+            fetched_from: None,
+            source_commit: None,
+            build_cache: None,
+            toolchain: None,
+            build_argv: None,
+        }
     }
 
     /// The committed sample artifact is an unsigned shell script. Its
@@ -1488,7 +1521,10 @@ time.sleep(0.3)
             let descriptor = ato_formation::native_desktop::NativeDescriptor {
                 os: ato_formation::native_desktop::NativeOs::Macos,
                 arch: ato_formation::native_desktop::NativeArch::Aarch64,
-                artifact: format!("sha256:{}", "a".repeat(64)),
+                source: ato_formation::native_desktop::NativeArtifactSource::Bundled {
+                    artifact: format!("sha256:{}", "a".repeat(64)),
+                },
+
                 entry: "app/run.sh".to_owned(),
                 format: ato_formation::native_desktop::NativeArtifactFormat::TarGz,
                 signature: NativeSignaturePolicy::RequireValidOrLocalOverride,
@@ -1500,7 +1536,8 @@ time.sleep(0.3)
             }];
             let environment = BTreeMap::new();
             let request = NativeStart {
-                artifact_bytes: Vec::new(),
+                payload: NativeArtifactPayload::Archive(NativeArchiveSource::Memory(Vec::new())),
+                provenance: provenance(),
                 descriptor: &descriptor,
                 ports: &ports,
                 workspace: scratch.path().to_path_buf(),
@@ -1549,7 +1586,10 @@ time.sleep(0.3)
             let descriptor = ato_formation::native_desktop::NativeDescriptor {
                 os: ato_formation::native_desktop::NativeOs::Macos,
                 arch: ato_formation::native_desktop::NativeArch::Aarch64,
-                artifact: format!("sha256:{}", "a".repeat(64)),
+                source: ato_formation::native_desktop::NativeArtifactSource::Bundled {
+                    artifact: format!("sha256:{}", "a".repeat(64)),
+                },
+
                 entry: "app/run.sh".to_owned(),
                 format: ato_formation::native_desktop::NativeArtifactFormat::TarGz,
                 signature: NativeSignaturePolicy::RequireValidOrLocalOverride,
@@ -1562,7 +1602,10 @@ time.sleep(0.3)
                 "/usr/bin:/bin:/usr/sbin:/sbin".to_owned(),
             )]);
             let request = NativeStart {
-                artifact_bytes: artifact.clone(),
+                payload: NativeArtifactPayload::Archive(NativeArchiveSource::Memory(
+                    artifact.clone(),
+                )),
+                provenance: provenance(),
                 descriptor: &descriptor,
                 ports: &ports,
                 workspace: workspace.clone(),
@@ -1685,7 +1728,10 @@ time.sleep(0.3)
         let descriptor = ato_formation::native_desktop::NativeDescriptor {
             os: ato_formation::native_desktop::NativeOs::Macos,
             arch: ato_formation::native_desktop::NativeArch::Aarch64,
-            artifact: format!("sha256:{}", "a".repeat(64)),
+            source: ato_formation::native_desktop::NativeArtifactSource::Bundled {
+                artifact: format!("sha256:{}", "a".repeat(64)),
+            },
+
             entry: "app/run.sh".to_owned(),
             format: ato_formation::native_desktop::NativeArtifactFormat::TarGz,
             signature: NativeSignaturePolicy::RequireValidOrLocalOverride,
@@ -1693,7 +1739,8 @@ time.sleep(0.3)
         };
         let environment = BTreeMap::new();
         let request = NativeStart {
-            artifact_bytes: artifact,
+            payload: NativeArtifactPayload::Archive(NativeArchiveSource::Memory(artifact)),
+            provenance: provenance(),
             descriptor: &descriptor,
             ports: &ports,
             workspace: workspace.clone(),
@@ -1874,7 +1921,10 @@ time.sleep(0.3)
         ato_formation::native_desktop::NativeDescriptor {
             os: ato_formation::native_desktop::NativeOs::Macos,
             arch: ato_formation::native_desktop::NativeArch::Aarch64,
-            artifact: format!("sha256:{}", "a".repeat(64)),
+            source: ato_formation::native_desktop::NativeArtifactSource::Bundled {
+                artifact: format!("sha256:{}", "a".repeat(64)),
+            },
+
             entry: "MyApp.app/Contents/MacOS/MyApp".to_owned(),
             format: ato_formation::native_desktop::NativeArtifactFormat::TarGz,
             signature: policy,
@@ -1997,7 +2047,10 @@ time.sleep(0.3)
                 guest_port: port,
             }];
             let request = NativeStart {
-                artifact_bytes: artifact.clone(),
+                payload: NativeArtifactPayload::Archive(NativeArchiveSource::Memory(
+                    artifact.clone(),
+                )),
+                provenance: provenance(),
                 descriptor: &descriptor,
                 ports: &ports,
                 workspace: workspace.clone(),
@@ -2042,7 +2095,8 @@ time.sleep(0.3)
             guest_port: 18080,
         }];
         let request = NativeStart {
-            artifact_bytes: artifact,
+            payload: NativeArtifactPayload::Archive(NativeArchiveSource::Memory(artifact)),
+            provenance: provenance(),
             descriptor: &descriptor,
             ports: &ports,
             workspace,
