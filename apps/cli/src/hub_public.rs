@@ -613,12 +613,21 @@ fn is_capability_platform(value: &str) -> bool {
 
 #[derive(Debug, Serialize)]
 pub struct PublishMetadata {
+    // The Hub reads a present-but-null field as a malformed value, so an
+    // omitted option must be absent rather than null.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub readme_markdown: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub license_spdx: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub homepage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub porter: Option<String>,
     pub surfaces: Vec<String>,
     pub tags: Vec<String>,
@@ -1981,6 +1990,46 @@ mod tests {
     use base64::Engine;
 
     use super::*;
+
+    /// An omitted optional field must be absent from the JSON, not null: the
+    /// Hub reads a present-but-null value as malformed metadata and refuses the
+    /// publish, so only the fields a publisher actually set may be sent.
+    #[test]
+    fn omitted_optional_metadata_is_absent_from_the_request() {
+        let metadata = PublishMetadata {
+            display_name: None,
+            summary: None,
+            readme_markdown: None,
+            license_spdx: None,
+            homepage: None,
+            repository: None,
+            porter: None,
+            surfaces: Vec::new(),
+            tags: Vec::new(),
+            environments: Vec::new(),
+            capabilities: HubCapabilities {
+                source: CAPABILITIES_SOURCE_BUNDLE,
+                contract_ref: format!("sha256:{}", "ab".repeat(32)),
+                derivations: Vec::new(),
+            },
+        };
+        let value = serde_json::to_value(&metadata).expect("metadata serializes");
+        for field in [
+            "display_name",
+            "summary",
+            "readme_markdown",
+            "license_spdx",
+            "homepage",
+            "repository",
+            "porter",
+        ] {
+            assert!(
+                value.get(field).is_none(),
+                "{field} must be omitted, not null"
+            );
+        }
+        assert!(value.get("capabilities").is_some());
+    }
 
     /// The committed interop sample's bundle digest.
     const SAMPLE_DIGEST: &str =
