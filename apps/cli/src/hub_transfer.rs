@@ -1,23 +1,28 @@
 //! Streaming transport for the Capsule Hub large-bundle lane.
 //!
 //! Contract: docs/rfcs/draft/capsule-hub-m2-native.md sections 3 and 4. A bundle
-//! larger than the Hub's 8 MiB Base64 JSON bound is uploaded with a presigned
-//! URL without ever holding it in one buffer:
+//! larger than the Hub's 8 MiB Base64 JSON bound is moved with presigned URLs,
+//! and neither transfer buffers the bundle:
 //!
 //! - **Upload** streams the file from disk through HashingReader while SHA-256
 //!   is computed over exactly the bytes the body carries, so the bytes that
 //!   arrive at R2 are the bytes the declared digest names. R2 additionally signs
 //!   content-type and x-amz-checksum-sha256 into the URL.
+//! - **Download** streams the response body into a 0600 temporary file in
+//!   $ATO_HOME/hub, hashing and counting as it writes, fsyncs it, verifies size
+//!   *and* digest, renames it onto "<hex>.capsule" (atomic within the
+//!   directory), and then re-hashes the stored file from disk. No partial or
+//!   mismatching download ever takes the cache name.
 //!
 //! The sibling Base64 lane (hub_public) keeps its own behaviour; this module is
 //! only reached for the large path or for a presigned URL.
 
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::Read;
-use std::path::Path;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use reqwest::StatusCode;
@@ -108,6 +113,30 @@ impl<R: Read> Read for HashingReader<R> {
                 .update(&buffer[..read]);
         }
         Ok(read)
+    }
+}
+
+/// Hashes every byte written to the download file, so the digest is computed
+/// over the stored bytes as they arrive.
+struct HashingWriter<W> {
+    inner: W,
+    hasher: SharedSha256,
+}
+
+impl<W: Write> Write for HashingWriter<W> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buffer)?;
+        if written > 0 {
+            self.hasher
+                .lock()
+                .expect("the stream digest lock is never poisoned")
+                .update(&buffer[..written]);
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
     }
 }
 
@@ -304,4 +333,218 @@ pub(crate) fn stream_put(
         ));
     }
     Ok(())
+}
+
+/// The verified cache path for a digest, when the stored file still hashes to
+/// it. A corrupt entry is not trusted and is replaced by the next download.
+pub(crate) fn verified_cache_path(
+    ato_home: &Path,
+    digest: &str,
+    size: u64,
+) -> Result<Option<PathBuf>> {
+    let Some(hex) = digest.strip_prefix("sha256:") else {
+        return Ok(None);
+    };
+    let path = ato_home.join("hub").join(format!("{hex}.capsule"));
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let Ok((stored, stored_digest)) = stream_file_sha256(&path) else {
+        return Ok(None);
+    };
+    Ok((stored == size && stored_digest == digest).then_some(path))
+}
+
+/// Stream the URL into $ATO_HOME/hub/<digest>.capsule, verifying size and digest
+/// before the atomic rename and re-verifying the stored file afterwards.
+pub(crate) fn stream_download(
+    client: &Client,
+    url: &str,
+    expected_digest: &str,
+    expected_size: u64,
+    ato_home: &Path,
+) -> std::result::Result<PathBuf, TransferError> {
+    let Some(hex) = expected_digest.strip_prefix("sha256:") else {
+        return Err(transfer_failed(
+            crate::hub_public::ERR_INVALID_DIGEST,
+            format!("{expected_digest} is not a sha256 digest"),
+        ));
+    };
+    let directory = ato_home.join("hub");
+    fs::create_dir_all(&directory)
+        .with_context(|| format!("create the Hub cache directory {}", directory.display()))?;
+    let path = directory.join(format!("{hex}.capsule"));
+    if let Some(cached) = verified_cache_path(ato_home, expected_digest, expected_size)? {
+        return Ok(cached);
+    }
+
+    let url = presigned_url(url)?;
+    let response = client
+        .get(url)
+        .header(ACCEPT, "application/octet-stream")
+        .send()
+        .map_err(|error| {
+            transfer_failed(
+                crate::hub_public::ERR_API_FAILED,
+                format!("failed while downloading the capsule: {error}"),
+            )
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = read_error_body(response);
+        return Err(refused(status, &body));
+    }
+    if let Some(length) = response.content_length()
+        && length != expected_size
+    {
+        return Err(transfer_failed(
+            crate::hub_public::ERR_SIZE_MISMATCH,
+            format!(
+                "the artifact announces {length} bytes; the resolved version is {expected_size} bytes"
+            ),
+        ));
+    }
+
+    let temporary = directory.join(format!(
+        ".{hex}.{}.{}.part",
+        std::process::id(),
+        unix_now_nanos()
+    ));
+    if let Err(error) = receive_body(&temporary, response, expected_size, expected_digest) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if let Err(error) = rename_over(&temporary, &path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(TransferError::Failed(error));
+    }
+    crate::hub::sync_directory_best_effort(&directory);
+
+    // "streamed, then verified from disk": the stored bytes are hashed again so
+    // a short write cannot pass as the resolved version.
+    let (stored, stored_digest) = match stream_file_sha256(&path) {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = fs::remove_file(&path);
+            return Err(TransferError::Failed(error));
+        }
+    };
+    if stored != expected_size {
+        let _ = fs::remove_file(&path);
+        return Err(transfer_failed(
+            crate::hub_public::ERR_SIZE_MISMATCH,
+            format!(
+                "the stored capsule is {stored} bytes; the resolved version is {expected_size} bytes"
+            ),
+        ));
+    }
+    if stored_digest != expected_digest {
+        let _ = fs::remove_file(&path);
+        return Err(transfer_failed(
+            crate::hub_public::ERR_DIGEST_MISMATCH,
+            format!(
+                "the stored capsule hashes to {stored_digest}; the resolved version is {expected_digest}"
+            ),
+        ));
+    }
+    Ok(path)
+}
+
+/// Write the response body to the path (0600, create-new), fsync it, and check
+/// the byte count and digest before returning.
+fn receive_body(
+    path: &Path,
+    response: Response,
+    expected_size: u64,
+    expected_digest: &str,
+) -> std::result::Result<(), TransferError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(path)
+        .with_context(|| format!("create the Hub capsule {}", path.display()))?;
+    let hasher = shared_sha256();
+    let mut writer = HashingWriter {
+        inner: file,
+        hasher: Arc::clone(&hasher),
+    };
+    let mut total = 0_u64;
+    let mut body = response.take(expected_size.saturating_add(1));
+    let mut buffer = vec![0_u8; STREAM_CHUNK_BYTES];
+    loop {
+        let read = body.read(&mut buffer).map_err(|error| {
+            transfer_failed(
+                crate::hub_public::ERR_API_FAILED,
+                format!("failed while downloading the capsule: {error}"),
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        writer.write_all(&buffer[..read]).map_err(|error| {
+            transfer_failed(
+                crate::hub_public::ERR_API_FAILED,
+                format!("failed to write {}: {error}", path.display()),
+            )
+        })?;
+        total += read as u64;
+    }
+    writer.flush().map_err(|error| {
+        transfer_failed(
+            crate::hub_public::ERR_API_FAILED,
+            format!("failed to flush {}: {error}", path.display()),
+        )
+    })?;
+    writer.inner.sync_all().map_err(|error| {
+        transfer_failed(
+            crate::hub_public::ERR_API_FAILED,
+            format!("failed to flush {}: {error}", path.display()),
+        )
+    })?;
+
+    if total != expected_size {
+        return Err(transfer_failed(
+            crate::hub_public::ERR_SIZE_MISMATCH,
+            format!("the artifact is {total} bytes; the resolved version is {expected_size} bytes"),
+        ));
+    }
+    let observed = hex_digest(&hasher);
+    if observed != expected_digest {
+        return Err(transfer_failed(
+            crate::hub_public::ERR_DIGEST_MISMATCH,
+            format!("the artifact hashes to {observed}; the resolved version is {expected_digest}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Rename within the cache directory. Windows refuses to replace an existing
+/// file, so a verified-but-corrupt cache entry is removed first and the rename
+/// retried once.
+fn rename_over(temporary: &Path, path: &Path) -> Result<()> {
+    match fs::rename(temporary, path) {
+        Ok(()) => Ok(()),
+        Err(error) if path.exists() => {
+            fs::remove_file(path)
+                .with_context(|| format!("replace the Hub capsule {}", path.display()))?;
+            fs::rename(temporary, path).with_context(|| {
+                format!("move the Hub capsule into {} after {error}", path.display())
+            })
+        }
+        Err(error) => {
+            Err(error).with_context(|| format!("move the Hub capsule into {}", path.display()))
+        }
+    }
+}
+
+fn unix_now_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0)
 }

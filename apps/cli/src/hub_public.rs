@@ -61,6 +61,11 @@ pub const MAX_BUNDLE_BYTES: u64 = 8 * 1024 * 1024;
 /// How many times the large lane reopens a staged upload after a recoverable
 /// refusal (410 expired, 409 size/digest conflict).
 const LARGE_UPLOAD_ATTEMPTS: usize = 3;
+/// The largest bundle the official publisher lane may carry (contract §3: the
+/// Ato-official ceiling). A Run refuses to store more than this, so a hostile
+/// or buggy resolve answer cannot fill the cache.
+pub const MAX_OFFICIAL_BUNDLE_BYTES: u64 = 1_000_000_000;
+
 pub const ERR_INVALID_REF: &str = "hub-invalid-ref";
 pub const ERR_INVALID_DIGEST: &str = "hub-invalid-digest";
 pub const ERR_INVALID_TAG: &str = "hub-invalid-tag";
@@ -726,15 +731,27 @@ pub fn resolve_for_run(
             ),
         )
     })?;
-    if resolved.size_bytes > MAX_BUNDLE_BYTES {
+    if resolved.size_bytes > MAX_OFFICIAL_BUNDLE_BYTES {
         bail!(hub_error(
             ERR_BUNDLE_TOO_LARGE,
             format!(
-                "{} is {} bytes; a Hub bundle carries at most {MAX_BUNDLE_BYTES} bytes",
+                "{} is {} bytes; the largest Hub bundle is {MAX_OFFICIAL_BUNDLE_BYTES} bytes",
                 reference.reference(),
                 resolved.size_bytes
             )
         ));
+    }
+    if resolved.size_bytes > MAX_BUNDLE_BYTES {
+        // A bundle above the Base64 JSON bound is streamed to the cache from a
+        // presigned GET, falling back to the public artifact endpoint.
+        let bundle_path = download_large(&client, &base, &reference, &digest, &resolved, ato_home)
+            .with_context(|| format!("failed to fetch {}", reference.reference()))?;
+        return Ok(Some(ResolvedHubCapsule {
+            reference,
+            digest,
+            api_url: base,
+            bundle_path,
+        }));
     }
     let download_client = artifact_client(&base)?;
     let bytes = fetch_artifact(
@@ -859,6 +876,164 @@ fn fetch_artifact(
         ));
     }
     Ok(bytes)
+}
+
+/// Stream a large resolved bundle into $ATO_HOME/hub/<digest>.capsule.
+///
+/// The presigned download URL is minted per call and never cached. A deployment
+/// whose API has no presigned lane (404) or cannot presign (503) falls back to
+/// the public artifact endpoint, which is streamed the same way, so the 8 MiB
+/// ceiling of the in-memory fetch never applies to this path.
+fn download_large(
+    client: &Client,
+    base: &str,
+    reference: &HubRef,
+    digest: &str,
+    resolved: &ResolveResponse,
+    ato_home: &Path,
+) -> Result<PathBuf> {
+    if let Some(cached) = hub_transfer::verified_cache_path(ato_home, digest, resolved.size_bytes)?
+    {
+        return Ok(cached);
+    }
+    let transfer = hub_transfer::transfer_client()?;
+    match fetch_download_url(client, base, reference, digest) {
+        Ok(target) => {
+            let served_reference = &target.reference;
+            let expected_reference = reference.reference();
+            if *served_reference != expected_reference {
+                bail!(hub_error(
+                    ERR_API_FAILED,
+                    format!(
+                        "the API offered a download for `{served_reference}` instead of `{expected_reference}`"
+                    )
+                ));
+            }
+            let served = parse_digest(&target.digest).map_err(|message| {
+                hub_error(
+                    ERR_API_FAILED,
+                    format!("the API offered `{}`: {message}", target.digest),
+                )
+            })?;
+            if served != digest {
+                bail!(hub_error(
+                    ERR_DIGEST_MISMATCH,
+                    format!("the API offered {served}; the resolved version is {digest}")
+                ));
+            }
+            if target.size_bytes != resolved.size_bytes {
+                bail!(hub_error(
+                    ERR_SIZE_MISMATCH,
+                    format!(
+                        "the API offered {} bytes; the resolved version is {} bytes",
+                        target.size_bytes, resolved.size_bytes
+                    )
+                ));
+            }
+            match hub_transfer::stream_download(
+                &transfer,
+                &target.url,
+                digest,
+                resolved.size_bytes,
+                ato_home,
+            ) {
+                Ok(path) => return Ok(path),
+                Err(TransferError::Refused { status, code })
+                    if presigned_download_falls_back(status) =>
+                {
+                    let suffix = if code.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", {code}")
+                    };
+                    eprintln!(
+                        "warning: the presigned download was refused (HTTP {status}{suffix}); using the artifact endpoint"
+                    );
+                }
+                Err(TransferError::Refused { status, code }) => {
+                    return Err(api_failure_code(
+                        "download the capsule",
+                        &expected_reference,
+                        base,
+                        StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+                        &code,
+                    ));
+                }
+                Err(error) => return Err(anyhow::Error::new(error)),
+            }
+        }
+        Err(DownloadRefusal::Fallback(reason)) => {
+            eprintln!("warning: {reason}; using the artifact endpoint");
+        }
+        Err(DownloadRefusal::Fatal(error)) => return Err(error),
+    }
+    let path = origin_relative_path(&resolved.artifact_path)?;
+    let url = format!("{base}{path}");
+    match hub_transfer::stream_download(&transfer, &url, digest, resolved.size_bytes, ato_home) {
+        Ok(path) => Ok(path),
+        Err(TransferError::Refused { status, code }) => Err(api_failure_code(
+            "download the capsule",
+            &reference.reference(),
+            base,
+            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+            &code,
+        )),
+        Err(error) => Err(anyhow::Error::new(error)),
+    }
+}
+
+/// A presigned credential or the staged object may be gone by the time the GET
+/// runs; the artifact endpoint is the authority either way.
+fn presigned_download_falls_back(status: u16) -> bool {
+    matches!(status, 400 | 403 | 404)
+}
+
+fn fetch_download_url(
+    client: &Client,
+    base: &str,
+    reference: &HubRef,
+    digest: &str,
+) -> Result<DownloadUrlResponse, DownloadRefusal> {
+    let url = format!(
+        "{base}{HUB_CAPSULES_PATH}{}/{}/artifacts/{digest}/download-url",
+        reference.owner, reference.name
+    );
+    let response = client
+        .get(&url)
+        .header(ACCEPT, "application/json")
+        .send()
+        .map_err(|error| {
+            DownloadRefusal::Fatal(hub_error(
+                ERR_API_FAILED,
+                format!("failed to reach the Ato API at {base}: {error}"),
+            ))
+        })?;
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+    if !status.is_success() {
+        let code = api_error_code(&body);
+        return Err(match (status.as_u16(), code.as_str()) {
+            (404, _) => DownloadRefusal::Fallback(format!(
+                "the Hub at {base} offered no presigned download for {digest}"
+            )),
+            (503, "presign_unavailable") => {
+                DownloadRefusal::Fallback("the API cannot mint a presigned download URL".to_owned())
+            }
+            _ => DownloadRefusal::Fatal(api_failure_code(
+                "obtain a download URL",
+                &reference.reference(),
+                base,
+                status,
+                &code,
+            )),
+        });
+    }
+    serde_json::from_str(&body).map_err(|error| {
+        DownloadRefusal::Fatal(hub_error(
+            ERR_API_FAILED,
+            format!("the download-url response is malformed: {error}"),
+        ))
+    })
 }
 
 /// The API returns an origin-relative path. An absolute URL would let the API
@@ -1237,6 +1412,14 @@ enum CompletionRefusal {
     Fatal(anyhow::Error),
 }
 
+/// Why the presigned download was not usable.
+enum DownloadRefusal {
+    /// The deployment does not offer presigned downloads (404 / 503): the
+    /// public artifact endpoint is still authoritative.
+    Fallback(String),
+    Fatal(anyhow::Error),
+}
+
 /// The API's answer to POST .../uploads: the staged intent, one presigned PUT
 /// and the completion path. Bytes never travel in this body.
 #[derive(Debug, Deserialize)]
@@ -1257,6 +1440,16 @@ struct UploadTicket {
     upload_headers: BTreeMap<String, String>,
     #[serde(default)]
     complete_path: String,
+}
+
+/// The API's answer to GET .../artifacts/:digest/download-url (no-store).
+#[derive(Debug, Deserialize)]
+struct DownloadUrlResponse {
+    #[serde(rename = "ref")]
+    reference: String,
+    digest: String,
+    size_bytes: u64,
+    url: String,
 }
 
 /// Publish through the official large-upload lane.
