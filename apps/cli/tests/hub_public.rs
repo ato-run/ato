@@ -491,6 +491,53 @@ fn a_hub_artifact_of_the_wrong_size_fails_before_the_run() {
 }
 
 #[test]
+fn a_computation_root_bundle_served_by_the_hub_is_refused() {
+    // A Hub capsule is a portable application (wire v3/v4). If a server serves
+    // computation-root v2 bytes, the Run path refuses them by reference domain
+    // instead of relabelling a ComputationRef as a capsule identity.
+    let bytes = format!(
+        "{{\"index\":{{\"objects\":[],\"root\":\"blake3:{}\",\"version\":2}},\"payloads\":[]}}",
+        "0".repeat(64)
+    )
+    .into_bytes();
+    let digest = ato_portable_application::bundle_sha256(&bytes);
+    let api = StubApi::new(vec![
+        json_response(
+            "200 OK",
+            json!({
+                "ref": "capsules/koh0920/interop-static",
+                "tag": "latest",
+                "digest": digest,
+                "size_bytes": bytes.len(),
+                "artifact_path": format!(
+                    "/v1/hub/capsules/koh0920/interop-static/artifacts/{digest}"
+                ),
+            }),
+        ),
+        binary_response(&bytes),
+    ]);
+    let home = tempfile::tempdir().unwrap();
+    let evidence = tempfile::tempdir().unwrap();
+    let receipt = evidence.path().join("receipt.json");
+    let output = ato_with_home(home.path())
+        .arg("run")
+        .arg("capsules/koh0920/interop-static")
+        .arg("--no-open")
+        .arg("--verification-receipt")
+        .arg(&receipt)
+        .args(["--api-url", &api.base])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("hub-invalid-bundle"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!receipt.exists(), "a refused Run publishes no receipt");
+}
+
+#[test]
 fn a_run_refused_by_the_api_names_the_login_step() {
     let api = StubApi::new(vec![json_response(
         "401 Unauthorized",
