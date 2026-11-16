@@ -34,8 +34,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail, ensure};
+use ato_formation::native_surface::NativePresentation;
 use ato_formation::verify::ContractVerificationReceipt;
-use ato_portable_application::bundle_sha256;
+use ato_objects::PortableApplicationBundle;
+use ato_portable_application::portable_run::execution_requirements_for;
+use ato_portable_application::{
+    PortableRealizationKind, ValidatedPortableApplication, bundle_sha256,
+};
 use base64::Engine;
 use clap::Args;
 use reqwest::StatusCode;
@@ -63,12 +68,24 @@ pub const ERR_BUNDLE_TOO_LARGE: &str = "hub-bundle-too-large";
 pub const ERR_REDIRECT_REFUSED: &str = "hub-redirect-refused";
 pub const ERR_INVALID_BUNDLE: &str = "hub-invalid-bundle";
 pub const ERR_API_FAILED: &str = "hub-api-failed";
+pub const ERR_CAPABILITIES_UNREPRESENTABLE: &str = "hub-capabilities-unrepresentable";
+pub const ERR_CAPABILITY_UNAVAILABLE: &str = "hub-capability-unavailable";
 
 const HUB_CAPSULES_PATH: &str = "/v1/hub/capsules/";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const REPORT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_REDIRECTS: usize = 3;
+/// The Hub capability metadata bound (RFC §3): at most eight Derivation routes.
+pub const MAX_CAPABILITY_DERIVATIONS: usize = 8;
+/// The Hub capability metadata bound (RFC §3): at most eight surfaces per route.
+pub const MAX_CAPABILITY_SURFACES: usize = 8;
+/// The API's bound on the whole `metadata.capabilities` document.
+pub const MAX_CAPABILITY_DOCUMENT_BYTES: usize = 16 * 1024;
+/// The API's bound on a surface's declared logical path.
+pub const MAX_CAPABILITY_SURFACE_PATH_BYTES: usize = 2048;
+/// `metadata.capabilities.source` for metadata derived from the bundle bytes.
+pub const CAPABILITIES_SOURCE_BUNDLE: &str = "bundle";
 
 /// One error whose first token is a stable machine-readable code.
 fn hub_error(code: &str, message: impl std::fmt::Display) -> anyhow::Error {
@@ -287,6 +304,268 @@ pub struct PublishResponse {
     pub created: Option<bool>,
 }
 
+/// The Hub capability metadata derived from a validated bundle (M2 §3).
+///
+/// This is evidence about the bundle bytes, never a publisher's declaration.
+/// The publisher's `--surface` and `--environment` values stay in the separate
+/// declared fields of [`PublishMetadata`] and never overwrite these facts.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HubCapabilities {
+    /// Always [`CAPABILITIES_SOURCE_BUNDLE`].
+    pub source: &'static str,
+    pub contract_ref: String,
+    pub derivations: Vec<HubDerivationCapability>,
+}
+
+/// One Derivation's execution capability, in the Hub's five-value vocabulary.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HubDerivationCapability {
+    pub derivation_ref: String,
+    /// `static_web`, `local_process`, `oci`, `native_terminal` or
+    /// `native_pixel`.
+    pub realization: &'static str,
+    /// The OCI platform the route's images are pinned to, when it declares
+    /// one.
+    pub platform: Option<String>,
+    /// The `os/arch` a native desktop artifact was built for, when declared.
+    pub native_platform: Option<String>,
+    pub requires: HubCapabilityRequires,
+    pub surfaces: Vec<HubCapabilitySurface>,
+}
+
+/// What the selected route needs from a host. No path, endpoint or runtime
+/// selection is part of it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HubCapabilityRequires {
+    pub container: bool,
+    pub state: bool,
+}
+
+/// One logical Surface as the Hub registry describes it.
+///
+/// `kind` is one of `http`, `static_web`, `native_terminal` or
+/// `native_pixel`; `path` is a declared logical path, never a host
+/// filesystem path.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HubCapabilitySurface {
+    pub id: String,
+    pub kind: &'static str,
+    pub port: String,
+    pub path: String,
+}
+
+/// Project only the declared facts of one validated route into Hub vocabulary.
+fn hub_capability_projection(
+    validated: &ValidatedPortableApplication,
+) -> (&'static str, &'static str) {
+    if let Some(native) = &validated.derivation.native_surface {
+        return match native.surface {
+            NativePresentation::Terminal { .. } => ("native_terminal", "native_terminal"),
+            NativePresentation::PixelStream { .. } => ("native_pixel", "native_pixel"),
+        };
+    }
+    match validated.realization {
+        PortableRealizationKind::StaticWeb => ("static_web", "static_web"),
+        PortableRealizationKind::LocalProcess | PortableRealizationKind::ProcessServiceGroup => {
+            ("local_process", "http")
+        }
+        PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup => {
+            ("oci", "http")
+        }
+        // `ato.native@1` is one desktop artifact: its presentation is the
+        // app's own window, and it declares no terminal/pixel adapter. The
+        // platform it was built for is carried by `native_platform`.
+        PortableRealizationKind::NativeDesktop => ("native_pixel", "native_pixel"),
+    }
+}
+
+/// Derive `metadata.capabilities` from every validated Derivation.
+///
+/// `validated` is the output of the same `validate_bundle_for_derivation` path
+/// that admits a local Run (`validate_formed_bundle_document` runs it for each
+/// declared D), so no publisher-supplied value enters this projection.
+/// Host-owned values (`ExecutionRequirements::bound_paths`, endpoints, PIDs and
+/// selected runtimes) are never serialized.
+pub fn derive_capabilities(
+    bundle: &PortableApplicationBundle,
+    validated: &[ValidatedPortableApplication],
+) -> Result<HubCapabilities> {
+    if validated.is_empty() {
+        bail!(hub_error(
+            ERR_CAPABILITIES_UNREPRESENTABLE,
+            "the bundle declares no derivation"
+        ));
+    }
+    ensure!(
+        validated.len() <= MAX_CAPABILITY_DERIVATIONS,
+        hub_error(
+            ERR_CAPABILITIES_UNREPRESENTABLE,
+            format!(
+                "the bundle declares {} derivations; Hub capability metadata carries at most {MAX_CAPABILITY_DERIVATIONS}",
+                validated.len()
+            )
+        )
+    );
+    ensure!(
+        validated.len() == bundle.index.derivations.len(),
+        hub_error(
+            ERR_CAPABILITIES_UNREPRESENTABLE,
+            format!(
+                "{} derivations were validated but the bundle index declares {}",
+                validated.len(),
+                bundle.index.derivations.len()
+            )
+        )
+    );
+    let mut contract_ref: Option<String> = None;
+    let mut derivations = Vec::with_capacity(validated.len());
+    // Emit in the bundle's canonical (sorted) Derivation order so the same
+    // bytes always produce the same metadata.
+    for declared in &bundle.index.derivations {
+        let route = validated
+            .iter()
+            .find(|route| route.derivation_ref.as_str() == declared)
+            .ok_or_else(|| {
+                hub_error(
+                    ERR_CAPABILITIES_UNREPRESENTABLE,
+                    format!("the bundle index declares `{declared}` but it was not validated"),
+                )
+            })?;
+        let canonical_contract_ref = route.contract_ref.to_string();
+        match &contract_ref {
+            Some(expected) if expected != &canonical_contract_ref => {
+                bail!(hub_error(
+                    ERR_CAPABILITIES_UNREPRESENTABLE,
+                    "validated derivations disagree on the ContractRef"
+                ))
+            }
+            _ => contract_ref = Some(canonical_contract_ref),
+        }
+        let requirements = execution_requirements_for(route, Path::new(""));
+        let (realization, surface_kind) = hub_capability_projection(route);
+        for (label, value) in [
+            ("platform", requirements.platform.as_deref()),
+            ("native_platform", requirements.native_platform.as_deref()),
+        ] {
+            if let Some(value) = value
+                && !is_capability_platform(value)
+            {
+                bail!(hub_error(
+                    ERR_CAPABILITIES_UNREPRESENTABLE,
+                    format!(
+                        "`{declared}` declares {label} `{value}`, which is not a lowercase os/arch"
+                    )
+                ));
+            }
+        }
+        let mut surfaces = Vec::with_capacity(route.application.surfaces.len());
+        for surface in &route.application.surfaces {
+            if !is_capability_port_token(&surface.port) {
+                bail!(hub_error(
+                    ERR_CAPABILITIES_UNREPRESENTABLE,
+                    format!(
+                        "`{declared}` declares the surface port `{}`, which Hub metadata cannot carry",
+                        surface.port
+                    )
+                ));
+            }
+            if !is_capability_surface_path(&surface.path) {
+                bail!(hub_error(
+                    ERR_CAPABILITIES_UNREPRESENTABLE,
+                    format!(
+                        "`{declared}` declares the surface path `{}`, which Hub metadata cannot carry",
+                        surface.path
+                    )
+                ));
+            }
+            surfaces.push(HubCapabilitySurface {
+                id: surface.id.clone(),
+                kind: surface_kind,
+                port: surface.port.clone(),
+                path: surface.path.clone(),
+            });
+        }
+        if surfaces.is_empty() {
+            bail!(hub_error(
+                ERR_CAPABILITIES_UNREPRESENTABLE,
+                format!("`{declared}` declares no application surface")
+            ));
+        }
+        ensure!(
+            surfaces.len() <= MAX_CAPABILITY_SURFACES,
+            hub_error(
+                ERR_CAPABILITIES_UNREPRESENTABLE,
+                format!(
+                    "`{declared}` declares {} surfaces; Hub capability metadata carries at most {MAX_CAPABILITY_SURFACES}",
+                    surfaces.len()
+                )
+            )
+        );
+        derivations.push(HubDerivationCapability {
+            derivation_ref: declared.clone(),
+            realization,
+            platform: requirements.platform,
+            native_platform: requirements.native_platform,
+            requires: HubCapabilityRequires {
+                container: requirements.needs_container,
+                state: requirements.needs_state,
+            },
+            surfaces,
+        });
+    }
+    let capabilities = HubCapabilities {
+        source: CAPABILITIES_SOURCE_BUNDLE,
+        contract_ref: contract_ref.expect("a non-empty validated route list"),
+        derivations,
+    };
+    // The API rejects a document over its bound, so fail here with the reason
+    // rather than after uploading the bundle.
+    let encoded = serde_json::to_vec(&capabilities).map_err(|error| {
+        hub_error(
+            ERR_CAPABILITIES_UNREPRESENTABLE,
+            format!("the derived Hub capabilities cannot be encoded: {error}"),
+        )
+    })?;
+    ensure!(
+        encoded.len() <= MAX_CAPABILITY_DOCUMENT_BYTES,
+        hub_error(
+            ERR_CAPABILITIES_UNREPRESENTABLE,
+            format!(
+                "the derived capabilities are {} bytes; Hub metadata carries at most {MAX_CAPABILITY_DOCUMENT_BYTES}",
+                encoded.len()
+            )
+        )
+    );
+    Ok(capabilities)
+}
+
+/// `[A-Za-z0-9._:-]+`: the API's logical Port token shape.
+fn is_capability_port_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
+/// A declared logical path: absolute, no control characters, bounded.
+fn is_capability_surface_path(value: &str) -> bool {
+    value.starts_with('/')
+        && value.len() <= MAX_CAPABILITY_SURFACE_PATH_BYTES
+        && !value.chars().any(char::is_control)
+}
+
+/// A lowercase `os/arch` platform, the only shape the API accepts.
+fn is_capability_platform(value: &str) -> bool {
+    let Some((os, arch)) = value.split_once('/') else {
+        return false;
+    };
+    !os.is_empty()
+        && !arch.is_empty()
+        && !arch.contains('/')
+        && value == value.to_ascii_lowercase()
+        && !value.chars().any(char::is_control)
+}
+
 #[derive(Debug, Serialize)]
 pub struct PublishMetadata {
     pub display_name: Option<String>,
@@ -299,6 +578,9 @@ pub struct PublishMetadata {
     pub surfaces: Vec<String>,
     pub tags: Vec<String>,
     pub environments: Vec<String>,
+    /// Capabilities derived from the validated bundle; never the declared
+    /// `--surface` / `--environment` values.
+    pub capabilities: HubCapabilities,
 }
 
 #[derive(Debug, Serialize)]
@@ -463,7 +745,7 @@ fn resolve_remote(client: &Client, base: &str, reference: &HubRef) -> Result<Res
         return Err(api_failure(
             "resolve",
             &reference.reference(),
-            &base,
+            base,
             status,
             &body,
         ));
@@ -509,7 +791,7 @@ fn fetch_artifact(
         return Err(api_failure(
             "download the capsule artifact",
             "",
-            &base,
+            base,
             status,
             &body,
         ));
@@ -766,9 +1048,18 @@ pub fn publish(args: PublishArgs) -> Result<()> {
             )
         ));
     }
-    // Only a bundle the local Run path would accept is ever published.
-    crate::hub::validate_formed_bundle(&bytes)
+    // Only a bundle the local Run path would accept is ever published, and
+    // the Hub capability metadata is derived from exactly those validated
+    // routes rather than from any publisher-declared value.
+    let formed = crate::hub::validate_formed_bundle_document(&bytes)
         .with_context(|| format!("{} must not be published", args.capsule.display()))?;
+    let capabilities =
+        derive_capabilities(&formed.bundle, &formed.derivations).with_context(|| {
+            format!(
+                "the capabilities of {} cannot be represented in Hub metadata",
+                args.capsule.display()
+            )
+        })?;
     let (owner, name) = parse_owner_name(&args.name)?;
     if !is_valid_tag(&args.tag) {
         bail!(hub_error(
@@ -798,6 +1089,7 @@ pub fn publish(args: PublishArgs) -> Result<()> {
             surfaces: args.surfaces,
             tags: Vec::new(),
             environments: args.environments,
+            capabilities,
         },
     };
     let client = api_client()?;
@@ -893,7 +1185,7 @@ fn put_publish(
         return Err(api_failure(
             "publish",
             &format!("{HUB_REF_PREFIX}{owner}/{name}"),
-            &base,
+            base,
             status,
             &body,
         ));
@@ -1007,7 +1299,8 @@ mod tests {
     use std::thread::{self, JoinHandle};
 
     use ato_formation::verify::{
-        VerificationExecutionEvidence, VerificationTarget, VerificationTargetKind,
+        VerificationExecutionEvidence, VerificationNativeEvidence, VerificationTarget,
+        VerificationTargetKind,
     };
     use base64::Engine;
 
@@ -1646,6 +1939,60 @@ mod tests {
     }
 
     #[test]
+    fn every_receipt_schema_is_reported_unchanged() {
+        // The API accepts /1 through /5 with one common rule set; the CLI must
+        // carry a receipt through by schema, not narrow it to the one this
+        // build happens to produce for a local Static Web Run.
+        let resolved = resolved_at("http://127.0.0.1:9");
+        for (schema, native) in [
+            ("ato.contract-verification-receipt/1", false),
+            ("ato.contract-verification-receipt/2", false),
+            ("ato.contract-verification-receipt/3", false),
+            ("ato.contract-verification-receipt/4", false),
+            ("ato.contract-verification-receipt/5", true),
+        ] {
+            let mut receipt = receipt(SAMPLE_DIGEST, true, Some("attempt-1"));
+            receipt.schema = schema.to_owned();
+            if native {
+                receipt
+                    .execution
+                    .as_mut()
+                    .expect("the helper builds execution evidence")
+                    .native = Some(VerificationNativeEvidence {
+                    artifact_ref: format!("sha256:{}", "4".repeat(64)),
+                    materialized_tree_digest: format!("sha256:{}", "5".repeat(64)),
+                    entry: "app/run.sh".to_owned(),
+                    signature_policy: "require-valid-or-local-override".to_owned(),
+                    signature_target: "executable".to_owned(),
+                    verified_target: "app/run.sh".to_owned(),
+                    codesign_verify: "valid".to_owned(),
+                    signature_kind: "adhoc".to_owned(),
+                    codesign_detail: None,
+                    gatekeeper: "unavailable".to_owned(),
+                    gatekeeper_detail: None,
+                    local_override: false,
+                    sandbox: "seatbelt".to_owned(),
+                    enforced_read_only: vec!["/app".to_owned()],
+                    enforced_read_write: Vec::new(),
+                    enforced_inbound_ports: vec![18080],
+                    process_group: None,
+                    window_containment: "none".to_owned(),
+                });
+            }
+            let body = run_report_body(&resolved, &receipt)
+                .expect("a satisfied receipt is reportable whatever its schema");
+            assert_eq!(body["receipt"]["schema"], schema);
+            assert_eq!(body["receipt"]["fully_satisfied"], true);
+            if native {
+                assert_eq!(
+                    body["receipt"]["execution"]["native"]["sandbox"],
+                    "seatbelt"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_successful_run_posts_its_receipt_and_digest() {
         let api = StubApi::new(vec![json_response(
             "200 OK",
@@ -1696,8 +2043,284 @@ mod tests {
         );
     }
 
-    // ---- publishing -------------------------------------------------------
+    // ---- capabilities derived from the bundle ------------------------------
 
+    /// The canonical refs of the committed multi-derivation fixture.
+    const MULTI_PROCESS_DERIVATION: &str =
+        "sha256:5d1ec4660745130f196102c1bd81828993ab75d69130f0fdf2e1e2598fd9f3cc";
+    const MULTI_STATIC_DERIVATION: &str =
+        "sha256:5db5b2ba96e84aef2ff2c0e0931e5014ea2e5fb7b400eed8b9b45c40b5755633";
+    const MULTI_CONTRACT: &str =
+        "sha256:94d7bd2900fa01d8b000d1cf095b0f47bfcc279898c830f0542dd53ee99ffdaf";
+
+    fn capabilities_of(bytes: &[u8]) -> HubCapabilities {
+        let formed = crate::hub::validate_formed_bundle_document(bytes)
+            .expect("the fixture is a valid formed bundle");
+        derive_capabilities(&formed.bundle, &formed.derivations)
+            .expect("every declared route is representable")
+    }
+
+    #[test]
+    fn capabilities_are_derived_from_a_multi_derivation_bundle() {
+        let bytes = fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../samples/interop-multi-derivation.capsule"),
+        )
+        .expect("the multi-derivation fixture is committed");
+        let capabilities = capabilities_of(&bytes);
+        assert_eq!(capabilities.source, CAPABILITIES_SOURCE_BUNDLE);
+        assert_eq!(capabilities.contract_ref, MULTI_CONTRACT);
+        // The output is exactly the documented shape: over & requires are
+        // derived, and neither a host path nor an undeclared runtime leaks in.
+        assert_eq!(
+            serde_json::to_value(&capabilities).unwrap(),
+            serde_json::json!({
+                "source": "bundle",
+                "contract_ref": MULTI_CONTRACT,
+                "derivations": [
+                    {
+                        "derivation_ref": MULTI_PROCESS_DERIVATION,
+                        "realization": "local_process",
+                        "platform": null,
+                        "native_platform": null,
+                        "requires": { "container": false, "state": false },
+                        "surfaces": [
+                            { "id": "main", "kind": "http", "port": "app.http", "path": "/" }
+                        ]
+                    },
+                    {
+                        "derivation_ref": MULTI_STATIC_DERIVATION,
+                        "realization": "static_web",
+                        "platform": null,
+                        "native_platform": null,
+                        "requires": { "container": false, "state": false },
+                        "surfaces": [
+                            { "id": "main", "kind": "static_web", "port": "app.http", "path": "/" }
+                        ]
+                    }
+                ]
+            })
+        );
+        let rendered = serde_json::to_string(&capabilities).unwrap();
+        assert!(!rendered.contains("bound_paths"), "{rendered}");
+        assert!(!rendered.contains(env!("CARGO_MANIFEST_DIR")), "{rendered}");
+    }
+
+    #[test]
+    fn capabilities_name_an_oci_platform_and_container_requirement() {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/oci-service-group-proof");
+        let (bytes, _) = ato_portable_application::build_authored_bundle_v2(&source)
+            .expect("the OCI fixture packs");
+        let capabilities = capabilities_of(&bytes);
+        assert_eq!(capabilities.derivations.len(), 1);
+        let derivation = &capabilities.derivations[0];
+        assert_eq!(derivation.realization, "oci");
+        assert_eq!(derivation.platform.as_deref(), Some("linux/amd64"));
+        assert_eq!(derivation.native_platform, None);
+        assert!(derivation.requires.container);
+        assert!(derivation.requires.state);
+        assert_eq!(derivation.surfaces.len(), 1);
+        assert_eq!(derivation.surfaces[0].kind, "http");
+        assert_eq!(derivation.surfaces[0].path, "/");
+    }
+
+    #[test]
+    fn hub_capability_tokens_match_the_api_shape() {
+        for valid in ["app.http", "app_probe", "a:b", "a-b", "0"] {
+            assert!(is_capability_port_token(valid), "{valid}");
+        }
+        for invalid in ["", "app http", "app/http", "app?x", "app\n"] {
+            assert!(!is_capability_port_token(invalid), "{invalid}");
+        }
+        assert!(is_capability_surface_path("/"));
+        assert!(is_capability_surface_path("/proof.txt"));
+        assert!(!is_capability_surface_path("proof.txt"));
+        assert!(!is_capability_surface_path("/a\nb"));
+        assert!(!is_capability_surface_path(&format!(
+            "/{}",
+            "a".repeat(MAX_CAPABILITY_SURFACE_PATH_BYTES)
+        )));
+        assert!(is_capability_platform("linux/amd64"));
+        assert!(is_capability_platform("macos/aarch64"));
+        assert!(!is_capability_platform("Linux/amd64"));
+        assert!(!is_capability_platform("linux/amd64/extra"));
+        assert!(!is_capability_platform("amd64"));
+    }
+
+    #[test]
+    fn a_derived_capability_document_fits_the_api_bound() {
+        let bytes = fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../samples/interop-multi-derivation.capsule"),
+        )
+        .expect("the multi-derivation fixture is committed");
+        let capabilities = capabilities_of(&bytes);
+        let encoded = serde_json::to_vec(&capabilities).unwrap();
+        assert!(
+            encoded.len() <= MAX_CAPABILITY_DOCUMENT_BYTES,
+            "{} bytes",
+            encoded.len()
+        );
+    }
+
+    /// The authoring fixture the portable-application crate uses for a native
+    /// Terminal adapter. `native_surface` rides an OCI route, so the derived
+    /// capability keeps `container = true`.
+    const NATIVE_SURFACE_MANIFEST: &str = r#"
+schema = "ato.capsule/1"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[runtime]]
+name = "oci.image"
+version = "docker.io/library/python@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+[[runtime]]
+name = "oci.platform"
+version = "linux/amd64"
+[[runtime]]
+name = "oci.memory_bytes"
+version = "268435456"
+[[runtime]]
+name = "oci.cpu_limit_millis"
+version = "1000"
+[[runtime]]
+name = "oci.pids_limit"
+version = "128"
+[[runtime]]
+name = "oci.user"
+version = "1000:1000"
+
+[[derive.step]]
+id = "serve"
+use = "ato.oci@1"
+op = "serve"
+argv = ["python3", "pty_app.py"]
+cwd = "."
+
+[derive.native_surface]
+kind = "terminal"
+profile = "ato.terminal-surface.v1"
+cols = 120
+rows = 40
+port = "app.native"
+probe_port = "app.probe"
+probe_path = "/result"
+probe_input = "go\n"
+probe_output_delimiter = "END"
+probe_max_output_bytes = 4096
+probe_timeout_ms = 5000
+
+[[port]]
+id = "app.native"
+use = "ato.pty@1"
+from = "serve"
+
+[[port]]
+id = "app.probe"
+use = "ato.http@1"
+from = "serve"
+
+[[contract.require]]
+id = "result"
+use = "ato.contract.http@1"
+port = "app.probe"
+path = "/result"
+expect = { status = 200, body_digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+"#;
+
+    fn native_surface_source(manifest: &str) -> tempfile::TempDir {
+        let directory = tempfile::tempdir().expect("tempdir");
+        fs::write(directory.path().join("capsule.toml"), manifest).expect("manifest");
+        fs::write(
+            directory.path().join("pty_app.py"),
+            "import sys\nsys.stdin.readline()\n",
+        )
+        .expect("app");
+        directory
+    }
+
+    #[test]
+    fn capabilities_split_native_terminal_and_pixel_routes() {
+        let directory = native_surface_source(NATIVE_SURFACE_MANIFEST);
+        let terminal = ato_portable_application::build_native_terminal_bundle(
+            directory.path(),
+            &directory.path().join("capsule.toml"),
+            "Native Terminal",
+        )
+        .expect("the terminal fixture packs");
+        let capabilities = capabilities_of(&terminal.0);
+        let derivation = &capabilities.derivations[0];
+        assert_eq!(derivation.realization, "native_terminal");
+        assert_eq!(derivation.platform.as_deref(), Some("linux/amd64"));
+        assert!(derivation.requires.container);
+        assert!(!derivation.requires.state);
+        assert_eq!(derivation.surfaces.len(), 1);
+        assert_eq!(derivation.surfaces[0].id, "main");
+        assert_eq!(derivation.surfaces[0].kind, "native_terminal");
+        assert_eq!(derivation.surfaces[0].port, "app.native");
+        assert_eq!(derivation.surfaces[0].path, "/");
+
+        let pixel_manifest = NATIVE_SURFACE_MANIFEST
+            .replace(
+                "kind = \"terminal\"\nprofile = \"ato.terminal-surface.v1\"\ncols = 120\nrows = 40",
+                "kind = \"pixel_stream\"\nprofile = \"ato.pixel-stream.v1\"\nwidth = 640\nheight = 480",
+            )
+            .replace(
+                "probe_input = \"go\\n\"\nprobe_output_delimiter = \"END\"\nprobe_max_output_bytes = 4096",
+                "probe_keysyms = [103]\nprobe_max_frame_bytes = 1228800",
+            )
+            .replace("use = \"ato.pty@1\"", "use = \"ato.tcp@1\"");
+        let directory = native_surface_source(&pixel_manifest);
+        let pixel = ato_portable_application::build_native_bundle(
+            directory.path(),
+            &directory.path().join("capsule.toml"),
+            "Native Pixel",
+        )
+        .expect("the pixel fixture packs");
+        let capabilities = capabilities_of(&pixel.0);
+        let derivation = &capabilities.derivations[0];
+        assert_eq!(derivation.realization, "native_pixel");
+        assert_eq!(derivation.surfaces[0].kind, "native_pixel");
+        assert_eq!(derivation.surfaces[0].port, "app.native");
+    }
+
+    #[test]
+    fn capabilities_name_the_native_desktop_platform() {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/native-desktop-multi-d");
+        let (bytes, _) = ato_portable_application::build_authored_bundle_v2(&source)
+            .expect("the native desktop fixture packs");
+        let capabilities = capabilities_of(&bytes);
+        assert_eq!(capabilities.derivations.len(), 3);
+        let static_web = capabilities
+            .derivations
+            .iter()
+            .find(|derivation| derivation.realization == "static_web")
+            .expect("the fixture declares a static route");
+        assert_eq!(static_web.native_platform, None);
+        assert_eq!(static_web.surfaces[0].kind, "static_web");
+        let mut platforms: Vec<_> = capabilities
+            .derivations
+            .iter()
+            .filter_map(|derivation| derivation.native_platform.clone())
+            .collect();
+        platforms.sort();
+        assert_eq!(platforms, vec!["macos/aarch64", "windows/x86_64"]);
+        for derivation in &capabilities.derivations {
+            if derivation.native_platform.is_some() {
+                assert_eq!(derivation.realization, "native_pixel");
+                assert!(!derivation.requires.container);
+                assert!(!derivation.requires.state);
+                assert_eq!(derivation.surfaces[0].kind, "native_pixel");
+            }
+        }
+    }
+
+    // ---- publishing -------------------------------------------------------
     fn publish_request(bytes: &[u8]) -> PublishRequest {
         PublishRequest {
             tag: "latest".to_owned(),
@@ -1714,6 +2337,11 @@ mod tests {
                 surfaces: vec!["web_ui".to_owned()],
                 tags: Vec::new(),
                 environments: vec!["macos-arm64".to_owned()],
+                capabilities: HubCapabilities {
+                    source: CAPABILITIES_SOURCE_BUNDLE,
+                    contract_ref: format!("sha256:{}", "c".repeat(64)),
+                    derivations: Vec::new(),
+                },
             },
         }
     }

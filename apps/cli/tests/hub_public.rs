@@ -19,6 +19,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use assert_cmd::Command as AssertCommand;
+use base64::Engine as _;
 use serde_json::{Value, json};
 
 /// SHA-256 of the committed interop-static bundle bytes.
@@ -215,6 +216,64 @@ fn body_of(request: &str) -> Value {
     serde_json::from_str(body).expect("the request body is JSON")
 }
 
+/// The DerivationRef of the route whose `ato.native@1` step declares `os`.
+///
+/// The bundle is the encoded JSON document `ato pack` writes; its payloads are
+/// the canonical objects, so the declared platform is readable without running
+/// the route.
+fn derivation_with_native_os(bytes: &[u8], os: &str) -> String {
+    let value: Value = serde_json::from_slice(bytes).expect("a .capsule is a JSON document");
+    for payload in value["payloads"]
+        .as_array()
+        .expect("the bundle lists payloads")
+    {
+        let Some(encoded) = payload["bytes"].as_str() else {
+            continue;
+        };
+        let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+            continue;
+        };
+        let Ok(object) = serde_json::from_slice::<Value>(&decoded) else {
+            continue;
+        };
+        let matches = object["steps"].as_array().is_some_and(|steps| {
+            steps
+                .iter()
+                .any(|step| step["runtimes"]["ato.native.os"] == os)
+        });
+        if matches {
+            return payload["reference"]
+                .as_str()
+                .expect("a payload carries its reference")
+                .to_owned();
+        }
+    }
+    panic!("no Derivation declares ato.native.os = {os}");
+}
+
+/// The `capability ...` lines `ato pack` printed for one Derivation.
+fn pack_capability_lines(printed: &str, derivation: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut capturing = false;
+    for line in printed.lines() {
+        if let Some(rest) = line.strip_prefix("capability derivation_ref=") {
+            let reference = rest.split(' ').next().unwrap_or_default();
+            capturing = reference == derivation;
+            if capturing {
+                lines.push(line.to_owned());
+            }
+            continue;
+        }
+        if capturing {
+            if line.starts_with("capability ") {
+                lines.push(line.to_owned());
+            } else {
+                capturing = false;
+            }
+        }
+    }
+    lines
+}
 // ---- ato hub publish ------------------------------------------------------
 
 #[test]
@@ -289,8 +348,27 @@ fn publishing_a_valid_capsule_reports_the_reference_and_web_url() {
         body["metadata"]["repository"],
         "https://github.com/ato-run/ato"
     );
+    // `--surface` / `--environment` stay declared; the capabilities object is
+    // derived from the bundle and never overwritten by them.
     assert_eq!(body["metadata"]["surfaces"][0], "web_ui");
     assert_eq!(body["metadata"]["environments"][0], "macos-arm64");
+    let capabilities = &body["metadata"]["capabilities"];
+    assert_eq!(capabilities["source"], "bundle");
+    assert!(
+        capabilities["contract_ref"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("sha256:") && value.len() == 71),
+        "{capabilities}"
+    );
+    assert_eq!(capabilities["derivations"].as_array().unwrap().len(), 1);
+    let derivation = &capabilities["derivations"][0];
+    assert_eq!(derivation["realization"], "static_web");
+    assert_eq!(derivation["platform"], Value::Null);
+    assert_eq!(derivation["native_platform"], Value::Null);
+    assert_eq!(derivation["requires"]["container"], false);
+    assert_eq!(derivation["requires"]["state"], false);
+    assert_eq!(derivation["surfaces"][0]["kind"], "static_web");
+    assert_eq!(derivation["surfaces"][0]["port"], "app.http");
     assert!(
         body["metadata"]["readme_markdown"]
             .as_str()
@@ -580,4 +658,94 @@ fn an_existing_capsules_path_runs_locally_without_the_api() {
         stderr(&output)
     );
     assert!(!stderr(&output).contains("Resolved capsules/"));
+}
+#[test]
+fn a_hub_capsule_this_host_cannot_run_is_refused_before_execution() {
+    // A real native multi-derivation bundle, packed from the committed fixture.
+    let built = tempfile::tempdir().unwrap();
+    let bundle_path = built.path().join("native-multi.capsule");
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/native-desktop-multi-d");
+    let packed = ato()
+        .arg("pack")
+        .arg(&source)
+        .arg("-o")
+        .arg(&bundle_path)
+        .output()
+        .unwrap();
+    assert!(packed.status.success(), "pack failed: {}", stderr(&packed));
+    let packed_stdout = stdout(&packed);
+    let bytes = fs::read(&bundle_path).unwrap();
+    let windows = derivation_with_native_os(&bytes, "windows");
+    let expected = pack_capability_lines(&packed_stdout, &windows);
+    assert!(
+        expected.iter().any(|line| line.contains("runnable=no")),
+        "{packed_stdout}"
+    );
+
+    let digest = ato_portable_application::bundle_sha256(&bytes);
+    let api = StubApi::new(vec![
+        json_response(
+            "200 OK",
+            json!({
+                "ref": "capsules/koh0920/native-multi",
+                "tag": "latest",
+                "digest": digest,
+                "size_bytes": bytes.len(),
+                "artifact_path": format!(
+                    "/v1/hub/capsules/koh0920/native-multi/artifacts/{digest}"
+                ),
+            }),
+        ),
+        binary_response(&bytes),
+    ]);
+    let home = tempfile::tempdir().unwrap();
+    let evidence = tempfile::tempdir().unwrap();
+    let receipt = evidence.path().join("receipt.json");
+    let output = ato_with_home(home.path())
+        .arg("run")
+        .arg("capsules/koh0920/native-multi")
+        .args(["--derivation", &windows])
+        .arg("--no-open")
+        .arg("--verification-receipt")
+        .arg(&receipt)
+        .args(["--api-url", &api.base])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "the Run was not refused");
+    let message = stderr(&output);
+    assert!(message.contains("hub-capability-unavailable"), "{message}");
+    assert!(message.contains("the Run was not started"), "{message}");
+    assert!(message.contains("capability required "), "{message}");
+    for line in &expected {
+        assert!(
+            message.contains(line),
+            "the Hub Run diagnosis lacks `{line}`: {message}"
+        );
+    }
+    assert!(
+        !stdout(&output).contains("URL:"),
+        "a refused Run printed a URL: {}",
+        stdout(&output)
+    );
+    assert!(!receipt.exists(), "a refused Run publishes no receipt");
+    // The refusal happens before the Run scratch is kept: no temporary Run
+    // directory is left behind under the CLI's cache.
+    let cache = home.path().join("cache");
+    if cache.is_dir() {
+        let leftovers: Vec<_> = fs::read_dir(&cache)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("ato-portable-run-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a refused Run kept scratch: {leftovers:?}"
+        );
+    }
+    let requests = api.wait_requests(2);
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert!(
+        requests.iter().all(|request| !request.starts_with("POST ")),
+        "a refused Run reported nothing: {requests:?}"
+    );
 }
