@@ -441,12 +441,15 @@ fn native_capability_detail() -> String {
 ///
 /// A refusal names the boundary; recording it and continuing would be the
 /// failure mode the invariants forbid, so the tests that must not launch assert
-/// this and that no receipt was published.
+/// this and that no receipt was published. Two layers can refuse before a
+/// native process exists, and both name the boundary: the CLI's Host Facts
+/// admission for a multi-route bundle (printing the `capability ...` lines)
+/// and the native Adapter's own admission for a single route.
 fn native_admission_refusal(output: &Output) -> Option<String> {
     let message = stderr(output);
-    message
-        .contains("Native Desktop runtime admission failed")
-        .then_some(message)
+    (message.contains("Native Desktop runtime admission failed")
+        || message.contains("derivation-capability-unavailable"))
+    .then_some(message)
 }
 
 fn assert_no_owned_process(home: &Path) {
@@ -1095,7 +1098,8 @@ fn assert_windows_derivation_refused(output: &Output, receipt: &Path) {
     );
     let message = stderr(output);
     assert!(
-        message.contains("Native Desktop runtime admission failed"),
+        message.contains("Native Desktop runtime admission failed")
+            || message.contains("derivation-capability-unavailable"),
         "the refusal must be a named admission failure: {message}"
     );
     if cfg!(windows) {
