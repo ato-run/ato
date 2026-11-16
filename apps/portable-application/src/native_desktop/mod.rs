@@ -50,6 +50,9 @@ pub(crate) mod source_build;
 pub(crate) mod toolchain;
 #[cfg(target_os = "windows")]
 pub(crate) mod windows;
+/// Safe unpacking of a `zip` remote artifact, from its central directory.
+#[cfg(target_os = "macos")]
+pub(crate) mod zip;
 
 /// A named native-adapter refusal. The code is stable and user-facing; the
 /// detail names what could not be enforced.

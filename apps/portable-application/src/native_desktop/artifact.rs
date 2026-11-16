@@ -7,6 +7,10 @@
 //! the author packed are preserved (with setuid/setgid/sticky stripped).
 //!
 //! The digest of what was actually placed is recorded as execution evidence.
+//!
+//! A `zip` payload is unpacked by the sibling `zip` module: it applies the same
+//! rules to the entries its central directory lists, and a `dmg` still has no
+//! extractor in this build.
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -149,7 +153,7 @@ pub fn extract_tar_reader<R: Read>(archive: R, destination: &Path) -> Result<Ext
 }
 
 /// Digest what was placed, in one canonical form.
-fn finish(
+pub(super) fn finish(
     destination: &Path,
     mut files: Vec<PlacedFile>,
     total_bytes: u64,
@@ -175,15 +179,15 @@ fn finish(
     })
 }
 
-struct PlacedFile {
-    path: String,
-    mode: u32,
-    size: u64,
-    digest: String,
+pub(super) struct PlacedFile {
+    pub(super) path: String,
+    pub(super) mode: u32,
+    pub(super) size: u64,
+    pub(super) digest: String,
 }
 
 /// A path the archive names, when it is safe to join under the root.
-fn safe_relative(path: &Path) -> Result<PathBuf> {
+pub(super) fn safe_relative(path: &Path) -> Result<PathBuf> {
     let mut cleaned = PathBuf::new();
     for component in path.components() {
         match component {
@@ -202,7 +206,7 @@ fn safe_relative(path: &Path) -> Result<PathBuf> {
     Ok(cleaned)
 }
 
-fn slash_path(path: &Path) -> String {
+pub(super) fn slash_path(path: &Path) -> String {
     path.components()
         .filter_map(|component| match component {
             Component::Normal(segment) => Some(segment.to_string_lossy().into_owned()),
@@ -213,14 +217,14 @@ fn slash_path(path: &Path) -> String {
 }
 
 #[cfg(unix)]
-fn set_mode(path: &Path, mode: u32) -> Result<()> {
+pub(super) fn set_mode(path: &Path, mode: u32) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
         .with_context(|| format!("set mode {mode:04o} on {}", path.display()))
 }
 
 #[cfg(not(unix))]
-fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
+pub(super) fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
     Ok(())
 }
 
@@ -228,7 +232,9 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
 ///
 /// The format vocabulary belongs to the Adapter, so an unsupported packed form
 /// is a named refusal here rather than a bundle-validation failure: the
-/// declaration is well-formed, this Adapter just cannot unpack it.
+/// declaration is well-formed, this Adapter just cannot unpack it. A `zip` is
+/// unpacked by the sibling module under exactly the rules this one applies to a
+/// `tar.gz`; a `dmg` still has no extractor in this build.
 pub fn extract_archive(
     bytes: &[u8],
     format: NativeArtifactFormat,
@@ -236,10 +242,10 @@ pub fn extract_archive(
 ) -> Result<ExtractedArtifact> {
     match format {
         NativeArtifactFormat::TarGz => extract_tar_gz(bytes, destination),
-        other => bail!(
-            "native_format_extractor_unavailable: this Adapter unpacks tar.gz only, and the route \
-             declares {}",
-            other.as_str()
+        NativeArtifactFormat::Zip => super::zip::extract_zip(bytes, destination),
+        NativeArtifactFormat::Dmg => bail!(
+            "native_format_extractor_unavailable: this Adapter has no dmg extractor, so the \
+             declared disk image cannot be materialized"
         ),
     }
 }
@@ -256,13 +262,13 @@ pub fn extract_archive_file(
                 .with_context(|| format!("open the verified payload {}", path.display()))?;
             extract_tar_reader(file, destination)
         }
-        // The Adapter owns the packed formats it can unpack. A zip or a disk
-        // image is a well-formed declaration this build cannot materialize;
-        // saying so keeps "declared" and "implemented" apart.
-        NativeArtifactFormat::Zip | NativeArtifactFormat::Dmg => bail!(
-            "native_format_extractor_unavailable: this Adapter unpacks a tar.gz payload and has \
-             no {} extractor, so the reference cannot be materialized",
-            format.as_str()
+        NativeArtifactFormat::Zip => super::zip::extract_zip_file(path, destination),
+        // The Adapter owns the packed formats it can unpack. A disk image is a
+        // well-formed declaration this build cannot materialize; saying so
+        // keeps "declared" and "implemented" apart.
+        NativeArtifactFormat::Dmg => bail!(
+            "native_format_extractor_unavailable: this Adapter has no dmg extractor, so the \
+             declared disk image cannot be materialized"
         ),
     }
 }
@@ -568,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn a_payload_on_disk_is_streamed_and_a_foreign_format_is_named() {
+    fn a_payload_on_disk_is_streamed_and_a_dmg_is_named_as_unavailable() {
         let bytes = archive(&[Entry::File("app/run.sh", b"#!/bin/sh\n", 0o755)]);
         let scratch = temp_root();
         let payload = scratch.path().join("artifact.tar.gz");
@@ -581,12 +587,13 @@ mod tests {
         .unwrap();
         assert_eq!(extracted.file_count, 1);
 
-        for format in [
-            ato_formation::native_desktop::NativeArtifactFormat::Zip,
-            ato_formation::native_desktop::NativeArtifactFormat::Dmg,
+        // The disk image is the one packed form with no extractor in this
+        // build; a zip is unpacked by the zip module and has its own tests.
+        let format = ato_formation::native_desktop::NativeArtifactFormat::Dmg;
+        for error in [
+            extract_archive_file(&payload, format, &scratch.path().join("file")).unwrap_err(),
+            extract_archive(&bytes, format, &scratch.path().join("memory")).unwrap_err(),
         ] {
-            let error =
-                extract_archive_file(&payload, format, &scratch.path().join("other")).unwrap_err();
             assert!(
                 error
                     .to_string()
@@ -594,17 +601,6 @@ mod tests {
                 "{format:?}: {error}"
             );
         }
-        let error = extract_archive(
-            &bytes,
-            ato_formation::native_desktop::NativeArtifactFormat::Zip,
-            &scratch.path().join("memory"),
-        )
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .starts_with("native_format_extractor_unavailable")
-        );
     }
 
     #[test]
