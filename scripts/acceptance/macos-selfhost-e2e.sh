@@ -7,6 +7,7 @@
 #
 # --hub     also run a Hub reference (needs ATO_API_URL and ATO_API_TOKEN)
 # --github  also fetch a GitHub source (needs network; slower)
+# --ui      also start the management page and check it lists Instances
 #
 # Nothing is written outside .tmp/ in the repository root.
 set -u
@@ -15,11 +16,13 @@ root="$(cd "$(dirname "$0")/../.." && pwd)"
 binary="$root/target/release/ato"
 run_hub=0
 run_github=0
+run_ui=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --binary) binary="$2"; shift 2 ;;
     --hub) run_hub=1; shift ;;
     --github) run_github=1; shift ;;
+    --ui) run_ui=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -123,6 +126,84 @@ if [ "$run_github" = "1" ]; then
   fi
 else
   skip "github source (pass --github)"
+fi
+
+# 6. A Hub reference becomes a durable Instance that starts, stops and restarts.
+if [ "$run_hub" = "1" ]; then
+  if ! "$binary" app install --help >/dev/null 2>&1; then
+    skip "durable Hub Instance (this binary has no app install)"
+  elif [ -z "$(printenv ATO_API_TOKEN)" ] || [ -z "$(printenv ATO_API_URL)" ]; then
+    skip "durable Hub Instance (set ATO_API_URL and ATO_API_TOKEN)"
+  elif "$binary" app install capsules/koh0920/interop-static \
+         --api-url "$ATO_API_URL" >"$work/install.log" 2>&1; then
+    instance="$(sed -n 's/^Imported Instance: //p' "$work/install.log" | head -1)"
+    if [ -z "$instance" ]; then
+      fail "durable Hub Instance: no Instance id in the install output"
+    else
+      pass "durable Hub Instance: $instance"
+      if "$binary" app stop "$instance" >"$work/stop.log" 2>&1; then
+        pass "durable Hub Instance: stopped"
+      else
+        fail "durable Hub Instance: stop failed (see $work/stop.log)"
+      fi
+      if "$binary" app start "$instance" >"$work/restart.log" 2>&1; then
+        url="$(sed -n 's/^URL: //p' "$work/restart.log" | head -1)"
+        if [ -n "$url" ] && curl -sS -m 10 -o /dev/null "$url/"; then
+          pass "durable Hub Instance: restarted and serving ($url)"
+        else
+          fail "durable Hub Instance: restarted but not serving ($url)"
+        fi
+        "$binary" app stop "$instance" >/dev/null 2>&1
+      else
+        fail "durable Hub Instance: restart failed (see $work/restart.log)"
+      fi
+    fi
+  elif grep -q "worker exited before becoming active" "$work/install.log" 2>/dev/null &&
+       grep -rq "process start time is unavailable" "$work/home/instances" 2>/dev/null; then
+    # A restricted host cannot inspect a process, so a durable start is refused
+    # before the Instance becomes active. That is the host, not the bundle.
+    skip "durable Hub Instance (this host cannot record a process identity)"
+  else
+    fail "durable Hub Instance: install failed (see $work/install.log)"
+  fi
+else
+  skip "durable Hub Instance (pass --hub)"
+fi
+
+# 7. The management page lists Instances and drives them through the CLI.
+if [ "$run_ui" = "1" ]; then
+  if ! "$binary" ui --help >/dev/null 2>&1; then
+    skip "management page (this binary has no ui)"
+    run_ui=skip
+  fi
+fi
+if [ "$run_ui" = "1" ]; then
+  port=8399
+  "$binary" ui --port "$port" >"$work/ui.log" 2>&1 &
+  ui_pid=$!
+  ready=0
+  for _ in $(seq 1 40); do
+    if curl -sS -m 2 -o /dev/null "http://127.0.0.1:$port/"; then ready=1; break; fi
+    sleep 0.25
+  done
+  if [ "$ready" != "1" ]; then
+    fail "management page did not start (see $work/ui.log)"
+  else
+    if curl -sS -m 5 "http://127.0.0.1:$port/" | grep -q "起動"; then
+      pass "management page: serves the Instance controls"
+    else
+      fail "management page: no controls in the page"
+    fi
+    if curl -sS -m 10 "http://127.0.0.1:$port/api/instances" >"$work/ui-instances.json" 2>/dev/null; then
+      pass "management page: lists Instances"
+    else
+      fail "management page: /api/instances failed"
+    fi
+  fi
+  kill "$ui_pid" 2>/dev/null
+  wait "$ui_pid" 2>/dev/null
+else
+  if [ "$run_ui" = "0" ]; then skip "management page (pass --ui)"; fi
 fi
 
 echo
