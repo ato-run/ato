@@ -52,6 +52,34 @@ model status: installed False assets 12 total_bytes 1835330682
 binary size 15 MB。**残る未測定は brew install 自体のみ**（サンドボックスが
 ~/.homebrew への書き込みを拒否するため、ユーザーの Terminal 実行が必要）。
 
+### 公開済み v0.9.5 成果物の検証（Homebrew が実際に入れるバイト列）
+
+tap の Formula（`ato-run/homebrew-ato/Formula/ato-cli.rb`）が指す arm64 tarball を取得し、
+**Formula の sha256 と一致**することを確認した上で、その中のバイナリを直接実行した。
+
+```
+$ curl -L -o ato-cli.tar.xz https://github.com/ato-run/ato/releases/download/v0.9.5/ato-cli-aarch64-apple-darwin.tar.xz
+$ shasum -a 256 ato-cli.tar.xz
+b28c7adb635aa7104a792fc7ffae95132be25e865a5faf1ad971085db8a1b82b
+$ grep sha256 Formula/ato-cli.rb   # arm64-apple-darwin
+sha256 "b28c7adb635aa7104a792fc7ffae95132be25e865a5faf1ad971085db8a1b82b"   ← 一致
+
+$ ./ato --version
+ato 0.9.5
+$ codesign -dv ./ato
+Signature=adhoc / TeamIdentifier=not set
+$ otool -L ./ato | grep -v -E '^/System/|^/usr/lib/'
+（出力なし = system library のみ）
+
+$ ATO_HOME=<fresh> ./ato run samples/interop-static.capsule --no-open --verification-receipt r.json
+Runtime: static web / URL: http://127.0.0.1:55955
+receipt: fully_satisfied True
+```
+
+→ **公開済み成果物そのものが、開発ツール無しで既製 Capsule を実行し Contract を満たす**。
+ad-hoc 署名（Team ID なし）でも Formula 経由で動作するため、初期リリースで公証を必須としない
+判断と整合する。残る未測定は `brew install` の実行のみ。
+
 ## 2. Kev-0.8B の実測（PASS）
 
 ### 導入
