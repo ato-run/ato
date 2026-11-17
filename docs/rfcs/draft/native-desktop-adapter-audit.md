@@ -226,3 +226,25 @@ claims a cache hit without checking one. A successful second Run alone must
 not be reported as cache-hit evidence; this needs separate evidence before
 M2 acceptance can be marked complete.
 
+## 8. Source-build linker scratch investigation (2026-11-17)
+
+After the resolver correction, a real SolidCraft build acquired the managed
+Rust 1.95.0 toolchain and crates, then failed at the final linker invocation.
+The build environment named Run-local `HOME` and `TMPDIR` directories that
+had not been created. Clang reported `unable to make temporary file: No such
+file or directory`. Creating those directories before invoking the build
+executor fixes the missing-path boundary without granting another writable
+host path or changing the build command.
+
+A small C program reproduced the failure under the failed Run's unchanged
+Seatbelt profile (exit 1). With only the two Run-local directories created,
+the same command linked successfully (exit 0). Xcrun still reports that its
+host per-user cache is unwritable; that warning did not prevent the probe
+from linking. The successful probe does not establish full SolidCraft
+acceptance: the complete source Run and cache checks remain required.
+
+The build-executor tests now write to both exported scratch paths and refuse
+a non-directory `TMPDIR` before invoking Cargo. Failure diagnostics currently
+retain the first 2,000 stderr characters, which can hide linker errors behind
+dependency download messages; the real diagnostics were recovered from
+Cargo's retained `target/release/.fingerprint/*/output-*` files.
