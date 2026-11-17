@@ -147,14 +147,15 @@ source  = count of source_url / source_commit / source_sha256 /
   reference may also declare `zip` or `dmg`. `zip` is unpacked (PR3b); `dmg`
   is a named, unimplemented refusal.
 
-## 5. M1 real-host procedure for the Lead (not run in this PR)
+## 5. M1 real-host procedure
 
 Preconditions: a macOS host, a terminal where Seatbelt can be applied, network
 access.
 
 1. D1 (remote): build a bundle whose D declares `ato.native.remote_*`, then
    `ato run <bundle> --derivation <D>`.
-   - expect fetch -> `codesign`/`spctl` -> unpack -> launch -> HTTP observation;
+   - expect fetch -> unpack -> `codesign`/`spctl` -> launch -> the declared
+     HTTP or terminal observation;
    - swap the upstream asset: `native_fetch_digest_mismatch`;
    - remove the upstream asset: `native_fetch_not_found`;
    - unsigned/ad-hoc under `require-valid`: `native_signature_policy_unsatisfied`.
@@ -177,17 +178,23 @@ access.
    the stage the Lead must observe on the real artifact.
 4. D2 (source) without approval: `native_toolchain_consent_required`, and
    nothing created under `$ATO_HOME/toolchains`.
-5. Re-run with `--allow-native-source-build`: rustup-init checksum verification,
+5. For a locally built unsigned/ad-hoc entry, declare
+   `require-valid-or-local-override` and obtain explicit user approval for
+   `--allow-native-source-build --allow-unsigned-native`: rustup-init checksum verification,
    toolchain under `$ATO_HOME/toolchains/rust/<version>-<target>`, source
    tarball digest, Cargo.lock digest, sandboxed build, launch, K observations.
-6. Re-run the same D2: build cache hit (`build_cache: hit`) and no build.
+6. Re-run the same D2: verify the cache manifest and staged artifact digest,
+   and the absence of source extraction/build-profile creation in this attempt.
+   The SolidCraft acceptance script records this in `cache-evidence.json`.
 7. A tarball for another commit (with a matching digest):
    `native_build_source_commit_mismatch`.
 8. Teardown: no process group left behind, Run scratch removed, and no
    `*.part` file beside a fetched artifact.
-9. Receipt: selected D (`derivation_ref`), `realization: native_desktop`, the
-   materialization sentence in `workspace`, `build_network`, signature verdicts,
-   and `fully_satisfied`. A successful build alone must not satisfy K.
+9. Receipt: selected D (`derivation_ref`), the exact bundle digest, distinct
+   attempt, native signature/sandbox evidence, observation evidence and
+   `fully_satisfied`. Schema `/5` does not carry the in-memory build-network or
+   cache decision. Preserve the separate cache evidence described above. A
+   successful build alone must not satisfy K.
 
 ## 6. Existing constraints observed but not changed by PR3
 
@@ -222,9 +229,10 @@ The local kernel denials and before/after probe are the evidence for this fix.
 Detected evidence gap: `NativeProvenance::build_cache` reaches the in-memory
 `RealizationEvidence::workspace`, but neither it nor `build_network` is in
 `VerificationNativeEvidence` schema `/5`. The original acceptance script
-claims a cache hit without checking one. A successful second Run alone must
-not be reported as cache-hit evidence; this needs separate evidence before
-M2 acceptance can be marked complete.
+claimed a cache hit without checking one. PR #1882 corrected it to inspect the
+verified cache manifest and this attempt's retained staging area, and bind
+separate cache evidence to the receipt hash and attempt. A successful second
+Run alone is not reported as cache-hit evidence.
 
 ## 8. Source-build linker scratch investigation (2026-11-17)
 
@@ -248,3 +256,28 @@ a non-directory `TMPDIR` before invoking Cargo. Failure diagnostics currently
 retain the first 2,000 stderr characters, which can hide linker errors behind
 dependency download messages; the real diagnostics were recovered from
 Cargo's retained `target/release/.fingerprint/*/output-*` files.
+
+## 9. M1 SolidCraft acceptance (2026-11-17)
+
+The corrected Run on Apple M1 / macOS 15.8.1 completed D1, a fresh source
+build/launch of D2, and a second D2 Run. All three schema `/5` receipts carry
+`fully_satisfied=true`, the same bundle digest and ContractRef, the explicitly
+selected DerivationRef and distinct attempts. Each observed `/initialize`
+with 3,947 captured bytes. No owned process group remained after completion.
+
+D1 retained `require-valid`, Developer ID and `local_override=false`. D2
+recorded ad-hoc code with the explicitly user-approved local override. Codesign
+verification was valid for both; Gatekeeper's rejection of standalone CLI
+executables remains a recorded verdict, not a notarization/stapling claim.
+The source artifact was 191,193,936 bytes, so the 512MiB artifact bound did not
+need widening.
+
+The first source Run retained a source tree and build profile. The second had
+neither, and its staged binary and cache manifest matched the first artifact
+digest. `cache-evidence.json` binds that check to the second receipt hash and
+attempt. The cache hit still fetched the 217,936,976-byte source archive before
+looking up the build cache. Run materialization files remain as local evidence;
+process teardown does not imply that those files were deleted.
+
+The full results, exact refs, limitations and staging outcome are recorded in
+[the acceptance record](../../ops/capsule-hub-m2-acceptance-20261116.md).
