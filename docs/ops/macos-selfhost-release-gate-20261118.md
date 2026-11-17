@@ -324,3 +324,55 @@ ATO_KEV_TEST_PYTHON=<venv>/bin/python ATO_KEV_TEST_HOME=<ATO_HOME> \
 # Hub 参照の実行
 ATO_API_URL=https://staging.api.ato.run ato run capsules/koh0920/interop-static --no-open
 ```
+
+## 6. 受入チェックと PR の対応（マージ後の1回で全項目を検証する）
+
+`scripts/acceptance/macos-selfhost-e2e.sh` の各チェックが、どのPRの成果物に依存しているか。
+**すべてのPRが dev に入った後の release binary で1回実行すれば、受入条件1〜5をまとめて検証できる。**
+
+| チェック | 依存するPR | 現在の状態（dev ベースの binary） |
+|---|---|---|
+| 1. binary が動く / system library のみ | — | PASS |
+| 2. canned capsule が `fully_satisfied` | — | PASS |
+| 3. `model status` が 12 asset を返す | #1893 | PASS（#1893 のブランチで実測） |
+| 4. Hub参照が `fully_satisfied` | — | PASS |
+| 5. GitHub source の fetch と commit 固定 | #1880 | SKIP（未搭載） |
+| 6. Hub参照 → durable Instance → 停止 → 再起動 → 配信 | #1876（libproc） | SKIP（`/bin/ps` 制限） |
+| 7. 管理ページ（`ato ui`） | #1876 | SKIP（未搭載） |
+
+### マージ後に実行するコマンド
+
+```bash
+cargo build --release -p ato-cli
+ATO_API_URL=https://staging.api.ato.run ATO_API_TOKEN=<token> \
+  scripts/acceptance/macos-selfhost-e2e.sh --hub --github --ui
+```
+
+期待される出力（全項目 PASS）:
+
+```
+PASS  binary runs: ato <version>
+PASS  links only system libraries
+PASS  canned capsule: fully_satisfied
+PASS  model status: 12 pinned assets
+PASS  hub reference: fully_satisfied
+PASS  github source: fetched and pinned
+PASS  durable Hub Instance: <linst_…>
+PASS  durable Hub Instance: stopped
+PASS  durable Hub Instance: restarted and serving (http://127.0.0.1:<port>)
+PASS  management page: serves the Instance controls
+PASS  management page: lists Instances
+all checks passed
+```
+
+### 現在のオープンPR（すべて Draft）
+
+| PR | 内容 | CI |
+|---|---|---|
+| #1876 | local Instance list/open/remove, `ato doctor`, `ato ui`, libproc | macOS・ubuntu 緑 |
+| #1880 | GitHub URL → app（dev base, 3ファイル） | macOS・ubuntu 緑 |
+| #1909 | ローカルMLXモデルを生成エンドポイント化 | macOS・ubuntu 緑 |
+| #1893 | Kev-0.8B（install / score / serve / provider分離） | ubuntu緑 / macOSは既知flaky |
+| #1908 | 生成プロバイダの接続先選択 | — |
+| #1907 | 本ドキュメントと受入スクリプト | docs |
+
