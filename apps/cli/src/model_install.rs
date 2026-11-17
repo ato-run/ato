@@ -1619,16 +1619,17 @@ mod tests {
         Origin { port, hits }
     }
 
+    /// A counter, not a timestamp: two tests starting in the same clock tick would
+    /// otherwise share a directory and one would rewrite the other's payload.
     fn temp_root() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
         let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".tmp/model-install");
         fs::create_dir_all(&base).expect("test root");
         let root = base.join(format!(
             "ato-model-install-{}-{}",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
+            NEXT.fetch_add(1, Ordering::SeqCst)
         ));
         fs::create_dir_all(&root).expect("temp root");
         root
