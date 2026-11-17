@@ -129,9 +129,26 @@ fn answer(
     checkpoint: &AtomicBool,
     status: &Mutex<Option<(bool, String)>>,
 ) -> std::io::Result<()> {
+    // macOS can inherit the listener's nonblocking mode on accepted sockets.
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     let mut request = [0u8; 4096];
-    let read = stream.read(&mut request)?;
+    // TCP may split even a small loopback request. Never interpret a partial
+    // request line as an action (or close with unread header bytes pending).
+    let mut read = 0;
+    while !request[..read].windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+        if read == request.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "control request headers exceed 4096 bytes",
+            ));
+        }
+        let count = stream.read(&mut request[read..])?;
+        if count == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        read += count;
+    }
     let head = String::from_utf8_lossy(&request[..read]);
     let action = head.split_whitespace().nth(1).unwrap_or_default();
     if action == status_path {
@@ -237,6 +254,37 @@ mod tests {
         assert!(get_status(&control).ends_with("ok: 3 panes"));
         control.record_checkpoint_result(false, "disk full");
         assert!(get_status(&control).ends_with("error: disk full"));
+    }
+
+    #[test]
+    fn a_fragmented_request_waits_for_complete_headers() {
+        let control = ControlHandle::start().unwrap();
+        let mut stream = TcpStream::connect(control.url().trim_start_matches("http://")).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_millis(150)))
+            .unwrap();
+        stream.write_all(b"GET /sta").unwrap();
+        let error = stream.read(&mut [0u8; 1]).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+        stream
+            .write_all(
+                format!(
+                    "tus?token={} HTTP/1.1\r\nhost: localhost\r\n\r\n",
+                    control.token()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.ends_with("pending"), "{response}");
     }
 
     #[test]
