@@ -16,6 +16,42 @@ Verifier/Receipt を得た」場合だけ記す。未測定・環境要因・承
 | 4 | ソースから実行（GitHub → Formation） | **PARTIAL** | 既知D経路は実測済み（Spoon-Knife: fetch→form→pack→run→receipt）。LLM生成Dは**公式API権限が無く未測定** |
 | 5 | ローカル管理（CLI + Desktop UI） | **PARTIAL** | CLI は PR #1876 で実測。Desktop UI は別repo（ato-desktop）で未着手 |
 
+## 1. リリース成果物（Homebrew が入れる binary）の実測
+
+Homebrew Formula は release.yml（cargo-dist）が公開する tarball を入れる。
+その binary と同一のビルドを手元で作り、**開発ツール無しで既製 Capsule が動く**ことを確認した。
+
+```
+$ cargo build --release -p ato-cli
+$ ./target/release/ato --version
+ato 0.9.4-stg
+
+$ otool -L target/release/ato
+/System/Library/Frameworks/SystemConfiguration.framework/...
+/System/Library/Frameworks/CoreFoundation.framework/...
+/usr/lib/libiconv.2.dylib
+/usr/lib/libSystem.B.dylib
+```
+→ 依存は **macOS 同梱の system library のみ**（開発ツールや Homebrew の dylib を要求しない）。
+
+```
+$ ATO_HOME=<fresh> ./target/release/ato run samples/interop-static.capsule --no-open --verification-receipt r.json
+Capsule: sha256:b565e9d7…b741db
+Route:   sha256:87a0ac84…b7a3cb
+Runtime: static web
+URL: http://127.0.0.1:55133
+receipt: fully_satisfied True | contract sha256:b565e9d7…
+```
+
+```
+$ ATO_HOME=<fresh> ./target/release/ato model status --json
+model status: installed False assets 12 total_bytes 1835330682
+```
+→ 未導入でも 12 asset の pin 表を返し exit 0（初回ユーザーの最初のコマンドが失敗しない）。
+
+binary size 15 MB。**残る未測定は brew install 自体のみ**（サンドボックスが
+~/.homebrew への書き込みを拒否するため、ユーザーの Terminal 実行が必要）。
+
 ## 2. Kev-0.8B の実測（PASS）
 
 ### 導入
