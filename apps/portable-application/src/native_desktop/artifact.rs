@@ -54,6 +54,7 @@ pub fn extract_tar_reader<R: Read>(archive: R, destination: &Path) -> Result<Ext
     let decoder = flate2::read::GzDecoder::new(archive);
     let mut tar = tar::Archive::new(decoder);
     let mut files = Vec::new();
+    let mut links: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut seen = BTreeSet::new();
     let mut entries = 0_u64;
     let mut total_bytes = 0_u64;
@@ -147,17 +148,107 @@ pub fn extract_tar_reader<R: Read>(archive: R, destination: &Path) -> Result<Ext
             | tar::EntryType::XGlobalHeader
             | tar::EntryType::GNULongName
             | tar::EntryType::GNULongLink => {}
+            // A source archive may carry symlinks. They are resolved inside
+            // the artifact root and placed as copies: a link that escapes the
+            // root, or names nothing the archive carries, is refused rather
+            // than materialized.
+            tar::EntryType::Symlink => {
+                let target = entry
+                    .link_name()
+                    .context("a native artifact symlink has no target")?
+                    .map(|name| name.into_owned())
+                    .ok_or_else(|| anyhow::anyhow!("a native artifact symlink has no target"))?;
+                ensure!(
+                    seen.insert(relative.clone()),
+                    "the native artifact carries '{}' more than once",
+                    relative.display()
+                );
+                links.push((relative, target));
+            }
             other => bail!(
-                "native artifact entry `{}` is a {other:?}; only regular files and directories are materialized",
+                "native artifact entry '{}' is a {other:?}; only regular files and directories are materialized",
                 relative.display()
             ),
         }
     }
+    // Resolve symlinks as copies. A chain is followed over bounded passes; a
+    // target outside the artifact root, or one nothing materializes, fails.
+    for _ in 0..8 {
+        let pending = std::mem::take(&mut links);
+        for (link, target) in pending {
+            let Some(resolved) = resolve_inside(&link, &target) else {
+                bail!(
+                    "native artifact symlink '{}' points outside the artifact",
+                    link.display()
+                );
+            };
+            let source = destination.join(&resolved);
+            if !source.is_file() {
+                links.push((link, target));
+                continue;
+            }
+            let bytes = fs::read(&source)
+                .with_context(|| format!("read artifact symlink target {}", source.display()))?;
+            total_bytes = total_bytes.saturating_add(bytes.len() as u64);
+            ensure!(
+                total_bytes <= MAX_EXTRACTED_BYTES,
+                "the native artifact expands past {MAX_EXTRACTED_BYTES} bytes"
+            );
+            let output = destination.join(&link);
+            if let Some(parent) = output.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create artifact directory {}", parent.display()))?;
+            }
+            fs::write(&output, &bytes)
+                .with_context(|| format!("write artifact symlink copy {}", output.display()))?;
+            set_mode(&output, 0o644)?;
+            files.push(PlacedFile {
+                path: slash_path(&link),
+                mode: 0o644,
+                size: bytes.len() as u64,
+                digest: format!("{:x}", Sha256::digest(&bytes)),
+            });
+        }
+        if links.is_empty() {
+            break;
+        }
+    }
+    ensure!(
+        links.is_empty(),
+        "native artifact symlinks name nothing the archive carries: {}",
+        links
+            .iter()
+            .map(|(link, _)| link.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     ensure!(
         !files.is_empty(),
         "the native artifact carries no regular file"
     );
     finish(destination, files, total_bytes)
+}
+
+/// Resolve a symlink target relative to the directory holding `link`,
+/// refusing any result outside the artifact root.
+fn resolve_inside(link: &Path, target: &Path) -> Option<PathBuf> {
+    if target.is_absolute() {
+        return None;
+    }
+    let mut resolved = link.parent().unwrap_or(Path::new("")).to_path_buf();
+    for component in target.components() {
+        match component {
+            std::path::Component::Normal(part) => resolved.push(part),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !resolved.pop() {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+    (!resolved.as_os_str().is_empty()).then_some(resolved)
 }
 
 /// Digest what was placed, in one canonical form.
@@ -653,5 +744,54 @@ mod tests {
         fs::write(root.join("keep"), b"keep").unwrap();
         assert!(extract_tar_gz(&bytes, &root).is_err());
         assert_eq!(fs::read(root.join("keep")).unwrap(), b"keep");
+    }
+}
+
+#[cfg(test)]
+mod symlink_tests {
+    use super::*;
+
+    fn archive_with_link(target: &str) -> Vec<u8> {
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        {
+            let mut builder = tar::Builder::new(&mut gz);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(5);
+            header.set_mode(0o644);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "root/doc.md", &b"hello"[..])
+                .unwrap();
+            let mut link = tar::Header::new_gnu();
+            link.set_size(0);
+            link.set_mode(0o777);
+            link.set_entry_type(tar::EntryType::Symlink);
+            link.set_link_name(target).unwrap();
+            link.set_cksum();
+            builder
+                .append_data(&mut link, "root/link.md", &[][..])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        gz.finish().unwrap()
+    }
+
+    #[test]
+    fn a_symlink_inside_the_archive_is_placed_as_a_copy() {
+        let archive = archive_with_link("doc.md");
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().join("artifact");
+        let extracted = extract_tar_gz(&archive, &root).expect("extract");
+        assert_eq!(fs::read(root.join("root/link.md")).unwrap(), b"hello");
+        assert_eq!(extracted.file_count, 2);
+    }
+
+    #[test]
+    fn a_symlink_that_escapes_the_artifact_is_refused() {
+        let archive = archive_with_link("../../outside");
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().join("artifact");
+        assert!(extract_tar_gz(&archive, &root).is_err());
     }
 }
