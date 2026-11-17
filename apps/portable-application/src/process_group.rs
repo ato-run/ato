@@ -54,6 +54,23 @@ impl ProcessServiceGroup {
     /// service accepts TCP on its readiness address; any failure stops and
     /// reaps what already started before returning.
     pub fn start(workspace: &std::path::Path, services: Vec<ServiceSpec>) -> Result<Self> {
+        Self::start_with_readiness(workspace, services, true)
+    }
+
+    /// The caller must observe its non-socket readiness before accepting the Run.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn start_unobserved(
+        workspace: &std::path::Path,
+        services: Vec<ServiceSpec>,
+    ) -> Result<Self> {
+        Self::start_with_readiness(workspace, services, false)
+    }
+
+    fn start_with_readiness(
+        workspace: &std::path::Path,
+        services: Vec<ServiceSpec>,
+        socket_ready: bool,
+    ) -> Result<Self> {
         if services.is_empty() {
             bail!("a native process service group declares no service");
         }
@@ -102,7 +119,7 @@ impl ProcessServiceGroup {
                 handle,
                 helpers: spec.helpers,
             });
-            if let Err(error) = group.wait_until_ready(spec.readiness) {
+            if socket_ready && let Err(error) = group.wait_until_ready(spec.readiness) {
                 return Err(group.fail(error));
             }
         }

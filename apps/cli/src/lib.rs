@@ -273,6 +273,8 @@ struct SourceOciBuildArgs {
 
 #[derive(Subcommand)]
 enum AppCommands {
+    /// Install a local or Hub capsule as an independent Instance and open it.
+    Install(AppInstallArgs),
     /// Import an immutable portable bundle as a new independent Instance.
     Import(AppImportArgs),
     /// Start a new durable Run for an imported Instance.
@@ -393,6 +395,23 @@ struct ReformArgs {
 }
 
 #[derive(Debug, Args)]
+struct AppInstallArgs {
+    capsule: PathBuf,
+    #[arg(long)]
+    derivation: Option<String>,
+    #[arg(long, env = "ATO_API_URL", default_value = auth_device::DEFAULT_API_URL)]
+    api_url: String,
+    #[arg(long)]
+    allow_native_source_build: bool,
+    #[arg(long)]
+    allow_unsigned_native: bool,
+    #[arg(long)]
+    accept_permissions: bool,
+    #[arg(long)]
+    verification_receipt: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
 struct AppImportArgs {
     capsule: PathBuf,
     /// Select one declared DerivationRef. Required when the bundle has more than one route.
@@ -408,6 +427,12 @@ struct AppImportArgs {
 
 #[derive(Debug, Args)]
 struct AppStartArgs {
+    /// Explicitly approve this Run's declared source build and managed toolchain.
+    #[arg(long = "allow-native-source-build")]
+    approve_source_build: bool,
+    /// Allow this Run's declared local unsigned-native override.
+    #[arg(long)]
+    allow_unsigned_native: bool,
     instance: String,
     /// Rebind one declared runtime connection for this Run. Values are not persisted.
     #[arg(long = "bind", value_parser = parse_binding)]
@@ -789,6 +814,7 @@ pub fn run() -> Result<()> {
         Commands::Reform(args) => run_reform(args),
         Commands::ModelSet { command } => model_cache::execute(command),
         Commands::App { command } => match command {
+            AppCommands::Install(args) => install_local_application(args),
             AppCommands::Import(args) => import_local_application(args),
             AppCommands::Start(args) => start_local_instance(args),
             AppCommands::Stop { instance } => stop_local_instance(&instance),
@@ -1911,6 +1937,103 @@ fn local_application_store() -> Result<LocalApplicationStore> {
     LocalApplicationStore::open(ato_home()?).map_err(Into::into)
 }
 
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalWorkerLaunch {
+    bindings: BTreeMap<String, String>,
+    approve_source_build: bool,
+    allow_unsigned_native: bool,
+}
+
+fn install_local_application(args: AppInstallArgs) -> Result<()> {
+    let home = ato_home()?;
+    let hub = hub_public::resolve_for_run(&args.capsule, &args.api_url, &home)?;
+    let path = hub
+        .as_ref()
+        .map_or(&args.capsule, |resolved| &resolved.bundle_path);
+    let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let bundle = portable_export_bundle(&bytes)?;
+    let candidates =
+        derivation_selection::candidates(&bundle, &bundle_sha256(&bytes), &home.join("runs"))?;
+    let selected = match derivation_selection::resolve_choice(
+        &bundle.index.derivations,
+        args.derivation.as_deref(),
+    ) {
+        DerivationChoice::Explicit(reference) | DerivationChoice::Only(reference) => reference,
+        DerivationChoice::NeedsSelection if stdin_is_a_terminal() => select_from_menu(&candidates)?,
+        DerivationChoice::NeedsSelection => {
+            for line in derivation_selection::render_candidates(&candidates) {
+                eprintln!("{line}");
+            }
+            return Err(derivation_selection::selection_required(&candidates));
+        }
+    };
+    let candidate = candidates
+        .derivations
+        .iter()
+        .find(|candidate| candidate.derivation_ref == selected)
+        .context("the selected Derivation is not in this capsule")?;
+    if let Some(invalid) = &candidate.invalid {
+        bail!("{invalid}");
+    }
+    if !candidate.runnable {
+        return Err(derivation_selection::capability_unavailable(
+            candidate,
+            &args.capsule.display().to_string(),
+        ));
+    }
+    for line in derivation_selection::render_permissions(candidate) {
+        eprintln!("{line}");
+    }
+    if !candidate.permissions.is_empty() && !args.accept_permissions {
+        if !stdin_is_a_terminal() {
+            bail!("installation requires --accept-permissions or an interactive terminal");
+        }
+        confirm_permissions(candidate)?;
+    }
+    let store = local_application_store()?;
+    let instance = store.import(&bytes, Some(&selected))?;
+    // Print the recovery handle even if preparation fails; do not label a
+    // failed first launch as a completed installation.
+    println!("Imported Instance: {}", instance.instance_id);
+    start_local_instance(AppStartArgs {
+        instance: instance.instance_id.clone(),
+        bindings: Vec::new(),
+        no_open: false,
+        verification_receipt: args.verification_receipt,
+        approve_source_build: args.allow_native_source_build,
+        allow_unsigned_native: args.allow_unsigned_native,
+    })?;
+    if let Some(resolved) = hub
+        && let Some(run) = store.active_run(&instance.instance_id)?
+        && let Some(receipt) = run.receipt_path.as_ref()
+    {
+        let path = store
+            .run_root(&instance.instance_id, &run.run_id)?
+            .join(receipt);
+        if let Ok(bytes) = fs::read(path)
+            && let Ok(receipt) = serde_json::from_slice(&bytes)
+        {
+            hub_public::report_successful_run(&resolved, &receipt);
+        }
+    }
+    println!(
+        "Installed. Restart with: ato app start {}{}{}",
+        instance.instance_id,
+        if args.allow_native_source_build {
+            " --allow-native-source-build"
+        } else {
+            ""
+        },
+        if args.allow_unsigned_native {
+            " --allow-unsigned-native"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
 fn import_local_application(args: AppImportArgs) -> Result<()> {
     if args.capsule.extension().and_then(|value| value.to_str()) != Some("capsule")
         || !args.capsule.is_file()
@@ -1946,7 +2069,11 @@ fn start_local_instance(args: AppStartArgs) -> Result<()> {
     // if the live state no longer observes the saved digests, start fails with
     // `instance_state_unverified` and no Run is claimed, so no receipt exists.
     store.observe_run_state(&instance.instance_id, &instance.selected_derivation_ref)?;
-    let binding_payload = serde_json::to_vec(&bindings)?;
+    let binding_payload = serde_json::to_vec(&LocalWorkerLaunch {
+        bindings,
+        approve_source_build: args.approve_source_build,
+        allow_unsigned_native: args.allow_unsigned_native,
+    })?;
     let starting = store.claim_run(&instance.instance_id)?;
     let run_root = store.run_root(&instance.instance_id, &starting.run_id)?;
     if matches!(
@@ -1988,7 +2115,10 @@ fn start_local_instance(args: AppStartArgs) -> Result<()> {
         let _ = store.release_run(&instance.instance_id, &starting.token);
         return Err(error).context("deliver runtime Bindings to local Instance worker");
     }
+    println!("Preparing Instance: {}", instance.instance_id);
+    println!("Progress log: {}", log_path.display());
     let wait_started = Instant::now();
+    let startup_timeout = if args.approve_source_build { 7200 } else { 600 };
     let active = loop {
         if let Some(active) = store.active_run(&instance.instance_id)?
             && active.token == starting.token
@@ -2003,11 +2133,11 @@ fn start_local_instance(args: AppStartArgs) -> Result<()> {
                 log_path.display()
             );
         }
-        if wait_started.elapsed() > Duration::from_secs(60) {
+        if wait_started.elapsed() > Duration::from_secs(startup_timeout) {
             terminate_unactivated_worker(&mut child);
             let _ = store.release_run(&instance.instance_id, &starting.token);
             bail!(
-                "local Instance worker did not become active within 60 seconds; see {}",
+                "local Instance worker did not become active within {startup_timeout} seconds; see {}",
                 log_path.display()
             );
         }
@@ -2032,8 +2162,24 @@ fn start_local_instance(args: AppStartArgs) -> Result<()> {
     println!("Run: {}", active.run_id);
     println!("Capsule: {}", instance.contract_ref);
     println!("Route: {}", instance.selected_derivation_ref);
-    println!("URL: {url}");
-    if !args.no_open {
+    if selected
+        .native
+        .as_ref()
+        .is_some_and(|n| n.descriptor.local_window)
+    {
+        println!("Surface: local desktop window");
+        for (id, path) in store.filesystem_state_paths(&instance.instance_id)? {
+            println!("Saved data ({id}): {}", path.display());
+        }
+    } else {
+        println!("URL: {url}");
+    }
+    if !args.no_open
+        && !selected
+            .native
+            .as_ref()
+            .is_some_and(|n| n.descriptor.local_window)
+    {
         open_browser(url)?;
     }
     Ok(())
@@ -2271,10 +2417,11 @@ fn portable_instance_worker(args: PortableInstanceWorkerArgs) -> Result<()> {
         .take(1024 * 1024)
         .read_to_end(&mut binding_payload)
         .context("read runtime Bindings from parent")?;
-    let bindings = if binding_payload.is_empty() {
-        BTreeMap::new()
+    let launch: LocalWorkerLaunch = if binding_payload.is_empty() {
+        LocalWorkerLaunch::default()
     } else {
-        serde_json::from_slice(&binding_payload).context("decode runtime Bindings from parent")?
+        serde_json::from_slice(&binding_payload)
+            .context("decode local worker launch options from parent")?
     };
     let store = local_application_store()?;
     let claimed = store
@@ -2286,7 +2433,7 @@ fn portable_instance_worker(args: PortableInstanceWorkerArgs) -> Result<()> {
     {
         bail!("local Instance Run claim does not match this worker");
     }
-    let result = portable_instance_worker_claimed(&store, &claimed, &bindings);
+    let result = portable_instance_worker_claimed(&store, &claimed, &launch);
     if let Err(error) = &result
         && let Some(ato_runtime_attempt::realize::CandidateStopFailure::Unconfirmed {
             reason,
@@ -2306,7 +2453,7 @@ fn portable_instance_worker(args: PortableInstanceWorkerArgs) -> Result<()> {
 fn portable_instance_worker_claimed(
     store: &LocalApplicationStore,
     claimed: &LocalInstanceRun,
-    bindings: &BTreeMap<String, String>,
+    launch: &LocalWorkerLaunch,
 ) -> Result<()> {
     #[cfg(unix)]
     let shutdown = Some({
@@ -2365,16 +2512,16 @@ fn portable_instance_worker_claimed(
             restored_snapshot_ref: restored_snapshot_ref.as_deref(),
             static_state,
             filesystem_state: Some(&filesystem_state),
-            bindings: Some(bindings),
+            bindings: Some(&launch.bindings),
             run_id: Some(&claimed.run_id),
             host_facts: None,
         },
-        // A durable local Instance start has no unsigned-native override yet;
-        // an unsigned native D is refused there rather than run silently.
-        false,
-        // Likewise no source-build approval: an Instance start never installs a
-        // toolchain on its own.
-        ato_portable_application::portable_run::NativeSourceConsent::Unavailable,
+        launch.allow_unsigned_native,
+        if launch.approve_source_build {
+            ato_portable_application::portable_run::NativeSourceConsent::Approved
+        } else {
+            ato_portable_application::portable_run::NativeSourceConsent::Unavailable
+        },
     )?;
     let result = (|| -> Result<_> {
         if started.receipt.bundle_sha256.as_deref() != Some(instance.bundle_sha256.as_str())
@@ -2404,6 +2551,9 @@ fn portable_instance_worker_claimed(
                     .is_some_and(|flag| flag.load(Ordering::Relaxed))
             {
                 return Ok((started.runtime.local_storage()?, request.exists()));
+            }
+            if started.runtime.local_window && started.runtime.live.exited()?.is_some() {
+                return Ok((started.runtime.local_storage()?, false));
             }
             if started.runtime.stops_when_a_service_exits {
                 started.runtime.try_wait()?;
@@ -3062,7 +3212,9 @@ fn run_portable_application(
         if let Some(bundle) = &receipt.bundle_sha256 {
             println!("Bundle: {bundle}");
         }
-        if !runtime.base_url().is_empty() {
+        if runtime.local_window {
+            println!("Surface: local desktop window");
+        } else if !runtime.base_url().is_empty() {
             println!("URL: {}", runtime.base_url());
         } else {
             println!("URL: none (a terminal route answers over its PTY)");
@@ -3079,7 +3231,9 @@ fn run_portable_application(
         if args.no_open || runtime.base_url().is_empty() {
             return Ok(());
         }
-        open_browser(runtime.base_url())?;
+        if !runtime.local_window {
+            open_browser(runtime.base_url())?;
+        }
         println!("Press Ctrl-C to stop the local realization.");
         loop {
             if shutdown
@@ -3090,6 +3244,9 @@ fn run_portable_application(
             }
             // A service group is one Application: when any service exits, the
             // whole group must be explicitly stopped, even when polling fails.
+            if runtime.local_window && runtime.live.exited()?.is_some() {
+                return Ok(());
+            }
             if runtime.stops_when_a_service_exits {
                 runtime.try_wait()?;
             }
@@ -3647,6 +3804,10 @@ fn start_portable_attempt(
             live,
             base_url,
             label,
+            local_window: validated
+                .native
+                .as_ref()
+                .is_some_and(|n| n.descriptor.local_window),
             stops_when_a_service_exits: matches!(
                 validated.realization,
                 PortableRealizationKind::OciServiceGroup
@@ -3709,6 +3870,7 @@ struct PortableLocalRuntime {
     label: &'static str,
     /// A service group is one Application: any service exiting ends the Run.
     stops_when_a_service_exits: bool,
+    local_window: bool,
 }
 
 impl PortableLocalRuntime {
@@ -3913,6 +4075,42 @@ fn runtime_binding_values(bindings: Vec<(String, String)>) -> Result<BTreeMap<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_install_and_restart_require_explicit_per_run_overrides() {
+        let parsed =
+            Cli::try_parse_from(["ato", "app", "install", "capsules/ato/solidcraft"]).unwrap();
+        let Commands::App {
+            command: AppCommands::Install(args),
+        } = parsed.command
+        else {
+            panic!("expected install")
+        };
+        assert!(
+            !args.allow_native_source_build
+                && !args.allow_unsigned_native
+                && !args.accept_permissions
+        );
+        let parsed = Cli::try_parse_from([
+            "ato",
+            "app",
+            "start",
+            "instance",
+            "--allow-native-source-build",
+            "--allow-unsigned-native",
+        ])
+        .unwrap();
+        let Commands::App {
+            command: AppCommands::Start(args),
+        } = parsed.command
+        else {
+            panic!("expected start")
+        };
+        assert!(args.approve_source_build && args.allow_unsigned_native);
+        let default = LocalWorkerLaunch::default();
+        assert!(!default.approve_source_build && !default.allow_unsigned_native);
+        assert!(serde_json::from_str::<LocalWorkerLaunch>(r#"{"bindings":{},"approve_source_build":false,"allow_unsigned_native":false,"unknown":true}"#).is_err());
+    }
 
     /// The words `ato pack` prints are part of what an operator acts on, so
     /// they are pinned here: a reason code and its message, or a warning and
