@@ -145,6 +145,42 @@ receipt: fully_satisfied True
 - `ato app import capsules/…` は **ローカルファイルのみ**（`error: accepts only a portable .capsule file`）→ PR #1877 待ち
 - dev の `ato app start` は `worker process start time is unavailable`（サンドボックスが `/bin/ps` を拒否）→ PR #1876 の libproc で解消済み
 
+## 3b. Hub参照 → durable Instance の実測（受入条件3の完成）— 2026-11-18
+
+dev の `ato app install` は「ローカルファイルまたは Hub 参照」から durable Instance を作れる。
+staging Hub の実在 capsule で **install → 起動 → 停止 → 再起動** を通した。
+
+```
+$ ATO_API_URL=https://staging.api.ato.run ato app install capsules/koh0920/interop-static
+Route sha256:87a0ac84… requires no host permissions.
+Imported Instance: linst_5ac3fbd75b8becf2ce4ca33a2f9295af4b14c59f9845676eee1f24b8f5aca1b2
+Run: lrun_15d6f32018fa2c55…
+Capsule: sha256:b565e9d7…b741db
+Route:   sha256:87a0ac84…b7a3cb
+URL: http://127.0.0.1:63841
+Capsule Hub: run recorded for capsules/koh0920/interop-static
+Installed. Restart with: ato app start linst_5ac3fbd7…
+
+$ ato app inspect linst_5ac3fbd7…
+active_run: lrun_15d6f32018fa2c5 | url: http://127.0.0.1:63841
+
+$ ato app stop linst_5ac3fbd7…
+Stopped Run lrun_15d6f32018fa2c55… for Instance linst_5ac3fbd7…
+
+$ ato app start linst_5ac3fbd7…
+Run: lrun_500d9bc006b38da4…
+URL: http://127.0.0.1:63879
+$ curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:63879/   → 200（HTML を配信）
+
+$ ato app stop linst_5ac3fbd7…
+$ ato app inspect linst_5ac3fbd7…   → active_run: None
+```
+
+- **Hub 参照から durable Instance を作り、起動・停止・再起動できる**ことを実測（受入条件3の Hub 半分）
+- 再起動は**新しい Run と新しい endpoint**（:63841 → :63879）を発行する
+- 停止後は `active_run` が `None` に戻る（状態復元の確認）
+- これにより PR #1877（`app add`）は dev の `app install` と重複するため close した
+
 ## 4. ソースから実行（既知D）の実測 — 公開済み v0.9.5 で再測定
 
 GitHub の実リポジトリ（`octocat/Spoon-Knife` @ `d0dd1f61b33d64e29d8bc1372a94ef6a2fee76a9`）を取得し、
