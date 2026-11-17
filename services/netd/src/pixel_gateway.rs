@@ -632,6 +632,7 @@ mod tests {
                     .then_some(now_unix_millis() / 1000 + 60),
                 principal: "user:1".to_string(),
                 grant_id: "grant-1".to_string(),
+                grant_expires_at: u64::MAX,
             })
         }
     }

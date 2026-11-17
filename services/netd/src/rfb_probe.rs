@@ -1039,6 +1039,7 @@ pub(crate) mod tests {
                 framebuffer_resize_until: None,
                 principal: "user-1".to_string(),
                 grant_id: "probe-grant-1".to_string(),
+                grant_expires_at: u64::MAX,
             })
         }
     }
