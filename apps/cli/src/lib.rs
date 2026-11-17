@@ -2233,6 +2233,26 @@ fn import_local_application(args: AppImportArgs) -> Result<()> {
     Ok(())
 }
 
+/// A worker that exits because the host cannot observe its identity is not a
+/// broken Instance: the message has to name the host problem and the command
+/// that explains it, otherwise the user retries forever.
+fn explain_worker_exit(log_path: &Path, instance_id: &str) -> anyhow::Error {
+    let log = fs::read_to_string(log_path).unwrap_or_default();
+    if log.contains("worker process start time is unavailable") {
+        anyhow::anyhow!(
+            "process-identity-unavailable: this host does not expose the worker's process start \
+             time, so a durable Run cannot be proven. Run `ato doctor`; the host must allow \
+             process inspection (worker log: {})",
+            log_path.display()
+        )
+    } else {
+        anyhow::anyhow!(
+            "local Instance `{instance_id}` worker exited before becoming active; see {}",
+            log_path.display()
+        )
+    }
+}
+
 fn start_local_instance(args: AppStartArgs) -> Result<()> {
     let store = local_application_store()?;
     let instance = store.instance(&args.instance)?;
@@ -2298,10 +2318,7 @@ fn start_local_instance(args: AppStartArgs) -> Result<()> {
         }
         if child.try_wait()?.is_some() {
             let _ = store.release_run(&instance.instance_id, &starting.token);
-            bail!(
-                "local Instance worker exited before becoming active; see {}",
-                log_path.display()
-            );
+            return Err(explain_worker_exit(&log_path, &instance.instance_id));
         }
         if wait_started.elapsed() > Duration::from_secs(60) {
             terminate_unactivated_worker(&mut child);
