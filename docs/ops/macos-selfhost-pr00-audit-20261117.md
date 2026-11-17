@@ -16,6 +16,7 @@ Status: Current（2026-11-17 時点の実測記録。ロードマップの追跡
 | ローカル ato-api checkout | branch `codex/public-install-invites` @ `e7b39a98`、`origin/dev`(`50cf3929`) より **1718 behind**（local router 254行 vs dev 1319行）→ 監査は dev 基準 |
 | 配布版 | GitHub Release v0.9.3 (2026-11-16) |
 | DSH sandbox | full enforcement。`/bin/ps` 実行不可（後述 §6） |
+| 署名 ID | `security find-identity -v -p codesigning` = **Apple Development のみ**（Developer ID Application 無し）→ 公証不可 |
 
 ## 1. 実測で GREEN のもの（macOS arm64・今日のコード）
 
@@ -56,7 +57,7 @@ G7. **Kev-0.8B は実在し、arm64/MLX 対応**（`.tmp/pr00/kev-audit.md`）: 
 | MOD-01 | RED | `ato model install/status` 不在（`model-set import` は既存ディレクトリ取込のみ）。Kev→Ato 接続は `JEV_BASE_URL` 定数固定で不可、`model` 接頭辞 `jev-` 必須 | 未実装 |
 | MOD-02 | RED | モデル未導入時の fallback を検証する E2E/fixture が無い | 未実装 |
 | APP-01 | RED | `app list / open / remove` 不在。start は §6 で検証不能 | 未実装 + 環境遮断 |
-| UI-01 | RED（未監査完了） | ato-desktop/ato-pwa のローカルライブラリ実装は別途 `.tmp/pr00/desktop-audit.md` | 未実装 |
+| UI-01 | RED | ato-pwa にローカル専用 My Apps 画面なし（既定は localStorage `ato_app_library`）。シェルは `__ATO_DESKTOP__` を注入せず `isDesktop()` が常に false → Desktop 専用 runner UI へ到達不能。Desktop ローカル保管 UI は staged PWA source_sha `756a13fc` で workspace に commit が無い | 未実装 + 所在不明 |
 | SEC-01 | RED | GitHub archive の quarantine はサーバ側テストのみ。CLI 側の悪性 archive fixture が無い | 未実装 |
 | REL-01 | RED | 署名/公証/再現ハーネス無し。`origin/dev` の `dist-workspace.toml` / `.github/workflows/release.yml` に signing/notarization 設定が無い（grep 0件） | 未実装 |
 
@@ -117,6 +118,19 @@ P0 への含意:
 - rate limit / quota / 監査は PR-05 の前提として未実装。公開 API にするなら別 PR で versioned endpoint + 制限を足す。
 - staging が課金でデプロイできていないため「stg で検証済み」は現時点で主張できない（ローカル実測のみ）。
 
+## 5c. Desktop / PWA 実測（ato-desktop `origin/dev` `2354137`, ato-pwa）
+
+| 面 | 実測 |
+|---|---|
+| シェル→CLI | sidecar 3 本（`tauri.conf.json:19-31`）。解決は sibling 優先で release の PATH fallback 無し（`src/binary.rs:31-62`）。CLI argv は init/resume/stop/encap/run のみ（`host.rs:264-299`）、状態読みは `__desktop inspect`（`host.rs:374-390`）、同時 Run 1 本（`host.rs:94-160`） |
+| 実行経路 | 同梱 PWA から `host::*` 6 コマンドは未使用。実体は loopback HTTP + `on_navigation` 横取り（`local_apps.rs:16-129`）→ 302 検証 → 別窓。Coordinator 死亡時は Runtime 停止だけで WebView へ通知しない（`lib.rs:529-553`） |
+| ローカル一覧 | PWA にローカル専用画面なし。既定は localStorage、サーバ一覧は flag opt-in で `build:desktop` 未設定（`package.json:13`）。Instance 一覧/停止は `computeClient.ts:509,610` |
+| open | PWA は `app_url` アンカー（`openApp.ts:29-33`）。Desktop ローカルは `http://127.0.0.1:PORT/v1/local-apps/<cinst>/` を横取り |
+| 署名 | `tauri.conf.json:20 signingIdentity: "-"`（ad-hoc 固定）。`xtask` に notarize primitive はあるが資格情報が無いと skip（`main.rs:221-300`）。配布 0.1.7 は未公証・ad-hoc |
+| CI/E2E | ato-desktop repo に CI 無し（workspace の `ato-desktop-bindings.yml` は旧構成で死んでいる）。`e2e/local/README.md` は "Status: empty"。tauri-driver v2 は **macOS 非対応** → 実機 WebView 自動化は不可 |
+| Unknown | staged PWA ローカル保管 UI の内容、`/v1/local-apps` の実装所有者（api/PWA 双方に無し）、`__ATO_DESKTOP__` 非注入が意図か退行か |
+
+UI-01 の含意: 「CLI が正本」の原則は既存構造と整合するが、Desktop 側は**同一 Instance を読む実装が repo に存在しない**。まず PWA の `build:desktop` にローカル一覧（`ato app list --json` 由来）を載せ、`__ATO_DESKTOP__` 注入の有無を決めるのが最小。`/v1/local-apps` の所有者を決めずに UI だけ作らない。
 ## 6. 環境遮断（この DSH セッション固有・製品不具合と混同しない）
 
 - `/bin/ps` の実行が拒否される（`Operation not permitted`, exit 126）。workspace にコピーした `ps` も SIGKILL。
@@ -136,7 +150,7 @@ P0 への含意:
 
 ## 8. 承認が必要な事項（止めずに進められる範囲の境界）
 
-1. **署名/公証**: Apple Developer ID 証明書と notarization 資格情報の有無（無ければ clean Mac の Gatekeeper gate は通せない）
+1. **署名/公証**: この Mac には **Apple Development 証明書しか無く Developer ID Application が無い**ため、現状では公証できず clean Mac の Gatekeeper gate を通せない。Developer ID 発行と notarytool 資格情報の用意が必要（ユーザー判断）
 2. **公式 API**: 認証方式・quota/budget・送信同意のプロダクト判断（価格・データ送信）
 3. **Kev の位置づけ**: P0 gate に含めるか、optional demonstration に留めるか（MOD-01 の PASS 定義が変わる）
 3b. **API の失敗契約**: 409 語彙のまま CLI で写像する（推奨・互換）か、429/402 + Retry-After を versioned endpoint で新設するか
