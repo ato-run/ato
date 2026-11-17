@@ -1,6 +1,6 @@
 # Capsule Hub M2 — 受け入れサマリ（2026-11-16）
 
-Status: M1 native D1/D2・二回目 cache hit・staging 公開/Run 報告/PWA 表示の受け入れ完了。本番は未実施。
+Status: M1 native D1/D2・二回目 cache hit・staging 公開に加え、公開 CLI 0.9.4-stg のクリーンインストールからの受け入れ完了。本番は未実施。
 Parent: ato #1819（重複 Issue なし）。契約: `docs/rfcs/draft/capsule-hub-m2-native.md`。
 
 ## 1. マージ済み PR（dev → stg 到達済み）
@@ -125,7 +125,30 @@ D2 の明示 override コマンドを確認した。Hub README は metadata と�
 signature 判断、cache evidence、配備の組み合わせとブラウザー結果を保存した。
 元 receipt は §3 の work directory に残す。Run は CLI-local であり、Hosted Native の成功とは扱わない。
 
-## 5. 未実装として明記しているもの
+## 5. 公開 CLI 0.9.4-stg のクリーンインストール（2026-11-17 17:04–17:56 JST）
+
+[v0.9.3 の配布経路検証](solidcraft-staging-clean-install-20261117.md) は installer と CLI 対応不足で失敗した。
+ato #1888/#1889 と ato-pwa #1022/#1023 により、macOS arm64 の prerelease `0.9.4-stg` と
+staging installer の固定経路を公開した。CLI source は `6b16e9e3998c4f4477461aa372fb2d314cadc6e0`、
+PWA source は `69316be2e92ea3fb77f1ce56338fad6fbadfa051`。
+
+新規 HOME / ATO_HOME / Rust / Cargo / cache から公開 installer を変更せず実行し、exit 0。
+公開 release の archive・配置された CLI の hash 一致を確認後、同じ公開 bundle で D1、D2、D2 再実行に成功した。
+三つの receipt は同一 K、明示した D、異なる attempt と `fully_satisfied=true` を記録。
+D2 初回は 2,624.8 秒、二回目は 260.492 秒。cache manifest と artifact digest、二回目の
+source tree / build profile 未作成を確認し、cache hit と判定した。時短だけを根拠にはしていない。
+
+API Worker は §4 と同じ `fcb9b553-6768-4226-9580-9c5d2a0de5e9`、PWA は
+`53d5fb21-9efa-4cbf-b3b3-22df151697f2`。検証前後の version 一致、process group 回収、lease 解放を確認。
+通常の CLI Run 報告により **verified / successful_runs=6 / run_count=6**。
+production installer は bytes 不変、stable latest は v0.9.3。本番操作はない。
+
+詳細・Release Manifest・receipt hash は
+[公開 CLI 受け入れ記録](solidcraft-staging-094-acceptance-20261117.md) と
+[証跡 JSON](evidence/solidcraft-staging-094-acceptance-20261117.json) に保存する。
+OS と Apple command-line tools は既存 M1 のものを使用しており、OS 初期化の検証ではない。
+
+## 6. 未実装として明記しているもの
 
 - v2 pixel surface、対話 viewer/gateway、hosted native 実行、Windows の native containment、
   dmg 展開、notarization/stapling 検証、ローカル validator 768MiB と公式上限 1GB の差。
