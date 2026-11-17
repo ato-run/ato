@@ -299,3 +299,9 @@ The old v0.9.3 installer/CLI failures remain recorded separately. Exact release,
 deployment, timings and receipt hashes are in the
 [public CLI acceptance record](../../ops/solidcraft-staging-094-acceptance-20261117.md).
 The production installer and stable latest v0.9.3 were unchanged.
+
+## 11. Published stable CLI acceptance (2026-11-17)
+
+The stable 0.9.4 installer and macOS arm64 release binary at `6b252a89f7d5abaed8b075fb6d6409f60c5ea3df` were verified against GitHub asset digests and installed into fresh user, Cargo, Rust and Ato directories. D1, a cold D2 and repeated D2 all produced satisfied receipt /5 observations for the same Contract and distinct declared Derivations. Cache reuse was established by the retained attempt area and verified cache manifest, not timing. Process groups were reaped.
+
+The full five-target distribution and Homebrew workflow succeeded; this does not establish native execution on Linux/Windows. API/PWA versions remained fixed on staging under the shared lease. No production Web/API, migration or flag changed. Per-Derivation publisher advice is outside immutable identity, admission and verification. See the [stable release acceptance record](../../ops/solidcraft-stable-094-acceptance-20261117.md) for the exact Release Manifest, signatures, fresh-environment conditions and evidence hashes. Earlier limitations in this audit still apply.
