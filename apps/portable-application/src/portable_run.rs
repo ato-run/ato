@@ -303,6 +303,19 @@ fn route_platform(derivation: &ato_formation::authoring::BoundDerivation) -> Opt
         })
 }
 
+/// Whether the *runtime* process declares TCP egress.
+///
+/// Build-phase egress belongs to the build sandbox, which enforces it; the run
+/// Adapter only owns inbound loopback Ports, so only a runtime-phase
+/// declaration is one it would fail to enforce.
+fn declares_runtime_egress(
+    requirements: &ato_formation::requirements::ExecutionRequirements,
+) -> bool {
+    requirements.network.iter().any(|requirement| {
+        requirement.phase == ato_formation::requirements::ExecutionPhase::Runtime
+    })
+}
+
 fn refused(code: &str, message: impl Into<String>) -> Option<AttemptFailure> {
     Some(AttemptFailure {
         code: code.to_owned(),
@@ -419,7 +432,7 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
                     "the selected native route carries no validated descriptor",
                 );
             }
-            if !self.validated.derivation.requirements.network.is_empty() {
+            if declares_runtime_egress(&self.validated.derivation.requirements) {
                 // Inbound loopback Ports are enforced by the Seatbelt profile;
                 // an arbitrary declared TCP destination is not. A mandatory
                 // policy that cannot be enforced before launch is a refusal,
@@ -809,7 +822,7 @@ impl PortableBundleExecutor<'_> {
             state_paths,
             environment: self.binding_environment,
             local_override: self.context.native_local_override,
-            declares_egress: !route.derivation.requirements.network.is_empty(),
+            declares_egress: declares_runtime_egress(&route.derivation.requirements),
         })
     }
 }
@@ -3107,5 +3120,29 @@ mod process_group_policy_tests {
             "the shim policy must let the shim reach the broker's directory: {:?}",
             policy.read_only_paths
         );
+    }
+}
+
+#[cfg(test)]
+mod runtime_egress_tests {
+    use super::*;
+
+    /// Build-phase egress belongs to the build sandbox; only a runtime-phase
+    /// declaration is one the run Adapter would fail to enforce.
+    #[test]
+    fn only_runtime_phase_egress_belongs_to_the_run_adapter() {
+        let mut requirements = ato_formation::requirements::ExecutionRequirements::default();
+        assert!(!declares_runtime_egress(&requirements));
+        requirements.network = vec![ato_formation::requirements::NetworkRequirement {
+            phase: ato_formation::requirements::ExecutionPhase::Build,
+            host: "crates.io".to_owned(),
+            port: 443,
+        }];
+        assert!(
+            !declares_runtime_egress(&requirements),
+            "a build-phase destination is not the run Adapter's to enforce"
+        );
+        requirements.network[0].phase = ato_formation::requirements::ExecutionPhase::Runtime;
+        assert!(declares_runtime_egress(&requirements));
     }
 }
