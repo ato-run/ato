@@ -281,3 +281,21 @@ process teardown does not imply that those files were deleted.
 
 The full results, exact refs, limitations and staging outcome are recorded in
 [the acceptance record](../../ops/capsule-hub-m2-acceptance-20261116.md).
+
+## 10. Published staging CLI acceptance (2026-11-17)
+
+The macOS arm64 prerelease `0.9.4-stg` was installed through the served staging
+installer into fresh HOME, ATO_HOME, Rust/Cargo and cache directories. Its
+archive digest matched the public release asset and the installed CLI bytes.
+D1, a cold D2 build and a second D2 Run all produced satisfied `/5` receipts
+for the same public bundle and Contract. The second D2 used the same verified
+artifact and cache manifest without creating source/build-profile files.
+D1 retained its valid Developer ID requirement; D2 used the explicitly approved
+local signature override. All owned process groups were reaped.
+
+This extends the earlier working-tree CLI result to the public distribution
+path. It does not establish Hosted Native, Windows or notarization acceptance.
+The old v0.9.3 installer/CLI failures remain recorded separately. Exact release,
+deployment, timings and receipt hashes are in the
+[public CLI acceptance record](../../ops/solidcraft-staging-094-acceptance-20261117.md).
+The production installer and stable latest v0.9.3 were unchanged.

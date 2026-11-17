@@ -1,0 +1,385 @@
+{
+  "schema": "ato.ops.solidcraft-staging-cli-acceptance/1",
+  "recorded_at": "2026-11-17T08:56:50.316725+00:00",
+  "summary": {
+    "status": "passed",
+    "cli": {
+      "version": "0.9.4-stg",
+      "git_commit": "6b16e9e3998c4f4477461aa372fb2d314cadc6e0",
+      "git_dirty": "false",
+      "profile": "release"
+    },
+    "binary_sha256": "sha256:a393bb2fecdd2569d6b33b9f5610733f0f56dee34863158ac446ff9ecdcc2a51",
+    "archive_sha256": "sha256:cfa8afddc1114ed68104fc64747616f45a70e5354de795a40ec10582d50dace0",
+    "installer_sha256": "sha256:0a85d1856ce51ca19fdab4cb7d5a951709bed81542c9fd4f622d405b46b47988",
+    "bundle_sha256": "sha256:35f940038bc66cec78eb53485738bf029d4ce68d619993a024f8a3a10c10c7e3",
+    "contract_ref": "sha256:34d52388678111292fa890603110c23b47ce51220f452a28c233a2259e174c98",
+    "d1": "sha256:f58cdca4697158f519a9a24d7bc36a7deb00a531b913fce3859deccbb46551e9",
+    "d2": "sha256:382f1474eb77e0c18820f65a4d96edebfeddda6cc6b2b1cb5f4834bb9462406d",
+    "receipt_sha256s": [
+      "sha256:b7b81d4bbc847f22b60886dd070574855cb09e745ed8de1440268137f2b66cb7",
+      "sha256:8c7cc64e701ce0aa8af1eaf68d7efd9d5b40d94b18d932800fdccbb1491b3716",
+      "sha256:915a8cd83f6e3ba3ff45b2240dcd65d5771c64b5f5af2d89fc81b2badd8c1ba6"
+    ],
+    "cache": {
+      "schema": "ato.solidcraft-cache-acceptance/1",
+      "receipt_sha256": "sha256:915a8cd83f6e3ba3ff45b2240dcd65d5771c64b5f5af2d89fc81b2badd8c1ba6",
+      "attempt_id": "run-62684-1794905509338983000",
+      "contract_ref": "sha256:34d52388678111292fa890603110c23b47ce51220f452a28c233a2259e174c98",
+      "derivation_ref": "sha256:382f1474eb77e0c18820f65a4d96edebfeddda6cc6b2b1cb5f4834bb9462406d",
+      "build_cache": "hit",
+      "cache_key": "sha256:b728ed78e125495d60c85b56e938cf9933a506bf5b2e02ae52002dcc3cce1212",
+      "artifact_sha256": "sha256:a5fd275fee70d8c62a0823d9cb18291090bc15f6f299c38b44cc724c353ab9be",
+      "toolchain": "rust:1.95.0",
+      "build_argv": "cargo build --locked --release -p solidcraft-cli",
+      "cache_manifest": "<isolated-root>/ato-home/cache/native-build/b728ed78e125495d60c85b56e938cf9933a506bf5b2e02ae52002dcc3cce1212/manifest.txt",
+      "staged_entry": "<isolated-root>/ato-home/cache/ato-portable-run-o0aAu9/native-build/staging/.ato-build/target/release/solidcraft-cli",
+      "source_tree_created": false,
+      "build_profile_created": false
+    },
+    "worker_versions": {
+      "api": "fcb9b553-6768-4226-9580-9c5d2a0de5e9",
+      "pwa": "53d5fb21-9efa-4cbf-b3b3-22df151697f2"
+    },
+    "source_build_first_run": true,
+    "process_groups_reaped": true,
+    "run_count_before": 3,
+    "run_count_after": 6,
+    "stable_latest": "v0.9.3",
+    "production_installer_unchanged": true,
+    "environment_fresh": true,
+    "work_root": "<isolated-root>"
+  },
+  "release": {
+    "id": 448311017,
+    "tag_name": "v0.9.4-stg",
+    "html_url": "https://github.com/ato-run/ato/releases/tag/v0.9.4-stg",
+    "prerelease": true,
+    "published_at": "2026-11-17T07:56:36Z"
+  },
+  "release_workflow": "https://github.com/ato-run/ato/actions/runs/44041494599",
+  "release_workflow_conclusion": "success",
+  "release_manifest": {
+    "ato": "6b16e9e3998c4f4477461aa372fb2d314cadc6e0",
+    "ato_pwa": "69316be2e92ea3fb77f1ce56338fad6fbadfa051",
+    "ato_api_prior_code_deployment": "65c65f8a22fba89435fb7ae8cde7038ce85227d7",
+    "active_worker_versions": {
+      "api": "fcb9b553-6768-4226-9580-9c5d2a0de5e9",
+      "pwa": "53d5fb21-9efa-4cbf-b3b3-22df151697f2"
+    },
+    "api_source_note": "API unchanged; prior code deployment followed by Secret Change deployments, as recorded in capsule-hub-m2-acceptance-20261116.md",
+    "migrations_applied": [],
+    "feature_flags_changed": [],
+    "capsule_profile": "ato.portable-application/1",
+    "receipt_schema": "ato.contract-verification-receipt/5"
+  },
+  "fresh_environment": {
+    "environment": {
+      "HOME": "<isolated-root>/home",
+      "ATO_HOME": "<isolated-root>/ato-home",
+      "XDG_CONFIG_HOME": "<isolated-root>/config",
+      "XDG_CACHE_HOME": "<isolated-root>/cache",
+      "CARGO_HOME": "<isolated-root>/cargo",
+      "RUSTUP_HOME": "<isolated-root>/rustup",
+      "TMPDIR": "<isolated-root>/tmp",
+      "PATH": "<isolated-root>/home/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+      "SHELL": "/bin/zsh",
+      "LANG": "en_US.UTF-8",
+      "TERM": "dumb",
+      "ATO_API_URL": "https://staging.api.ato.run"
+    },
+    "empty_directories": {
+      "home": true,
+      "ato-home": true,
+      "config": true,
+      "cache": true,
+      "cargo": true,
+      "rustup": true
+    },
+    "scope": "Fresh user directories on existing M1 host; no credentials or host Rust reused"
+  },
+  "installation": {
+    "argv": [
+      "/bin/sh",
+      "<isolated-root>/install.sh",
+      "--cli-only",
+      "--no-modify-path"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 32.308
+  },
+  "runs": [
+    {
+      "label": "d1",
+      "receipt_sha256": "sha256:b7b81d4bbc847f22b60886dd070574855cb09e745ed8de1440268137f2b66cb7",
+      "result": {
+        "argv": [
+          "<isolated-root>/home/.local/bin/ato",
+          "run",
+          "capsules/ato/solidcraft@sha256:35f940038bc66cec78eb53485738bf029d4ce68d619993a024f8a3a10c10c7e3",
+          "--derivation",
+          "sha256:f58cdca4697158f519a9a24d7bc36a7deb00a531b913fce3859deccbb46551e9",
+          "--accept-permissions",
+          "--no-open",
+          "--verification-receipt",
+          "<isolated-root>/work/d1-receipt.json"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 142.355
+      },
+      "receipt_path_projection": {
+        "bundle_sha256": "sha256:35f940038bc66cec78eb53485738bf029d4ce68d619993a024f8a3a10c10c7e3",
+        "contract_ref": "sha256:34d52388678111292fa890603110c23b47ce51220f452a28c233a2259e174c98",
+        "derivation_ref": "sha256:f58cdca4697158f519a9a24d7bc36a7deb00a531b913fce3859deccbb46551e9",
+        "execution": {
+          "attempt_id": "run-7879-1794902738644509000",
+          "native": {
+            "artifact_ref": "sha256:0633d662f3b410da90616d6c7e412f6d799693164541abea82c8d53802ad1d0a",
+            "codesign_verify": "valid",
+            "enforced_inbound_ports": [],
+            "enforced_read_only": [
+              "<isolated-root>/ato-home/cache/ato-portable-run-BX4sOa/native/artifact",
+              "<isolated-root>/ato-home/cache/ato-portable-run-BX4sOa/workspace",
+              "/usr",
+              "/System",
+              "/Library",
+              "/bin",
+              "/sbin",
+              "/opt",
+              "/usr/local",
+              "/private/etc",
+              "/private/var/db",
+              "/dev"
+            ],
+            "enforced_read_write": [
+              "<isolated-root>/ato-home/cache/ato-portable-run-BX4sOa/native/runtime"
+            ],
+            "entry": "solidcraft-cli-0.43.0-macos-universal/solidcraft-cli",
+            "gatekeeper": "rejected",
+            "gatekeeper_detail": "<isolated-root>/ato-home/cache/ato-portable-run-BX4sOa/native/artifact/solidcraft-cli-0.43.0-macos-universal/solidcraft-cli: rejected (the code is valid but does not seem to be an app)",
+            "local_override": false,
+            "materialized_tree_digest": "sha256:e23b14b8de74be788443a50523235477daae985e53b9927de41bc1a51176f142",
+            "process_group": 8358,
+            "sandbox": "seatbelt",
+            "signature_kind": "developer_id",
+            "signature_policy": "require-valid",
+            "signature_target": "executable",
+            "verified_target": "solidcraft-cli-0.43.0-macos-universal/solidcraft-cli",
+            "window_containment": "not enforced in this increment"
+          },
+          "pid": 8358,
+          "realization": "native_desktop",
+          "request_id": "run-7879-1794902738644509000",
+          "runtime_executable": "<isolated-root>/ato-home/cache/ato-portable-run-BX4sOa/native/artifact/solidcraft-cli-0.43.0-macos-universal/solidcraft-cli"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:905cb7abb95e6ae391929bbe6d02041ecf48cf40bbd84cfbf4687e95bef2648b",
+              "captured_bytes": 3842,
+              "path": "/initialize"
+            },
+            "id": "cli-initialize",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/5",
+        "target": {
+          "kind": "cli-local"
+        }
+      }
+    },
+    {
+      "label": "d2",
+      "receipt_sha256": "sha256:8c7cc64e701ce0aa8af1eaf68d7efd9d5b40d94b18d932800fdccbb1491b3716",
+      "result": {
+        "argv": [
+          "<isolated-root>/home/.local/bin/ato",
+          "run",
+          "capsules/ato/solidcraft@sha256:35f940038bc66cec78eb53485738bf029d4ce68d619993a024f8a3a10c10c7e3",
+          "--derivation",
+          "sha256:382f1474eb77e0c18820f65a4d96edebfeddda6cc6b2b1cb5f4834bb9462406d",
+          "--accept-permissions",
+          "--no-open",
+          "--allow-native-source-build",
+          "--allow-unsigned-native",
+          "--verification-receipt",
+          "<isolated-root>/work/d2-receipt.json"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 2624.8
+      },
+      "receipt_path_projection": {
+        "bundle_sha256": "sha256:35f940038bc66cec78eb53485738bf029d4ce68d619993a024f8a3a10c10c7e3",
+        "contract_ref": "sha256:34d52388678111292fa890603110c23b47ce51220f452a28c233a2259e174c98",
+        "derivation_ref": "sha256:382f1474eb77e0c18820f65a4d96edebfeddda6cc6b2b1cb5f4834bb9462406d",
+        "execution": {
+          "attempt_id": "run-8375-1794902882266642000",
+          "native": {
+            "artifact_ref": "sha256:a5fd275fee70d8c62a0823d9cb18291090bc15f6f299c38b44cc724c353ab9be",
+            "codesign_verify": "valid",
+            "enforced_inbound_ports": [],
+            "enforced_read_only": [
+              "<isolated-root>/ato-home/cache/ato-portable-run-ntxeVD/native-build/staging",
+              "<isolated-root>/ato-home/cache/ato-portable-run-ntxeVD/workspace",
+              "/usr",
+              "/System",
+              "/Library",
+              "/bin",
+              "/sbin",
+              "/opt",
+              "/usr/local",
+              "/private/etc",
+              "/private/var/db",
+              "/dev"
+            ],
+            "enforced_read_write": [
+              "<isolated-root>/ato-home/cache/ato-portable-run-ntxeVD/native/runtime"
+            ],
+            "entry": ".ato-build/target/release/solidcraft-cli",
+            "gatekeeper": "rejected",
+            "gatekeeper_detail": "<isolated-root>/ato-home/cache/ato-portable-run-ntxeVD/native-build/staging/.ato-build/target/release/solidcraft-cli: rejected",
+            "local_override": true,
+            "materialized_tree_digest": "sha256:9a5c36c094be68c6d614548b7c528a93220fc72e8cc3ec271d9230fbfd634b13",
+            "process_group": 62634,
+            "sandbox": "seatbelt",
+            "signature_kind": "adhoc",
+            "signature_policy": "require-valid-or-local-override",
+            "signature_target": "executable",
+            "verified_target": ".ato-build/target/release/solidcraft-cli",
+            "window_containment": "not enforced in this increment"
+          },
+          "pid": 62634,
+          "realization": "native_desktop",
+          "request_id": "run-8375-1794902882266642000",
+          "runtime_executable": "<isolated-root>/ato-home/cache/ato-portable-run-ntxeVD/native-build/staging/.ato-build/target/release/solidcraft-cli"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:39c06924d6f6c6e5968afcbd75f7ebf268f27812d4a926974fe069e62d5113ff",
+              "captured_bytes": 3842,
+              "path": "/initialize"
+            },
+            "id": "cli-initialize",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/5",
+        "target": {
+          "kind": "cli-local"
+        }
+      }
+    },
+    {
+      "label": "d2-second",
+      "receipt_sha256": "sha256:915a8cd83f6e3ba3ff45b2240dcd65d5771c64b5f5af2d89fc81b2badd8c1ba6",
+      "result": {
+        "argv": [
+          "<isolated-root>/home/.local/bin/ato",
+          "run",
+          "capsules/ato/solidcraft@sha256:35f940038bc66cec78eb53485738bf029d4ce68d619993a024f8a3a10c10c7e3",
+          "--derivation",
+          "sha256:382f1474eb77e0c18820f65a4d96edebfeddda6cc6b2b1cb5f4834bb9462406d",
+          "--accept-permissions",
+          "--no-open",
+          "--allow-native-source-build",
+          "--allow-unsigned-native",
+          "--verification-receipt",
+          "<isolated-root>/work/d2-second-receipt.json"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 260.492
+      },
+      "receipt_path_projection": {
+        "bundle_sha256": "sha256:35f940038bc66cec78eb53485738bf029d4ce68d619993a024f8a3a10c10c7e3",
+        "contract_ref": "sha256:34d52388678111292fa890603110c23b47ce51220f452a28c233a2259e174c98",
+        "derivation_ref": "sha256:382f1474eb77e0c18820f65a4d96edebfeddda6cc6b2b1cb5f4834bb9462406d",
+        "execution": {
+          "attempt_id": "run-62684-1794905509338983000",
+          "native": {
+            "artifact_ref": "sha256:a5fd275fee70d8c62a0823d9cb18291090bc15f6f299c38b44cc724c353ab9be",
+            "codesign_verify": "valid",
+            "enforced_inbound_ports": [],
+            "enforced_read_only": [
+              "<isolated-root>/ato-home/cache/ato-portable-run-o0aAu9/native-build/staging",
+              "<isolated-root>/ato-home/cache/ato-portable-run-o0aAu9/workspace",
+              "/usr",
+              "/System",
+              "/Library",
+              "/bin",
+              "/sbin",
+              "/opt",
+              "/usr/local",
+              "/private/etc",
+              "/private/var/db",
+              "/dev"
+            ],
+            "enforced_read_write": [
+              "<isolated-root>/ato-home/cache/ato-portable-run-o0aAu9/native/runtime"
+            ],
+            "entry": ".ato-build/target/release/solidcraft-cli",
+            "gatekeeper": "rejected",
+            "gatekeeper_detail": "<isolated-root>/ato-home/cache/ato-portable-run-o0aAu9/native-build/staging/.ato-build/target/release/solidcraft-cli: rejected",
+            "local_override": true,
+            "materialized_tree_digest": "sha256:9a5c36c094be68c6d614548b7c528a93220fc72e8cc3ec271d9230fbfd634b13",
+            "process_group": 64109,
+            "sandbox": "seatbelt",
+            "signature_kind": "adhoc",
+            "signature_policy": "require-valid-or-local-override",
+            "signature_target": "executable",
+            "verified_target": ".ato-build/target/release/solidcraft-cli",
+            "window_containment": "not enforced in this increment"
+          },
+          "pid": 64109,
+          "realization": "native_desktop",
+          "request_id": "run-62684-1794905509338983000",
+          "runtime_executable": "<isolated-root>/ato-home/cache/ato-portable-run-o0aAu9/native-build/staging/.ato-build/target/release/solidcraft-cli"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:1a4cfbd214f70db0dd33daf27770c83b439fcaf68bc35d96e33c715e25612ba1",
+              "captured_bytes": 3843,
+              "path": "/initialize"
+            },
+            "id": "cli-initialize",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/5",
+        "target": {
+          "kind": "cli-local"
+        }
+      }
+    }
+  ],
+  "served_pwa": {
+    "source": "69316be2e92ea3fb77f1ce56338fad6fbadfa051",
+    "assets": [
+      "/assets/main-BtpxyUp0.js",
+      "/assets/main-BOtYRxC8.css"
+    ],
+    "api_origin": "https://staging.api.ato.run"
+  },
+  "staging_hub_after": {
+    "run_count": 6,
+    "verification": {
+      "state": "verified",
+      "successful_runs": 6,
+      "last_run_at": "2026-11-17 08:56:03"
+    }
+  },
+  "production_installer_sha256_before": "sha256:267d41659d68b867fca2df52913589faaf6904412a45c4ad423b5ebf2f162923",
+  "production_installer_sha256_after": "sha256:267d41659d68b867fca2df52913589faaf6904412a45c4ad423b5ebf2f162923",
+  "staging_lease": {
+    "owner": "solidcraft-cli-094-stg-20261117",
+    "released": true
+  },
+  "evidence_note": "Receipt hashes refer to original bytes. Embedded receipt fields are projections with isolated host paths replaced; no new receipt is issued.",
+  "raw_evidence_workspace_relative": ".tmp/sc-094-d2j3x07i",
+  "scope": "macOS arm64, fresh user directories on the existing M1 host; OS and Apple command-line tools were not reinstalled. CLI-local native terminal acceptance; no production changes."
+}

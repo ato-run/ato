@@ -1,6 +1,6 @@
 # 引き継ぎ: Capsule Hub M2 — SolidCraft 2D の実機検証（2026-11-17 更新）
 
-Status: Current（M1 実機 D1/D2・二回目 cache hit・staging 公開/Run 報告/PWA 表示まで完了。本番は未実施）
+Status: Current（公開 CLI 0.9.4-stg のクリーンインストールから M1 実機 D1/D2・二回目 cache hit まで完了。本番は未実施）
 パスは特記がなければ ato-run workspace root 基準。14:20 時点の旧手順は以下の現状で置き換える。
 親 Issue: ato-run/ato #1819（重複 Issue を作らない）
 実装契約: `docs/rfcs/draft/capsule-hub-m2-native.md`
@@ -63,6 +63,7 @@ Status: Current（M1 実機 D1/D2・二回目 cache hit・staging 公開/Run 報
 | D2 が上流 Developer ID を要求 | ユーザーの明示承認により D2 のみ `require-valid-or-local-override`。実行時にも `--allow-unsigned-native` を明示 | ato #1882 / #1883 |
 | 最終リンクで clang の一時ファイル作成失敗 | ビルド前に Run 専用 HOME/TMPDIR を作成。新たな host write grant は追加しない | ato #1884 / #1885 |
 | 再実行の成功だけで cache hit と表示 | 二回目の実行成果物・cache manifest の digest 一致、source tree と build profile が未作成であることを検査 | ato #1882 / #1883 |
+| staging installer が旧 CLI / 不在 nacelle を取得 | macOS arm64 の 0.9.4-stg prerelease と staging 専用の既定版固定、nacelle は明示 opt-in に変更 | ato #1888 / #1889、ato-pwa #1022 / #1023 |
 
 未コミットの `with_network(true)` 試行は採用しなかった。実測では socket 許可だけでも不足し、
 `/etc`・`/var` の symlink metadata と resolver config の read が必要だった。
@@ -73,6 +74,17 @@ Status: Current（M1 実機 D1/D2・二回目 cache hit・staging 公開/Run 報
 元の長い Cargo stderr は CLI の先頭 2,000 文字制限に隠れたため、fingerprint diagnostics から回収した。
 
 ## 4. 現在のコードと実行
+
+- 公開 CLI: [v0.9.4-stg](https://github.com/ato-run/ato/releases/tag/v0.9.4-stg)（macOS arm64、prerelease / latest=false）。
+  source は stg `6b16e9e3998c4f4477461aa372fb2d314cadc6e0`、release build / git_dirty=false。
+- 公開 installer: `https://stg-app.ato.run/install.sh`。PWA source `69316be2e92ea3fb77f1ce56338fad6fbadfa051`、
+  Worker `53d5fb21-9efa-4cbf-b3b3-22df151697f2`。staging の既定版だけ 0.9.4-stg に固定する。
+- 新規 HOME / ATO_HOME / Rust / Cargo / cache から install → D1 → D2 → D2 cache hit が成功。
+  生ログと元 receipt は workspace `.tmp/sc-094-d2j3x07i/`、全手順 exit 0、lease 解放済み。
+  詳細は `apps/ato/docs/ops/solidcraft-staging-094-acceptance-20261117.md`。
+- stable latest は v0.9.3 のまま。本番 installer の bytes 不変を確認。本番配備は行っていない。
+
+以下は先行したローカル開発 CLI の受け入れ履歴であり、上記公開版の代用ではない。
 
 - runtime code: dev `bdd62dace9b6c1c295ad3a3baa3563d18e239139`、stg `dc1a1356cb5cef89d12f84a925cca1b4f4e8e328`。
 - 作業 worktree: `apps/ato/.worktrees/m2-terminal`。
@@ -99,9 +111,23 @@ bundle と refs:
 
 ## 5. 再現コマンド
 
+公開版の入口（macOS arm64）:
+
+```sh
+curl -fsSL https://stg-app.ato.run/install.sh | sh -s -- --cli-only
+"$HOME/.local/bin/ato" version --json
+```
+
+実測ではこれを空のユーザーディレクトリへ導入し、API origin を `https://staging.api.ato.run` に固定、
+上記 bundle の digest 固定参照と各 Derivation を明示して実行した。
+元の全 argv・環境条件・結果は `apps/ato/docs/ops/evidence/solidcraft-staging-094-acceptance-20261117.json`。
+D2 には `--allow-native-source-build --allow-unsigned-native` が必要。D1 には署名 override を渡さない。
+
+repo 内サンプルからの回帰検証は既存スクリプトを使う（公開 bundle を使う検証とは区別する）:
+
 ```sh
 cd ~/Ekoh/projects/ato-run/apps/ato/.worktrees/m2-terminal
-ATO=/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.worktrees/m2-streaming/target/debug/ato \
+ATO="$HOME/.local/bin/ato" \
   scripts/acceptance/verify-solidcraft-native.sh
 ```
 
@@ -110,6 +136,19 @@ pack → list → D1 → D2（source build と local signature override を明�
 D1 には署名 override を渡さない。全成功時に三つの receipt と `cache-evidence.json` を保存する。
 
 ## 6. 受け入れ完了と次の境界
+
+公開 CLI 0.9.4-stg の受け入れ（17:04–17:56 JST）:
+
+- installer 32.308 秒、D1 142.355 秒、D2 初回 2,624.8 秒、D2 再実行 260.492 秒、全 exit 0。
+- 三つの receipt は同じ bundle / K、別 D、異なる attempt、全観測 satisfied / fully_satisfied=true。
+  D2 再実行は artifact / manifest の digest 一致と source/build profile 未作成で cache hit を確認。
+- CLI から通常の Run 報告が行われ、staging は **verified / successful_runs=6 / run_count=6**。
+- API は `fcb9b553-6768-4226-9580-9c5d2a0de5e9`、PWA は `53d5fb21-9efa-4cbf-b3b3-22df151697f2`。
+  検証前後で一致。process group 回収、lease 解放、production installer 不変を確認。
+- 詳細: `apps/ato/docs/ops/solidcraft-staging-094-acceptance-20261117.md`。
+  証跡: `apps/ato/docs/ops/evidence/solidcraft-staging-094-acceptance-20261117.json`。
+
+以下は先行するローカル CLI 受け入れ・初回 staging 公開時の記録:
 
 - 同一 bundle・K、別 D、三つの異なる attempt、全 observation の `satisfied` と
   `fully_satisfied: true` を確認。D2 の成果物は 191,193,936 bytes、artifact 上限は変更なし。
@@ -146,7 +185,7 @@ D1 には署名 override を渡さない。全成功時に三つの receipt と 
   課金エラーではなく、成功済みとも扱わない。
 - staging origin は `https://staging.api.ato.run`。credential は origin に対応するものだけを使い、値をログに出さない。
 - staging lease は `apps/ato-api/.tmp/hub-mvp/ato-api/scripts/staging-deploy-locked.mjs` で取得・解放する。
-  他者の lease を削除しない。配備や feature flag の変更は今回不要。
+  他者の lease を削除しない。公開 CLI 検証では PWA のみ staging 配備した。API / migration / feature flag は変更なし。
 - Node の Cloudflare 接続が特定の解決 IP で timeout した。今回だけの DNS preload を `.tmp/resolver-fix/`
   に置き、到達を確認した現在の DNS answer を使った。system DNS・exit node は変更していない。
 
@@ -159,4 +198,5 @@ D1 には署名 override を渡さない。全成功時に三つの receipt と 
 - staging 受け入れ: `apps/ato-api/docs/ops/capsule-hub-m2-large-publish-20261116.md`
 - staging PWA: `apps/ato-pwa/docs/ops/capsule-hub-m2-staging-deploy-20261117.md`
 - 受け入れサマリ: `apps/ato/docs/ops/capsule-hub-m2-acceptance-20261116.md`
+- 公開 CLI 受け入れ: `apps/ato/docs/ops/solidcraft-staging-094-acceptance-20261117.md`
 - 親 Issue: https://github.com/ato-run/ato/issues/1819
