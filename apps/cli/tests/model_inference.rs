@@ -89,7 +89,12 @@ fn the_installed_model_set_scores_a_state() {
         "dc7cdfe2ee4154fa7e30f5b51ca41bfa40174e68"
     );
     assert!(
-        (report["checkpoint"]["temperature"].as_f64().expect("temperature") - 2.3511).abs() < 0.001,
+        (report["checkpoint"]["temperature"]
+            .as_f64()
+            .expect("temperature")
+            - 2.3511)
+            .abs()
+            < 0.001,
         "the calibrated temperature comes from head.pt"
     );
 }
