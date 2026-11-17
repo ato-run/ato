@@ -519,12 +519,21 @@ enum GenerationVersion {
 impl JevGenerationProvider {
     /// Uses only the dedicated generation key, never a judge or decision key.
     /// The caller supplies the frozen policy's timeout (positive, at most 30s).
+    ///
+    /// ATO_GENERATION_JEV_BASE_URL points the same contract at another endpoint:
+    /// a user's own gateway, or a local model server that answers the System One
+    /// shape. The default stays the official API, so an unset environment never
+    /// changes where a search's source is sent.
     pub fn from_env(timeout: Duration) -> Result<Self> {
         let key = std::env::var("ATO_GENERATION_JEV_API_KEY")
             .context("ATO_GENERATION_JEV_API_KEY is not set")?;
         let model = std::env::var("ATO_GENERATION_JEV_MODEL")
             .unwrap_or_else(|_| DEFAULT_GENERATION_MODEL.to_owned());
-        Self::new(JEV_BASE_URL, &key, &model, timeout)
+        let base_url = std::env::var("ATO_GENERATION_JEV_BASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| JEV_BASE_URL.to_owned());
+        Self::new(&base_url, &key, &model, timeout)
     }
 
     /// Opt in to typed context using the same dedicated generation credentials.
