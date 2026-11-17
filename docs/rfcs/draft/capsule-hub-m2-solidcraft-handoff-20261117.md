@@ -74,7 +74,7 @@ Caused by: [6] Couldn't resolve host name (Could not resolve host: index.crates.
 - macOS の名前解決は mDNSResponder との **Unix socket**（`/var/run/mDNSResponder`）経由で、
   port スコープの grant ではこの socket 接続が許可されないため。
 
-### 未コミットの試行（worktree `apps/ato/.worktrees/m2-terminal`、branch `fix/build-egress-and-resolver`）
+### 未コミットの試行（worktree `apps/ato/.worktrees/m2-terminal`、`git status` に残っている差分）
 `git status` の差分:
 - `lib/sandbox/src/macos.rs`: remote grant があるとき resolver socket の literal 許可と `/private/var/run` の metadata 許可を追加
 - `apps/portable-application/src/native_desktop/source_build.rs`: build policy を `.with_network(true)` に変更
