@@ -5,6 +5,8 @@ extensions/providers/nacelle/src/manager/enforcement_guard.rs
 extensions/providers/nacelle/src/manager/startup_gc.rs
 extensions/providers/nacelle/src/manager/supervisor_mode.rs
 extensions/providers/nacelle/src/tsnet.rs
+formal/lean-bugcheck/repro/budget_wrap.rs
+formal/lean-bugcheck/repro/path_widening.rs
 scripts/acceptance/coverage/adaptive-100-preflight.rs
 scripts/acceptance/coverage/adaptive-100-requester.rs
 scripts/acceptance/coverage/exploration-gate-plan.rs

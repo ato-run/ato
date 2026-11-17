@@ -1,6 +1,24 @@
-# ato-run/ato Lean バグチェック報告（対象コミット 8b058e5 / 2026-11-17）
+# ato-run/ato Lean バグチェック報告（2026-11-17）
 
-再実行: `./run.sh`（未使用コード走査も含めるなら `RUN_CHECK=1 ./run.sh`）。同種の検証を続ける手順は `.claude/skills/lean-bugcheck/SKILL.md`。
+## 引き継ぎ後の修正
+
+対象は `feat/lean-bugcheck` @ `bbeea6f` を起点とする worktree。下の5件を修正し、Lean 4.36.0 で修正版のモデルを検査した。`run.sh` は失敗時に非ゼロ終了し、ソースを書き換えずに回帰検証する。Lean は `$LEAN` または `~/.elan/bin/lean` から指定する。
+
+| # | 状態と検証 |
+|---|---|
+| 1 | 修正済み。存在しない許可ルートの残りのパスを保持し、`..` を含むルートを拒否。実コードの回帰と8件の path 単体テストを確認。シンボリックリンク変更の競合は未検証。 |
+| 2 | 修正済み。有効期限内のグラントを保持し、期限切れを回収。観測した時刻の最大値を保持し、時計が戻っても期限切れグラントを再受理しない。期限内の4096件が埋まった場合は安全側で拒否し続ける。再利用防止は従来どおりゲートウェイのプロセス寿命内に限る。 |
+| 3 | 修正済み。サブプロトコルの拒否をグラント消費前に行う。実コードの回帰テスト済み。 |
+| 4 | 修正済み。加算を飽和させ、オーバーフローを明示的に拒否。release 相当の再現と netd テスト済み。並行実行の厳密な線形化は Lean では未モデル化。 |
+| 5 | 修正済み。空文字と無効な識別子を別のエラーとして返す。Static Web のテスト済み。 |
+
+検証: Lean カーネル検査、`formal/lean-bugcheck/run.sh`、netd ライブラリ129件、Static Web ライブラリ31件、nacelle path 8件。netd のローカルソケットを使うテストはサンドボックス外で実行した。ストレージ容量の数値比較 `StorageCapacity.admission_has_capacity` と境界値も追加で証明したが、容量の観測後に空き領域が変化しないことや予約は保証しない。
+
+`cargo check --workspace --all-targets` と未使用コード走査を更新した。推定は未参照62件、テストのみ104件、未使用の可能性がある依存24件で、コンパイラ警告は0件。以下の説明と数値は元の走査時点の記録であり、現在の一覧は `dead-code/` を参照する。いずれも削除の根拠にはならない。全機能をモデル化しておらず、全バグの解消を意味しない。
+
+## 引き継ぎ時の調査記録（対象コミット 8b058e5）
+
+再実行: リポジトリ直下で `formal/lean-bugcheck/run.sh`（未使用コード走査も含めるなら `RUN_CHECK=1 formal/lean-bugcheck/run.sh`）。同種の検証を続ける手順は `.claude/skills/lean-bugcheck/SKILL.md`。
 対象ファイルは `dev` @ 4911151 でも未変更であることを確認済み。
 （Lean カーネル検査 → Rust 再現 → 未使用コード走査を一括実行）
 
@@ -9,7 +27,7 @@
 - 「成り立つべき性質」が証明できなかった箇所は反例を定理（`*_BUG`）として固定し、実コードで再現。
 - 全体は Rust 約 40 万行。今回見たのはその一部で、ここに無い箇所は未検証。
 
-## 見つかった問題
+## 引き継ぎ時に見つかった問題（修正前の状態）
 | # | 場所 | 内容 | Lean | 実コード再現 | 影響 |
 |---|------|------|------|------|------|
 | 1 | `extensions/providers/nacelle/src/system/path.rs` `validate_path` | 許可パスが**存在しない**と最も近い既存の祖先に丸められ、許可範囲が広がる。`/x/models` が無ければ `/` 全体が許可される | `PathAllow.widening_BUG` / 修正案 `fixed_sound` | 再現（`/etc/passwd` と `/root/.ssh/id_rsa` が通過） | 関数自体は現状どこからも呼ばれておらず nacelle もワークスペース外。潜在バグ |
@@ -23,7 +41,7 @@
 - グラントの再利用は必ず拒否（`Grants.replay_rejected`）。
 - capsulehub レート制限: バケット内カウントは上限を超えない（`RateLimit.count_le_limit`）。ただし固定窓なので窓の境界をまたぐと短時間に上限の 2 倍が通る（`boundary_burst`、設計上の性質）。
 
-## 未使用コード
+## 引き継ぎ時の未使用コード候補
 `cargo check --workspace --all-targets` は警告 0 件（コンパイラが検出できる未使用は無し。ただし `#[allow(dead_code)]` / `allow(unused*)` が 50 箇所ある）。以下は `dead-code/scan.py` による識別子ベースの推定で、マクロ経由・外部公開 API は誤検出しうる。
 
 1. **コンパイルされないファイル（確認済み）** — `mod` 宣言が無い nacelle の 7 ファイル: `launcher/dev.rs`, `launcher/resolver.rs`, `manager/ebpf_enforcer.rs`, `manager/enforcement_guard.rs`, `manager/startup_gc.rs`, `manager/supervisor_mode.rs`, `tsnet.rs`。
@@ -36,5 +54,6 @@
 8. **その他** — リポジトリ直下にコミットされた `.tmp-consolidated-pr.md` / `.tmp-d-pr.md` / `.tmp-e-pr.md`。`scripts/acceptance/**` の単体 `.rs` 7 本は Cargo 管理外（スクリプトから直接使うものなら問題なし、未確認）。
 
 ## 限界
+- 修正後の再利用防止モデルは期限と既出フラグの判定を抽象化しており、HashMap の実装、同時実行、プロセス再起動、発行者の jti 一意性は証明していない。
 - モデルは手書きで、実コードとの対応は読解に依存（シンボリックリンク・並行実行は捨象）。#1 #2 #4 は実コードで再現済み、#3 #5 は読解のみ。
 - 仕様の強さを測る mutation testing は未実施（バグ版 / 修正版の対のみ）。

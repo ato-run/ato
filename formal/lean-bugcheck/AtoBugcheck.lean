@@ -1,8 +1,7 @@
 /-
   ato-run/ato @ 8b058e5 — Lean 4 models of small security-critical decision logic.
   Core Lean only (no Mathlib).  Check with:  lean AtoBugcheck.lean
-  Convention: `*_BUG` theorems are kernel-checked counterexamples to the property
-  the code is documented/expected to have; other theorems are properties that hold.
+  Theorems describe the modeled decision logic and its intended properties.
 -/
 
 /-! ## 1. extensions/providers/nacelle/src/system/path.rs :: validate_path -/
@@ -26,12 +25,6 @@ def validate (ex : Path → Bool) (allowed : List Path) (p : Path) : Bool :=
 /-- Intended property: accepted paths lie under an allowed entry. -/
 def spec (allowed : List Path) (p : Path) : Bool := allowed.any (fun a => a.isPrefixOf p)
 
-/-- BUG: only `/` exists, allowed = [/7/8] (does not exist), request = /1/2.
-    The allowed entry silently widens to `/`, so everything is accepted. -/
-theorem widening_BUG :
-    ∃ ex allowed p, validate ex allowed p = true ∧ spec allowed p = false :=
-  ⟨fun p => p == [], [[7, 8]], [1, 2], by decide⟩
-
 /-- Fix: keep the non-existing remainder (as the code already does for the
     *candidate* path).  Then the whitelisted root is the entry itself. -/
 def fixedRoot (ex : Path → Bool) (a : Path) : Path :=
@@ -45,32 +38,28 @@ theorem fixed_sound (ex : Path → Bool) (allowed : List Path) (p : Path) :
   simp [spec, fixedRoot_eq]
 end PathAllow
 
-/-! ## 2. services/netd/src/surface_websocket_auth.rs :: authorize_upgrade (grant replay set) -/
+/-! ## 2. services/netd/src/surface_websocket_auth.rs :: grant replay cache -/
 namespace Grants
-/-- `consumed` set with `MAX_CONSUMED_GRANTS = cap`; entries are never removed. -/
-def step (cap : Nat) (s : List Nat) (g : Nat) : List Nat × Bool :=
-  if s.contains g then (s, false)
-  else if cap ≤ s.length then (s, false)
-  else (g :: s, true)
+/-- The cache uses a nondecreasing high-water time and retains unexpired grants. -/
+def cutoff (highWater now : Nat) : Nat := max highWater now
 
-theorem replay_rejected (cap : Nat) (s : List Nat) (g : Nat) (h : g ∈ s) :
-    (step cap s g).2 = false := by
-  simp [step, h]
+def accepted (highWater now expiry : Nat) (seen : Bool) : Bool :=
+  decide (cutoff highWater now < expiry) && !seen
 
-/-- Once the set is full, *every* grant — including fresh, validly signed ones — is refused. -/
-theorem full_rejects (cap : Nat) (s : List Nat) (g : Nat) (h : cap ≤ s.length) :
-    step cap s g = (s, false) := by
-  unfold step; split
-  · rfl
-  · simp [h]
+theorem expired_rejected (highWater now expiry : Nat)
+    (h : expiry ≤ cutoff highWater now) : accepted highWater now expiry seen = false := by
+  simp [accepted, Nat.not_lt_of_ge h]
 
-/-- BUG (liveness): the full state is absorbing.  After `cap` successful upgrades the
-    gateway rejects all later upgrades for the rest of its lifetime. -/
-theorem lockout_forever_BUG (cap : Nat) (s : List Nat) (h : cap ≤ s.length) (gs : List Nat) :
-    gs.foldl (fun st g => (step cap st g).1) s = s := by
-  induction gs with
-  | nil => rfl
-  | cons g gs ih => simp [List.foldl, full_rejects cap s g h, ih]
+theorem replay_rejected (highWater now expiry : Nat) :
+    accepted highWater now expiry true = false := by
+  simp [accepted]
+
+theorem rollback_does_not_revive (highWater now expiry : Nat) (h : expiry ≤ highWater) :
+    accepted highWater now expiry false = false := by
+  apply expired_rejected
+  simp [cutoff] at *; omega
+
+theorem fresh_after_expiry : accepted 20 20 30 false = true := by decide
 end Grants
 
 /-! ## 3. services/netd/src/egress/policy.rs :: TransferBudget::consume -/
@@ -96,17 +85,18 @@ theorem consume_sound (limit : Nat) (b : B) (n : Nat) (h : (consume limit b n).2
     b.used + n ≤ limit := by
   simp [consume] at h; omega
 
-/-- What the release build computes: `fetch_add` wraps and `+ bytes` wraps (u64). -/
+/-- Saturating counter plus explicit overflow rejection. -/
 def consumeU64 (limit : Nat) (b : B) (n : Nat) : B × Bool :=
-  let total := (b.used + n) % 18446744073709551616
-  let exh := b.exh || decide (limit < total)
+  let sum := b.used + n
+  let overflow := decide (18446744073709551615 < sum)
+  let total := min sum 18446744073709551615
+  let exh := b.exh || overflow || decide (limit < total)
   (⟨total, exh⟩, !exh)
 
-/-- BUG (needs a ≥2^64-ish byte count, so theoretical for the proxy's 16 KiB reads;
-    in debug builds the same input panics on `+ bytes`). -/
-theorem wrap_BUG :
-    ∃ limit b n, (consumeU64 limit b n).2 = true ∧ limit < b.used + n :=
-  ⟨10, ⟨5, false⟩, 18446744073709551613, by decide⟩
+theorem consumeU64_sound (limit : Nat) (b : B) (n : Nat)
+    (h : (consumeU64 limit b n).2 = true) : b.used + n ≤ limit := by
+  simp [consumeU64] at h
+  omega
 end Budget
 
 /-! ## 4. services/netd/src/egress/{gate.rs,policy.rs} :: DENIED_RANGES / check_addr -/
@@ -201,3 +191,17 @@ theorem boundary_burst :
     let r2 := allow 1 60 r1.1 60
     r1.2 = true ∧ r2.2 = true := by decide
 end RateLimit
+
+/-! ## 7. lib/runtime-attempt/src/launch/storage_capacity.rs :: check_capacity -/
+namespace StorageCapacity
+/-- This models only the comparison, not filesystem observation or reservation. -/
+def admitted (available required : Nat) : Bool := !(available < required)
+
+theorem admission_has_capacity (available required : Nat)
+    (h : admitted available required = true) : required ≤ available := by
+  simp [admitted] at h
+  omega
+
+theorem equal_capacity_admitted (n : Nat) : admitted n n = true := by
+  simp [admitted]
+end StorageCapacity

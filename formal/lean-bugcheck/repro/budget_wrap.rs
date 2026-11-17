@@ -1,4 +1,4 @@
-// rustc -O budget_wrap.rs && ./budget_wrap   (debug build panics on `+ bytes` instead)
+// Regression for release-mode overflow; the real implementation is included by run.sh.
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 include!(concat!(env!("OUT"), "/transfer_budget.rs"));
 fn main() {

@@ -1,7 +1,6 @@
 apps/cli/src/auth_device.rs:265	fn	load_credential
 apps/connected-realization-worker/src/lib.rs:1338	fn	capture_capable_firecracker_backend
 apps/formation-worker/src/job.rs:196	fn	run_job
-apps/formation-worker/src/lifecycle.rs:101	fn	is_terminal
 apps/formation-worker/src/runtime_network/proposal.rs:232	fn	prepare_exploration_submission
 apps/portable-application/src/source_oci.rs:746	fn	image_facts
 apps/portable-application/src/source_oci.rs:863	fn	repack_saved_archive
@@ -35,8 +34,8 @@ lib/ato-host-facts/src/docker.rs:117	fn	is_runnable
 lib/ato-host-facts/src/docker.rs:274	fn	platform_platform_status
 lib/ato-host-facts/src/reason.rs:206	fn	is_advertised
 lib/computation/src/lib.rs:281	struct	ComputationPoint
-lib/formation/src/authoring.rs:903	fn	bind_derivation_against_contract
-lib/formation/src/native_desktop.rs:47	const	NATIVE_RUNTIME_PREFIX
+lib/formation/src/authoring.rs:912	fn	bind_derivation_against_contract
+lib/formation/src/capsule_toml_v2.rs:37	const	NATIVE_TERMINAL_PORT_PROTOCOL
 lib/formation/src/proposal/source_context.rs:5	const	PROPOSAL_REQUEST_V2_SCHEMA
 lib/host-control/src/supervisor.rs:95	fn	shutdown_gracefully
 lib/ipc/src/binding_control.rs:15	const	BINDING_CONTROL_SCHEMA_VERSION

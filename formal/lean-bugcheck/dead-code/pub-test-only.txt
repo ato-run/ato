@@ -48,8 +48,7 @@ extensions/providers/nacelle/src/manager/supervisor.rs:579	fn	stop_process
 extensions/providers/nacelle/src/manager/supervisor.rs:610	fn	shutdown_and_wait
 extensions/providers/nacelle/src/manager/supervisor_mode.rs:49	fn	build_supervisor_mode_plan
 extensions/providers/nacelle/src/manager/supervisor_mode.rs:71	fn	run_supervisor_mode
-extensions/providers/nacelle/src/system/path.rs:15	fn	validate_path
-extensions/providers/nacelle/src/system/path.rs:99	fn	parse_allowed_host_paths_csv
+extensions/providers/nacelle/src/system/path.rs:91	fn	parse_allowed_host_paths_csv
 extensions/providers/nacelle/src/system/vram.rs:22	fn	scrub_gpu_indices
 extensions/providers/nacelle/src/workspace_provider.rs:153	fn	bind_materialized_source
 extensions/semantics/browser/src/lib.rs:81	type	BrowserResidualV1
@@ -60,11 +59,11 @@ lib/compose/src/validate.rs:98	fn	export_visibility
 lib/formation/src/decision.rs:292	fn	is_fallback
 lib/formation/src/intent.rs:384	fn	compile_intent_for_preset
 lib/formation/src/intent.rs:1955	fn	compile_build_plan
-lib/formation/src/native_desktop.rs:62	const	MAX_NATIVE_ARTIFACT_BYTES
-lib/formation/src/native_desktop.rs:270	fn	from_step
+lib/formation/src/native_desktop.rs:115	const	NATIVE_BUILD_EGRESS_HOSTS
+lib/formation/src/native_desktop.rs:127	const	MAX_NATIVE_ARTIFACT_BYTES
+lib/formation/src/native_desktop.rs:668	fn	from_step
 lib/formation/src/scenario.rs:319	fn	parse_json
 lib/formation/src/source.rs:921	fn	measure_source_tree
-lib/formation/src/verify.rs:631	fn	from_attempt
 lib/host-control/src/native.rs:313	fn	with_path_lookup
 lib/host-control/src/supervisor.rs:54	fn	supervised_count
 lib/ipc/src/desktop_control.rs:14	struct	DesktopRunInspectRequest
@@ -96,7 +95,7 @@ lib/runtime-attempt/src/static_lane.rs:257	fn	needs_build
 lib/runtime-attempt/src/variables.rs:66	fn	scan_artifact
 services/coordinator/src/lib.rs:357	fn	with_limits
 services/coordinator/src/lib.rs:364	fn	with_resource_limits
-services/netd/src/egress/policy.rs:98	fn	with_hostname_deny
+services/netd/src/egress/policy.rs:106	fn	with_hostname_deny
 services/netd/src/net/client.rs:133	fn	register_ingress
 services/netd/src/net/client.rs:154	fn	deregister_ingress
 services/netd/src/pixel_gateway.rs:172	fn	start_text_paste_pixel_gateway

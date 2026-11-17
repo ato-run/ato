@@ -21,7 +21,7 @@ Everything lives in `formal/lean-bugcheck/`:
 command -v lean || curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain stable
 ```
 
-`run.sh` uses `$LEAN` or `~/.elan/bin/lean`. If the pinned Rust toolchain cannot be downloaded, run with `RUSTUP_TOOLCHAIN=stable`.
+`run.sh` uses `$LEAN` or `~/.elan/bin/lean`, exits on a failed check, and uses a temporary directory under the worktree `.tmp/`. If the pinned Rust toolchain cannot be downloaded, run with `RUSTUP_TOOLCHAIN=stable`.
 
 ## 1. Re-verify the existing results first (cheap)
 
@@ -30,8 +30,8 @@ formal/lean-bugcheck/run.sh                 # ~1 min
 RUN_CHECK=1 formal/lean-bugcheck/run.sh     # + cargo check + dead-code scan (slow, run in background)
 ```
 
-Each repro prints "bug not reproduced" and fails if the bug has been fixed. When that happens, flip the
-`*_BUG` theorem into a positive property for the fixed code and mark the row fixed in `REPORT.md`.
+Existing repro programs now assert the fixed behavior. If a regression reappears they fail.
+When fixing another finding, replace its `*_BUG` theorem with a positive property and update `REPORT.md`.
 
 ## 2. Pick targets — minimise tokens, plan before reading
 
@@ -77,9 +77,8 @@ A Lean counterexample is only a lead — the model may be unfaithful. Reproduce 
 - Self-contained module: `#[path = "../../../<file>.rs"] mod m;` in `repro/<name>.rs`, `fn main()` that
   asserts the bad behaviour (see `path_widening.rs`).
 - Extractable item: copy it with `awk` into `$OUT` and `include!` it (see `budget_wrap.rs`).
-- Needs crate internals: append a temporary `#[test]` to the module's test block, run
-  `cargo test -p <crate> --lib <name>`, then restore the file (see the netd step in `run.sh`).
-  Never leave the source modified — `run.sh` verifies with `git diff --quiet`.
+- Needs crate internals: add a permanent regression test in the owning module and run
+  `cargo test -p <crate> --lib <name>`. Do not mutate source temporarily inside `run.sh`.
 
 Add the new step to `run.sh`.
 
