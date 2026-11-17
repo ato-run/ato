@@ -5,6 +5,7 @@
 //! The payload lives under ATO_HOME/models/<set>/; nothing is written into a
 //! Capsule, an Instance or the repository. Inference itself is a separate
 //! runtime concern and never runs from this module.
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -46,6 +47,8 @@ pub enum ModelCommands {
     Status(StatusArgs),
     /// Delete the locally installed assets of a named Model Set.
     Remove(RemoveArgs),
+    /// Score one state against typed questions with the locally installed Model Set.
+    Score(ScoreArgs),
 }
 
 #[derive(Args)]
@@ -85,6 +88,25 @@ pub struct RemoveArgs {
     /// Override ATO_HOME.
     #[arg(long)]
     pub home: Option<PathBuf>,
+    /// Print the machine-readable report only.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args)]
+pub struct ScoreArgs {
+    /// Model Set name.
+    #[arg(default_value = "kev-0.8b")]
+    pub model: String,
+    /// JSON request: {"state": <text|json>, "questions": {<id>: <question>}}. "-" reads stdin.
+    #[arg(long)]
+    pub request: String,
+    /// Override ATO_HOME.
+    #[arg(long)]
+    pub home: Option<PathBuf>,
+    /// Interpreter that has the Kev runtime installed. Defaults to ATO_KEV_PYTHON, then python3.
+    #[arg(long)]
+    pub python: Option<PathBuf>,
     /// Print the machine-readable report only.
     #[arg(long)]
     pub json: bool,
@@ -284,7 +306,201 @@ pub fn execute(command: ModelCommands) -> Result<()> {
         ModelCommands::Install(args) => install(&args),
         ModelCommands::Status(args) => status(&args),
         ModelCommands::Remove(args) => remove(&args),
+        ModelCommands::Score(args) => score(&args),
     }
+}
+
+/// The runner that owns the forward pass. It is embedded so the CLI never depends
+/// on a checkout of the reference runtime, and it is written next to the payload
+/// so a run is reproducible from the installed Model Set alone.
+const KEV_RUNNER: &str = include_str!("../assets/kev_runner.py");
+const SCORE_SCHEMA: &str = "ato.model-score/1";
+
+fn score(args: &ScoreArgs) -> Result<()> {
+    let report = score_request(args)?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "{} on {} ({} ms, load {} s)",
+            report.model,
+            report.runtime.backend,
+            report.runtime.inference_ms,
+            report.runtime.load_seconds
+        );
+        for (id, answer) in &report.answers {
+            println!("  {id}: {}", serde_json::to_string(answer)?);
+        }
+    }
+    Ok(())
+}
+
+fn score_request(args: &ScoreArgs) -> Result<ScoreReport> {
+    // Refuse before starting an interpreter: an incomplete Model Set is a
+    // download problem, not an inference problem.
+    let status = status_report(&args.model, args.home.clone(), false)?;
+    ensure!(
+        status.installed,
+        "model_set_incomplete: {} is missing {} of {} assets; run: ato model install {}",
+        args.model,
+        status.assets.iter().filter(|asset| !asset.present).count(),
+        status.assets.len(),
+        args.model
+    );
+    let request = read_request(&args.request)?;
+    let root = PathBuf::from(&status.root);
+    let runner = root.join("kev_runner.py");
+    fs::write(&runner, KEV_RUNNER).with_context(|| format!("write {}", runner.display()))?;
+    let python = args
+        .python
+        .clone()
+        .or_else(|| std::env::var_os("ATO_KEV_PYTHON").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("python3"));
+    let payload = serde_json::json!({
+        "state": request.state,
+        "questions": request.questions,
+        "model_root": status.root,
+    });
+    let value = invoke_runner(&python, &runner, &payload)?;
+    let answers: BTreeMap<String, serde_json::Value> =
+        serde_json::from_value(value.get("answers").cloned().unwrap_or_default())
+            .context("runner answers are not an object")?;
+    let raw: Vec<Vec<f64>> = serde_json::from_value(value.get("raw").cloned().unwrap_or_default())
+        .context("runner probabilities are not a matrix")?;
+    let runtime: RuntimeReport =
+        serde_json::from_value(value.get("runtime").cloned().unwrap_or_default())
+            .context("runner runtime block is malformed")?;
+    let checkpoint: CheckpointReport =
+        serde_json::from_value(value.get("checkpoint").cloned().unwrap_or_default())
+            .context("runner checkpoint block is malformed")?;
+    Ok(ScoreReport {
+        schema: SCORE_SCHEMA,
+        model: args.model.clone(),
+        root: status.root,
+        answers,
+        raw,
+        runtime,
+        checkpoint,
+    })
+}
+
+/// Run the embedded runner and return its JSON answer.
+///
+/// The runner is a separate process on purpose: a model crash, an out-of-memory
+/// kill or a missing runtime must not take the CLI down with it, and the CLI must
+/// never link a Python interpreter.
+fn invoke_runner(
+    python: &Path,
+    runner: &Path,
+    payload: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let mut child = std::process::Command::new(python)
+        .arg(runner)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("start {}", python.display()))?;
+    child
+        .stdin
+        .take()
+        .context("runner stdin is unavailable")?
+        .write_all(serde_json::to_string(payload)?.as_bytes())?;
+    let output = child.wait_with_output().context("wait for the runner")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).with_context(|| {
+        format!(
+            "model_runtime_failed: the runner did not answer with JSON (exit {:?})\nstdout: {}\nstderr: {}",
+            output.status.code(),
+            stdout.trim(),
+            stderr.trim()
+        )
+    })?;
+    if let Some(error) = value.get("error") {
+        bail!(
+            "{}: {}",
+            error
+                .get("code")
+                .and_then(|code| code.as_str())
+                .unwrap_or("model_runtime_failed"),
+            error
+                .get("message")
+                .and_then(|message| message.as_str())
+                .unwrap_or("the runner reported an error")
+        );
+    }
+    Ok(value)
+}
+
+#[derive(Debug)]
+struct ScoreRequest {
+    state: serde_json::Value,
+    questions: serde_json::Value,
+}
+
+fn read_request(request: &str) -> Result<ScoreRequest> {
+    let text = if request == "-" {
+        let mut buffer = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buffer)
+            .context("read the request from stdin")?;
+        buffer
+    } else {
+        request.to_owned()
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(&text).context("the request is not valid JSON")?;
+    let state = value
+        .get("state")
+        .cloned()
+        .context("the request needs a state")?;
+    let questions = value
+        .get("questions")
+        .cloned()
+        .context("the request needs questions")?;
+    ensure!(
+        questions
+            .as_object()
+            .map(|map| !map.is_empty())
+            .unwrap_or(false),
+        "the request needs at least one question"
+    );
+    Ok(ScoreRequest { state, questions })
+}
+
+#[derive(Serialize, serde::Deserialize)]
+pub struct RuntimeReport {
+    pub backend: String,
+    pub device: String,
+    #[serde(default)]
+    pub mlx: Option<String>,
+    #[serde(default)]
+    pub mlx_lm: Option<String>,
+    pub python: String,
+    pub load_seconds: f64,
+    pub inference_ms: f64,
+}
+
+#[derive(Serialize, serde::Deserialize)]
+pub struct CheckpointReport {
+    pub weights: String,
+    pub base: String,
+    #[serde(default)]
+    pub base_revision: Option<String>,
+    pub head_dim: u64,
+    pub temperature: f64,
+}
+
+#[derive(Serialize)]
+pub struct ScoreReport {
+    pub schema: &'static str,
+    pub model: String,
+    pub root: String,
+    pub answers: BTreeMap<String, serde_json::Value>,
+    pub raw: Vec<Vec<f64>>,
+    pub runtime: RuntimeReport,
+    pub checkpoint: CheckpointReport,
 }
 
 fn status(args: &StatusArgs) -> Result<()> {
@@ -661,6 +877,100 @@ mod tests {
 
     /// The pinned table is the only thing standing between a user and unverified
     /// model bytes, so it is checked as data.
+    /// The runner protocol is the only contract between the CLI and the model, so
+    /// it is exercised with a stand-in interpreter: no model, no MLX, no network.
+    fn stub_runner(body: &str) -> (PathBuf, PathBuf) {
+        let root = temp_root();
+        let script = root.join("stub.py");
+        fs::write(&script, body).expect("write stub");
+        (root, script)
+    }
+
+    #[test]
+    fn a_runner_answer_is_parsed_into_the_score_report() {
+        let (root, script) = stub_runner(
+            "import json,sys\n\
+             request = json.load(sys.stdin)\n\
+             assert request['model_root'], 'the runner needs the verified root'\n\
+             json.dump({'answers': {'team': {'choice': 'billing'}}, 'raw': [[0.9, 0.1]],\n\
+                        'runtime': {'backend': 'mlx', 'device': 'mps', 'python': '3.12.4',\n\
+                                    'load_seconds': 1.5, 'inference_ms': 12.0},\n\
+                        'checkpoint': {'weights': 'lora', 'base': 'Qwen/Qwen3.5-0.8B-Base',\n\
+                                       'head_dim': 256, 'temperature': 2.35}}, sys.stdout)\n",
+        );
+        let value = invoke_runner(
+            Path::new("python3"),
+            &script,
+            &serde_json::json!({"state": "s", "questions": {"team": {}}, "model_root": "/m"}),
+        )
+        .expect("runner answer");
+        assert_eq!(value["answers"]["team"]["choice"], "billing");
+        assert_eq!(value["runtime"]["backend"], "mlx");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_runner_error_is_reported_with_its_own_code() {
+        let (root, script) = stub_runner(
+            "import json,sys\n\
+             json.dump({'error': {'code': 'model_set_incomplete', 'message': 'head.pt is missing'}}, sys.stdout)\n",
+        );
+        let error = invoke_runner(
+            Path::new("python3"),
+            &script,
+            &serde_json::json!({"state": "s", "questions": {}, "model_root": "/m"}),
+        )
+        .expect_err("a runner error must fail");
+        assert!(
+            error.to_string().contains("model_set_incomplete"),
+            "unexpected error: {error}"
+        );
+        assert!(error.to_string().contains("head.pt is missing"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_runner_that_prints_nothing_is_a_runtime_failure_not_a_silent_success() {
+        let (root, script) = stub_runner("import sys\nsys.stderr.write('boom')\nsys.exit(3)\n");
+        let error = invoke_runner(
+            Path::new("python3"),
+            &script,
+            &serde_json::json!({"state": "s", "questions": {}, "model_root": "/m"}),
+        )
+        .expect_err("a silent runner must fail");
+        assert!(
+            error.to_string().contains("model_runtime_failed"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.to_string().contains("boom"),
+            "stderr must be surfaced"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_request_without_questions_is_refused_before_the_model_starts() {
+        let error =
+            read_request("{\"state\": \"s\", \"questions\": {}}").expect_err("no questions");
+        assert!(error.to_string().contains("at least one question"));
+        let error = read_request("{\"questions\": {\"a\": {}}}").expect_err("no state");
+        assert!(error.to_string().contains("needs a state"));
+        let error = read_request("not json").expect_err("not json");
+        assert!(error.to_string().contains("not valid JSON"));
+        let request = read_request("{\"state\": \"s\", \"questions\": {\"a\": {}}}").expect("ok");
+        assert_eq!(request.state, serde_json::json!("s"));
+    }
+
+    #[test]
+    fn the_embedded_runner_is_the_shipped_script() {
+        assert!(KEV_RUNNER.contains("model_root"));
+        assert!(KEV_RUNNER.contains("Qwen/Qwen3.5-0.8B-Base"));
+        // The runner must never reach the network for a pinned payload.
+        assert!(!KEV_RUNNER.contains("snapshot_download"));
+        assert!(!KEV_RUNNER.contains("from_pretrained(\"Qwen"));
+    }
+
     #[test]
     fn the_pinned_asset_table_is_well_formed() {
         let (source, license, assets) = assets(KEV_SET).expect("kev manifest");
