@@ -236,6 +236,39 @@ error: ... /v1/runtime-network/satisfy/01M7NMRSN8HYEW7NRKKDHAK7GK: connection re
   3. ローカルLLM経路を実装する（本ホストには mlx-lm 0.31.3 と Kev ランタイムがある）
 - いずれも**権限・契約の判断**が必要で、エージェントが回避してはならない領域
 
+## 5. ローカル管理 UI の実測（受入条件5のUI側）— 2026-11-18
+
+初期リリースの管理UIは `ato ui`（loopback + PWA 再利用）と決定済み。PR #1876 のブランチで実測した。
+
+```
+$ ato ui --port 8301
+$ curl -sS http://127.0.0.1:8301/            → 200（起動 / 停止 / 開く / 登録解除 のボタンを含む）
+$ curl -sS http://127.0.0.1:8301/api/instances
+  instances: 1 | state: stopped
+
+$ curl -X POST http://127.0.0.1:8301/api/instances/<id>/start   → 200
+  state: running | url: http://127.0.0.1:64064
+$ curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:64064/   → 200（アプリが配信されている）
+
+$ curl -X POST http://127.0.0.1:8301/api/instances/<id>/stop    → 200
+  state: stopped | active_run: None
+```
+
+- ページは CLI の薄いフロントエンドで、一覧・起動・停止・開く・登録解除を CLI サブコマンド経由で実行する
+  （状態の権威は CLI のまま）
+- **UI から起動 → 実際にアプリが配信 → UI から停止 → 状態が戻る**までを実測
+
+### 併せて見つけた不具合と修正
+
+`ato doctor` の `process-identity` チェックが `ps` を直接叩いており、ランタイムが libproc に移った後も
+「durable Instance を起動できない」と誤って報告していた（実際は起動できる）。ランタイムと同じ
+`OwnedProcessIdentity::current()` を probe するよう修正（`af5c992d3`）。
+
+```
+修正前: process-identity fail  "ps is unavailable: Operation not permitted"
+修正後: process-identity pass  "pid 3275 started 1794950136.968636 (pgid 3127, boot …)"
+```
+
 ## 5. 未着手 / 別repo
 
 - Desktop UI（受入条件5の後半）: `ato-desktop` は別repo。ローカル管理UIは PR #1876 の `ato ui`（loopback + PWA再利用）で代替中
