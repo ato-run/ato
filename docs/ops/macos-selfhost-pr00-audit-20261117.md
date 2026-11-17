@@ -289,3 +289,28 @@ app inspect <id>             -> active_run: null
 - SHA256 検証・リリースの出所確認・アンインストールは受入条件として残す。
 - `xattr` による隔離属性の強制削除や Gatekeeper の無効化を手順に含めない。
 - 管理 UI は `ato ui`（既存 PWA 画面の再利用）を将来の入口として検討し、Tauri 配布を待たない。
+
+### 9.10 MAC-01: 配布物そのものの実行確認（2026-11-17）
+
+配布されている v0.9.3 arm64 の tarball（GitHub Release asset、sha256 `6f808611…b9079`）を展開し、workspace 内でそのバイナリを直接実行した。
+
+```
+$ .tmp/pr00/ato-cli-aarch64-apple-darwin/ato --version
+ato 0.9.3
+
+$ codesign -dv --verbose=2 <binary>
+Signature=adhoc (linker-signed), TeamIdentifier=not set
+$ spctl -a -vv <binary>
+rejected
+
+$ ato run samples/interop-static.capsule --no-open --verification-receipt r.json
+Bundle: sha256:95b837f4…bdd813 / K: sha256:b565e9d7…b741db
+fully_satisfied: true
+```
+
+含意:
+
+- **未公証（adhoc）の配布物でも、既製 Capsule の実行と Receipt 発行は成立する**。Homebrew Formula 配布に公証が必須でない、という方針を実測で裏付けた。
+- ただしこの検証は「展開済みファイルの実行」であり、**quarantine 属性が付いたダウンロード経路（ブラウザ経由）は対象外**。Homebrew は quarantine を付けないため Formula 経路は問題にならない。`xattr` 削除や Gatekeeper 無効化は行っていない。
+- `brew install` 自体はこの DSH サンドボックスでは実行できない（`~/.homebrew/trust.json.lock` への書き込み拒否）。手順は `macos-selfhost-install-check.md` に分離した。
+- `ato doctor` は本セッションの PR（#1876）で追加されたため、v0.9.3 には含まれない。次回リリースで配布物に載る。
