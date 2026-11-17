@@ -75,6 +75,9 @@ runtimes = { "ato.native.source_url" = "https://codeload.github.com/tangency-lab
 os = "macos"
 arch = "aarch64"
 entry = ".ato-build/target/release/solidcraft-cli"
+# A local build has no upstream Developer ID signature. The caller must also
+# pass --allow-unsigned-native; this declaration alone does not authorize it.
+signature = "require-valid-or-local-override"
 
 [derivation.native_surface]
 kind = "terminal"
