@@ -423,7 +423,7 @@ impl BuildExecutor for SandboxedCargo {
             )
             .allow_read_write(read_write)
             .with_network(false)
-            .allow_tcp_connect([BUILD_EGRESS_PORT]);
+            .allow_tcp_connect_remote([BUILD_EGRESS_PORT]);
         let profile = ato_sandbox::render_seatbelt_profile(&policy).map_err(|error| {
             BuildFailure::SandboxUnavailable(format!(
                 "the build profile could not be built: {error:#}"
