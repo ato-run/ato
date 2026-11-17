@@ -28,14 +28,21 @@
 //! The HTTP layer takes its base URL as an argument so tests can point it at a
 //! loopback stub instead of the real API.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::hub_transfer::{self, TransferError};
 use anyhow::{Context, Result, bail, ensure};
+use ato_formation::native_surface::NativePresentation;
 use ato_formation::verify::ContractVerificationReceipt;
-use ato_portable_application::bundle_sha256;
+use ato_objects::PortableApplicationBundle;
+use ato_portable_application::portable_run::execution_requirements_for;
+use ato_portable_application::{
+    PortableRealizationKind, ValidatedPortableApplication, bundle_sha256,
+};
 use base64::Engine;
 use clap::Args;
 use reqwest::StatusCode;
@@ -43,12 +50,24 @@ use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 
+mod info;
+pub use info::{DescribeArgs, describe};
+
 /// Reserved first-argument prefix for a Hub reference.
 pub const HUB_REF_PREFIX: &str = "capsules/";
 /// The tag a reference without a selector resolves.
 pub const DEFAULT_TAG: &str = "latest";
-/// The API's per-bundle bound (8 MiB, RFC 4.5). Checked before downloading.
+/// The API's Base64 JSON per-bundle bound (8 MiB, RFC 4.5/4.6). A larger
+/// bundle only travels through the official publisher's presigned lane, whose
+/// transfer never holds the whole bundle in memory.
 pub const MAX_BUNDLE_BYTES: u64 = 8 * 1024 * 1024;
+/// How many times the large lane reopens a staged upload after a recoverable
+/// refusal (410 expired, 409 size/digest conflict).
+const LARGE_UPLOAD_ATTEMPTS: usize = 3;
+/// The largest bundle the official publisher lane may carry (contract §3: the
+/// Ato-official ceiling). A Run refuses to store more than this, so a hostile
+/// or buggy resolve answer cannot fill the cache.
+pub const MAX_OFFICIAL_BUNDLE_BYTES: u64 = 1_000_000_000;
 
 pub const ERR_INVALID_REF: &str = "hub-invalid-ref";
 pub const ERR_INVALID_DIGEST: &str = "hub-invalid-digest";
@@ -63,12 +82,30 @@ pub const ERR_BUNDLE_TOO_LARGE: &str = "hub-bundle-too-large";
 pub const ERR_REDIRECT_REFUSED: &str = "hub-redirect-refused";
 pub const ERR_INVALID_BUNDLE: &str = "hub-invalid-bundle";
 pub const ERR_API_FAILED: &str = "hub-api-failed";
+pub const ERR_CAPABILITIES_UNREPRESENTABLE: &str = "hub-capabilities-unrepresentable";
+pub const ERR_CAPABILITY_UNAVAILABLE: &str = "hub-capability-unavailable";
 
 const HUB_CAPSULES_PATH: &str = "/v1/hub/capsules/";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const REPORT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_REDIRECTS: usize = 3;
+/// The Hub capability metadata bound (RFC §3): at most eight Derivation routes.
+pub const MAX_CAPABILITY_DERIVATIONS: usize = 8;
+/// The Hub capability metadata bound (RFC §3): at most eight surfaces per route.
+pub const MAX_CAPABILITY_SURFACES: usize = 8;
+/// The API's bound on the whole `metadata.capabilities` document.
+pub const MAX_CAPABILITY_DOCUMENT_BYTES: usize = 16 * 1024;
+/// The API's bound on a surface's declared logical path.
+pub const MAX_CAPABILITY_SURFACE_PATH_BYTES: usize = 2048;
+/// The API's bound on a surface label (UTF-16 code units, like the API).
+pub const MAX_CAPABILITY_SURFACE_ID_UTF16_UNITS: usize = 128;
+/// The API's bound on a logical Port token.
+pub const MAX_CAPABILITY_PORT_BYTES: usize = 128;
+/// The API's bound on an os/arch platform value.
+pub const MAX_CAPABILITY_PLATFORM_BYTES: usize = 64;
+/// `metadata.capabilities.source` for metadata derived from the bundle bytes.
+pub const CAPABILITIES_SOURCE_BUNDLE: &str = "bundle";
 
 /// One error whose first token is a stable machine-readable code.
 fn hub_error(code: &str, message: impl std::fmt::Display) -> anyhow::Error {
@@ -287,18 +324,320 @@ pub struct PublishResponse {
     pub created: Option<bool>,
 }
 
+/// The Hub capability metadata derived from a validated bundle (M2 §3).
+///
+/// This is evidence about the bundle bytes, never a publisher's declaration.
+/// The publisher's `--surface` and `--environment` values stay in the separate
+/// declared fields of [`PublishMetadata`] and never overwrite these facts.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HubCapabilities {
+    /// Always [`CAPABILITIES_SOURCE_BUNDLE`].
+    pub source: &'static str,
+    pub contract_ref: String,
+    pub derivations: Vec<HubDerivationCapability>,
+}
+
+/// One Derivation's execution capability, in the Hub's five-value vocabulary.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HubDerivationCapability {
+    pub derivation_ref: String,
+    /// `static_web`, `local_process`, `oci`, `native_terminal` or
+    /// `native_pixel`.
+    pub realization: &'static str,
+    /// The OCI platform the route's images are pinned to, when it declares
+    /// one.
+    pub platform: Option<String>,
+    /// The `os/arch` a native desktop artifact was built for, when declared.
+    pub native_platform: Option<String>,
+    pub requires: HubCapabilityRequires,
+    pub surfaces: Vec<HubCapabilitySurface>,
+}
+
+/// What the selected route needs from a host. No path, endpoint or runtime
+/// selection is part of it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HubCapabilityRequires {
+    pub container: bool,
+    pub state: bool,
+}
+
+/// One logical Surface as the Hub registry describes it.
+///
+/// `kind` is one of `http`, `static_web`, `native_terminal` or
+/// `native_pixel`; `path` is a declared logical path, never a host
+/// filesystem path.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HubCapabilitySurface {
+    pub id: String,
+    pub kind: &'static str,
+    pub port: String,
+    pub path: String,
+}
+
+/// Project only the declared facts of one validated route into Hub vocabulary.
+fn hub_capability_projection(
+    validated: &ValidatedPortableApplication,
+) -> (&'static str, &'static str) {
+    if let Some(native) = &validated.derivation.native_surface {
+        return match native.surface {
+            NativePresentation::Terminal { .. } => ("native_terminal", "native_terminal"),
+            NativePresentation::PixelStream { .. } => ("native_pixel", "native_pixel"),
+        };
+    }
+    match validated.realization {
+        PortableRealizationKind::StaticWeb => ("static_web", "static_web"),
+        PortableRealizationKind::LocalProcess | PortableRealizationKind::ProcessServiceGroup => {
+            ("local_process", "http")
+        }
+        PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup => {
+            ("oci", "http")
+        }
+        // `ato.native@1` is one desktop artifact: its presentation is the
+        // app's own window, and it declares no terminal/pixel adapter. The
+        // platform it was built for is carried by `native_platform`.
+        PortableRealizationKind::NativeDesktop => ("native_pixel", "native_pixel"),
+    }
+}
+
+/// Derive `metadata.capabilities` from every validated Derivation.
+///
+/// `validated` is the output of the same `validate_bundle_for_derivation` path
+/// that admits a local Run (`validate_formed_bundle_document` runs it for each
+/// declared D), so no publisher-supplied value enters this projection.
+/// Host-owned values (`ExecutionRequirements::bound_paths`, endpoints, PIDs and
+/// selected runtimes) are never serialized.
+pub fn derive_capabilities(
+    bundle: &PortableApplicationBundle,
+    validated: &[ValidatedPortableApplication],
+) -> Result<HubCapabilities> {
+    if validated.is_empty() {
+        bail!(hub_error(
+            ERR_CAPABILITIES_UNREPRESENTABLE,
+            "the bundle declares no derivation"
+        ));
+    }
+    ensure!(
+        validated.len() <= MAX_CAPABILITY_DERIVATIONS,
+        hub_error(
+            ERR_CAPABILITIES_UNREPRESENTABLE,
+            format!(
+                "the bundle declares {} derivations; Hub capability metadata carries at most {MAX_CAPABILITY_DERIVATIONS}",
+                validated.len()
+            )
+        )
+    );
+    ensure!(
+        validated.len() == bundle.index.derivations.len(),
+        hub_error(
+            ERR_CAPABILITIES_UNREPRESENTABLE,
+            format!(
+                "{} derivations were validated but the bundle index declares {}",
+                validated.len(),
+                bundle.index.derivations.len()
+            )
+        )
+    );
+    let mut contract_ref: Option<String> = None;
+    let mut derivations = Vec::with_capacity(validated.len());
+    // Emit in the bundle's canonical (sorted) Derivation order so the same
+    // bytes always produce the same metadata.
+    for declared in &bundle.index.derivations {
+        let route = validated
+            .iter()
+            .find(|route| route.derivation_ref.as_str() == declared)
+            .ok_or_else(|| {
+                hub_error(
+                    ERR_CAPABILITIES_UNREPRESENTABLE,
+                    format!("the bundle index declares `{declared}` but it was not validated"),
+                )
+            })?;
+        let canonical_contract_ref = route.contract_ref.to_string();
+        match &contract_ref {
+            Some(expected) if expected != &canonical_contract_ref => {
+                bail!(hub_error(
+                    ERR_CAPABILITIES_UNREPRESENTABLE,
+                    "validated derivations disagree on the ContractRef"
+                ))
+            }
+            _ => contract_ref = Some(canonical_contract_ref),
+        }
+        let requirements = execution_requirements_for(route, Path::new(""));
+        let (realization, surface_kind) = hub_capability_projection(route);
+        for (label, value) in [
+            ("platform", requirements.platform.as_deref()),
+            ("native_platform", requirements.native_platform.as_deref()),
+        ] {
+            if let Some(value) = value
+                && !is_capability_platform(value)
+            {
+                bail!(hub_error(
+                    ERR_CAPABILITIES_UNREPRESENTABLE,
+                    format!(
+                        "`{declared}` declares {label} `{value}`, which is not a lowercase os/arch"
+                    )
+                ));
+            }
+        }
+        let mut surfaces = Vec::with_capacity(route.application.surfaces.len());
+        for surface in &route.application.surfaces {
+            if !is_capability_surface_id(&surface.id) {
+                bail!(hub_error(
+                    ERR_CAPABILITIES_UNREPRESENTABLE,
+                    format!(
+                        "`{declared}` declares the surface label `{}`, which Hub metadata cannot carry",
+                        surface.id
+                    )
+                ));
+            }
+            if !is_capability_port_token(&surface.port) {
+                bail!(hub_error(
+                    ERR_CAPABILITIES_UNREPRESENTABLE,
+                    format!(
+                        "`{declared}` declares the surface port `{}`, which Hub metadata cannot carry",
+                        surface.port
+                    )
+                ));
+            }
+            if !is_capability_surface_path(&surface.path) {
+                bail!(hub_error(
+                    ERR_CAPABILITIES_UNREPRESENTABLE,
+                    format!(
+                        "`{declared}` declares the surface path `{}`, which Hub metadata cannot carry",
+                        surface.path
+                    )
+                ));
+            }
+            surfaces.push(HubCapabilitySurface {
+                id: surface.id.clone(),
+                kind: surface_kind,
+                port: surface.port.clone(),
+                path: surface.path.clone(),
+            });
+        }
+        if surfaces.is_empty() {
+            bail!(hub_error(
+                ERR_CAPABILITIES_UNREPRESENTABLE,
+                format!("`{declared}` declares no application surface")
+            ));
+        }
+        ensure!(
+            surfaces.len() <= MAX_CAPABILITY_SURFACES,
+            hub_error(
+                ERR_CAPABILITIES_UNREPRESENTABLE,
+                format!(
+                    "`{declared}` declares {} surfaces; Hub capability metadata carries at most {MAX_CAPABILITY_SURFACES}",
+                    surfaces.len()
+                )
+            )
+        );
+        derivations.push(HubDerivationCapability {
+            derivation_ref: declared.clone(),
+            realization,
+            platform: requirements.platform,
+            native_platform: requirements.native_platform,
+            requires: HubCapabilityRequires {
+                container: requirements.needs_container,
+                state: requirements.needs_state,
+            },
+            surfaces,
+        });
+    }
+    let capabilities = HubCapabilities {
+        source: CAPABILITIES_SOURCE_BUNDLE,
+        contract_ref: contract_ref.expect("a non-empty validated route list"),
+        derivations,
+    };
+    // The API rejects a document over its bound, so fail here with the reason
+    // rather than after uploading the bundle.
+    let encoded = serde_json::to_vec(&capabilities).map_err(|error| {
+        hub_error(
+            ERR_CAPABILITIES_UNREPRESENTABLE,
+            format!("the derived Hub capabilities cannot be encoded: {error}"),
+        )
+    })?;
+    ensure!(
+        encoded.len() <= MAX_CAPABILITY_DOCUMENT_BYTES,
+        hub_error(
+            ERR_CAPABILITIES_UNREPRESENTABLE,
+            format!(
+                "the derived capabilities are {} bytes; Hub metadata carries at most {MAX_CAPABILITY_DOCUMENT_BYTES}",
+                encoded.len()
+            )
+        )
+    );
+    Ok(capabilities)
+}
+
+/// A control character the API refuses: C0 controls except tab and newline,
+/// plus DEL. Mirrors the API's metadata rule exactly.
+fn is_capability_forbidden_control(character: char) -> bool {
+    character.is_control() && !matches!(character, '\t' | '\n')
+}
+
+/// A surface label: 1–128 UTF-16 code units, without refused controls.
+///
+/// The bundle validator does not constrain an Application surface's label
+/// shape, and the API accepts it as a label rather than a token, so only the
+/// API's code-unit bound and control rule apply.
+fn is_capability_surface_id(value: &str) -> bool {
+    let units = value.encode_utf16().count();
+    (1..=MAX_CAPABILITY_SURFACE_ID_UTF16_UNITS).contains(&units)
+        && !value.chars().any(is_capability_forbidden_control)
+}
+
+/// `[A-Za-z0-9._:-]{1,128}`: the API's logical Port token shape and bound.
+fn is_capability_port_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_CAPABILITY_PORT_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
+/// A declared logical path: absolute, ≤2048 UTF-8 bytes, no refused controls.
+fn is_capability_surface_path(value: &str) -> bool {
+    value.starts_with('/')
+        && value.len() <= MAX_CAPABILITY_SURFACE_PATH_BYTES
+        && !value.chars().any(is_capability_forbidden_control)
+}
+
+/// A lowercase `os/arch` pair, ≤64 UTF-8 bytes, without refused controls.
+fn is_capability_platform(value: &str) -> bool {
+    let Some((os, arch)) = value.split_once('/') else {
+        return false;
+    };
+    !os.is_empty()
+        && !arch.is_empty()
+        && !arch.contains('/')
+        && value.len() <= MAX_CAPABILITY_PLATFORM_BYTES
+        && value == value.to_lowercase()
+        && !value.chars().any(is_capability_forbidden_control)
+}
+
 #[derive(Debug, Serialize)]
 pub struct PublishMetadata {
+    // The Hub reads a present-but-null field as a malformed value, so an
+    // omitted option must be absent rather than null.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub readme_markdown: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub license_spdx: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub homepage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub porter: Option<String>,
     pub surfaces: Vec<String>,
     pub tags: Vec<String>,
     pub environments: Vec<String>,
+    /// Capabilities derived from the validated bundle; never the declared
+    /// `--surface` / `--environment` values.
+    pub capabilities: HubCapabilities,
 }
 
 #[derive(Debug, Serialize)]
@@ -404,15 +743,27 @@ pub fn resolve_for_run(
             ),
         )
     })?;
-    if resolved.size_bytes > MAX_BUNDLE_BYTES {
+    if resolved.size_bytes > MAX_OFFICIAL_BUNDLE_BYTES {
         bail!(hub_error(
             ERR_BUNDLE_TOO_LARGE,
             format!(
-                "{} is {} bytes; a Hub bundle carries at most {MAX_BUNDLE_BYTES} bytes",
+                "{} is {} bytes; the largest Hub bundle is {MAX_OFFICIAL_BUNDLE_BYTES} bytes",
                 reference.reference(),
                 resolved.size_bytes
             )
         ));
+    }
+    if resolved.size_bytes > MAX_BUNDLE_BYTES {
+        // A bundle above the Base64 JSON bound is streamed to the cache from a
+        // presigned GET, falling back to the public artifact endpoint.
+        let bundle_path = download_large(&client, &base, &reference, &digest, &resolved, ato_home)
+            .with_context(|| format!("failed to fetch {}", reference.reference()))?;
+        return Ok(Some(ResolvedHubCapsule {
+            reference,
+            digest,
+            api_url: base,
+            bundle_path,
+        }));
     }
     let download_client = artifact_client(&base)?;
     let bytes = fetch_artifact(
@@ -463,7 +814,7 @@ fn resolve_remote(client: &Client, base: &str, reference: &HubRef) -> Result<Res
         return Err(api_failure(
             "resolve",
             &reference.reference(),
-            &base,
+            base,
             status,
             &body,
         ));
@@ -509,7 +860,7 @@ fn fetch_artifact(
         return Err(api_failure(
             "download the capsule artifact",
             "",
-            &base,
+            base,
             status,
             &body,
         ));
@@ -537,6 +888,164 @@ fn fetch_artifact(
         ));
     }
     Ok(bytes)
+}
+
+/// Stream a large resolved bundle into $ATO_HOME/hub/<digest>.capsule.
+///
+/// The presigned download URL is minted per call and never cached. A deployment
+/// whose API has no presigned lane (404) or cannot presign (503) falls back to
+/// the public artifact endpoint, which is streamed the same way, so the 8 MiB
+/// ceiling of the in-memory fetch never applies to this path.
+fn download_large(
+    client: &Client,
+    base: &str,
+    reference: &HubRef,
+    digest: &str,
+    resolved: &ResolveResponse,
+    ato_home: &Path,
+) -> Result<PathBuf> {
+    if let Some(cached) = hub_transfer::verified_cache_path(ato_home, digest, resolved.size_bytes)?
+    {
+        return Ok(cached);
+    }
+    let transfer = hub_transfer::transfer_client()?;
+    match fetch_download_url(client, base, reference, digest) {
+        Ok(target) => {
+            let served_reference = &target.reference;
+            let expected_reference = reference.reference();
+            if *served_reference != expected_reference {
+                bail!(hub_error(
+                    ERR_API_FAILED,
+                    format!(
+                        "the API offered a download for `{served_reference}` instead of `{expected_reference}`"
+                    )
+                ));
+            }
+            let served = parse_digest(&target.digest).map_err(|message| {
+                hub_error(
+                    ERR_API_FAILED,
+                    format!("the API offered `{}`: {message}", target.digest),
+                )
+            })?;
+            if served != digest {
+                bail!(hub_error(
+                    ERR_DIGEST_MISMATCH,
+                    format!("the API offered {served}; the resolved version is {digest}")
+                ));
+            }
+            if target.size_bytes != resolved.size_bytes {
+                bail!(hub_error(
+                    ERR_SIZE_MISMATCH,
+                    format!(
+                        "the API offered {} bytes; the resolved version is {} bytes",
+                        target.size_bytes, resolved.size_bytes
+                    )
+                ));
+            }
+            match hub_transfer::stream_download(
+                &transfer,
+                &target.url,
+                digest,
+                resolved.size_bytes,
+                ato_home,
+            ) {
+                Ok(path) => return Ok(path),
+                Err(TransferError::Refused { status, code })
+                    if presigned_download_falls_back(status) =>
+                {
+                    let suffix = if code.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", {code}")
+                    };
+                    eprintln!(
+                        "warning: the presigned download was refused (HTTP {status}{suffix}); using the artifact endpoint"
+                    );
+                }
+                Err(TransferError::Refused { status, code }) => {
+                    return Err(api_failure_code(
+                        "download the capsule",
+                        &expected_reference,
+                        base,
+                        StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+                        &code,
+                    ));
+                }
+                Err(error) => return Err(anyhow::Error::new(error)),
+            }
+        }
+        Err(DownloadRefusal::Fallback(reason)) => {
+            eprintln!("warning: {reason}; using the artifact endpoint");
+        }
+        Err(DownloadRefusal::Fatal(error)) => return Err(error),
+    }
+    let path = origin_relative_path(&resolved.artifact_path)?;
+    let url = format!("{base}{path}");
+    match hub_transfer::stream_download(&transfer, &url, digest, resolved.size_bytes, ato_home) {
+        Ok(path) => Ok(path),
+        Err(TransferError::Refused { status, code }) => Err(api_failure_code(
+            "download the capsule",
+            &reference.reference(),
+            base,
+            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+            &code,
+        )),
+        Err(error) => Err(anyhow::Error::new(error)),
+    }
+}
+
+/// A presigned credential or the staged object may be gone by the time the GET
+/// runs; the artifact endpoint is the authority either way.
+fn presigned_download_falls_back(status: u16) -> bool {
+    matches!(status, 400 | 403 | 404)
+}
+
+fn fetch_download_url(
+    client: &Client,
+    base: &str,
+    reference: &HubRef,
+    digest: &str,
+) -> Result<DownloadUrlResponse, DownloadRefusal> {
+    let url = format!(
+        "{base}{HUB_CAPSULES_PATH}{}/{}/artifacts/{digest}/download-url",
+        reference.owner, reference.name
+    );
+    let response = client
+        .get(&url)
+        .header(ACCEPT, "application/json")
+        .send()
+        .map_err(|error| {
+            DownloadRefusal::Fatal(hub_error(
+                ERR_API_FAILED,
+                format!("failed to reach the Ato API at {base}: {error}"),
+            ))
+        })?;
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+    if !status.is_success() {
+        let code = api_error_code(&body);
+        return Err(match (status.as_u16(), code.as_str()) {
+            (404, _) => DownloadRefusal::Fallback(format!(
+                "the Hub at {base} offered no presigned download for {digest}"
+            )),
+            (503, "presign_unavailable") => {
+                DownloadRefusal::Fallback("the API cannot mint a presigned download URL".to_owned())
+            }
+            _ => DownloadRefusal::Fatal(api_failure_code(
+                "obtain a download URL",
+                &reference.reference(),
+                base,
+                status,
+                &code,
+            )),
+        });
+    }
+    serde_json::from_str(&body).map_err(|error| {
+        DownloadRefusal::Fatal(hub_error(
+            ERR_API_FAILED,
+            format!("the download-url response is malformed: {error}"),
+        ))
+    })
 }
 
 /// The API returns an origin-relative path. An absolute URL would let the API
@@ -687,58 +1196,11 @@ fn api_failure(
     status: StatusCode,
     body: &str,
 ) -> anyhow::Error {
-    let detail = api_error_code(body);
-    let suffix = if detail.is_empty() {
-        String::new()
-    } else {
-        format!(" ({detail})")
-    };
-    let subject = if target.is_empty() {
-        String::new()
-    } else {
-        format!(" for {target}")
-    };
-    match status.as_u16() {
-        401 => hub_error(
-            ERR_UNAUTHORIZED,
-            format!(
-                "the API at {base} refused to {action}{subject}{suffix}; run `ato login --api-url {base}` first"
-            ),
-        ),
-        403 => hub_error(
-            ERR_FORBIDDEN,
-            format!(
-                "the API refused to {action}{subject}{suffix}; this account does not own that namespace"
-            ),
-        ),
-        // The reference is registry-scoped: the same <owner>/<name> lives in
-        // a DIFFERENT Hub per API origin (production vs staging), so the
-        // origin is part of the answer, not decoration.
-        404 => hub_error(
-            ERR_NOT_FOUND,
-            format!("the Hub at {base} has no such capsule or version{subject}{suffix}"),
-        ),
-        409 => hub_error(
-            ERR_DIGEST_MISMATCH,
-            format!("the API reported a conflict while trying to {action}{subject}{suffix}"),
-        ),
-        413 => hub_error(
-            ERR_BUNDLE_TOO_LARGE,
-            format!("the API refused the bundle as too large{subject}{suffix}"),
-        ),
-        400 => hub_error(
-            ERR_INVALID_REQUEST,
-            format!("the API rejected the request to {action}{subject}{suffix}"),
-        ),
-        _ => hub_error(
-            ERR_API_FAILED,
-            format!("failed to {action}{subject}: HTTP {status}{suffix}"),
-        ),
-    }
+    api_failure_code(action, target, base, status, &api_error_code(body))
 }
 
 /// The `error` member of an API error body, bounded and never echoed blindly.
-fn api_error_code(body: &str) -> String {
+pub(crate) fn api_error_code(body: &str) -> String {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
         return String::new();
     };
@@ -752,23 +1214,44 @@ fn api_error_code(body: &str) -> String {
         .collect()
 }
 
-/// Publish one formed bundle: `PUT /v1/hub/capsules/<owner>/<name>`.
+/// Publish one formed bundle.
+///
+/// A bundle larger than the Base64 JSON bound (MAX_BUNDLE_BYTES) takes the
+/// official large-upload lane: a short-TTL presigned PUT, a body streamed from
+/// the file with its SHA-256 computed on the wire, then a completion that
+/// re-reads size and checksum from R2 before any version or tag is written.
+/// The lane is only tried: an account without the official publisher record is
+/// answered "403 official_publisher_required", which falls back to the Base64
+/// lane and therefore keeps the pre-M2 behaviour of every general publisher.
 pub fn publish(args: PublishArgs) -> Result<()> {
-    let bytes = fs::read(&args.capsule)
-        .with_context(|| format!("cannot read {}", args.capsule.display()))?;
-    if bytes.len() as u64 > MAX_BUNDLE_BYTES {
-        bail!(hub_error(
-            ERR_BUNDLE_TOO_LARGE,
-            format!(
-                "{} is {} bytes; a Hub bundle carries at most {MAX_BUNDLE_BYTES} bytes",
-                args.capsule.display(),
-                bytes.len()
-            )
-        ));
+    let size = fs::metadata(&args.capsule)
+        .with_context(|| format!("cannot read {}", args.capsule.display()))?
+        .len();
+    if size <= MAX_BUNDLE_BYTES {
+        return publish_base64(args, None);
     }
-    // Only a bundle the local Run path would accept is ever published.
-    crate::hub::validate_formed_bundle(&bytes)
-        .with_context(|| format!("{} must not be published", args.capsule.display()))?;
+    let prepared = prepare_publish(&args)?;
+    match publish_large(&args, &prepared, size) {
+        Ok(()) => Ok(()),
+        Err(LargePublish::Fallback(reason)) => {
+            eprintln!("warning: {reason}; publishing through the Base64 JSON lane instead");
+            publish_base64(args, Some(prepared))
+        }
+        Err(LargePublish::Fatal(error)) => Err(error),
+    }
+}
+
+/// What both publish lanes need before they touch the network.
+struct PreparedPublish {
+    owner: String,
+    name: String,
+    tag: String,
+    base: String,
+    token: String,
+    readme: Option<String>,
+}
+
+fn prepare_publish(args: &PublishArgs) -> Result<PreparedPublish> {
     let (owner, name) = parse_owner_name(&args.name)?;
     if !is_valid_tag(&args.tag) {
         bail!(hub_error(
@@ -780,31 +1263,47 @@ pub fn publish(args: PublishArgs) -> Result<()> {
         Some(path) => Some(read_readme(path)?),
         None => None,
     };
-    let base = api_base(&args.api_url)?;
-    let token = crate::auth_device::resolve_token(args.token, &args.api_url)?;
-    let digest = bundle_sha256(&bytes);
-    let request = PublishRequest {
+    Ok(PreparedPublish {
+        owner,
+        name,
         tag: args.tag.clone(),
-        digest: digest.clone(),
-        bundle_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
-        metadata: PublishMetadata {
-            display_name: args.display_name,
-            summary: args.summary,
-            readme_markdown: readme,
-            license_spdx: args.license,
-            homepage: args.homepage,
-            repository: args.repository,
-            porter: args.porter,
-            surfaces: args.surfaces,
-            tags: Vec::new(),
-            environments: args.environments,
-        },
-    };
-    let client = api_client()?;
-    let response = put_publish(&client, &base, &token, &owner, &name, &request)?;
-    // The API echoes what it stored. Refuse to print a success line for
-    // different bytes or a different identity than the ones just sent.
-    let expected_reference = format!("{HUB_REF_PREFIX}{owner}/{name}");
+        base: api_base(&args.api_url)?,
+        token: crate::auth_device::resolve_token(args.token.clone(), &args.api_url)?,
+        readme,
+    })
+}
+
+/// The metadata both lanes send: the publisher's declared fields, the README,
+/// and capabilities derived from the validated bundle (never a declaration).
+fn publish_metadata(
+    args: &PublishArgs,
+    readme: Option<&str>,
+    capabilities: HubCapabilities,
+) -> PublishMetadata {
+    PublishMetadata {
+        display_name: args.display_name.clone(),
+        summary: args.summary.clone(),
+        readme_markdown: readme.map(str::to_owned),
+        license_spdx: args.license.clone(),
+        homepage: args.homepage.clone(),
+        repository: args.repository.clone(),
+        porter: args.porter.clone(),
+        surfaces: args.surfaces.clone(),
+        tags: Vec::new(),
+        environments: args.environments.clone(),
+        capabilities,
+    }
+}
+
+/// Refuse to print a success line for different bytes or a different identity
+/// than the ones just sent, in either lane.
+fn finish_publish(
+    prepared: &PreparedPublish,
+    digest: &str,
+    size: u64,
+    response: PublishResponse,
+) -> Result<()> {
+    let expected_reference = format!("{HUB_REF_PREFIX}{}/{}", prepared.owner, prepared.name);
     if response.reference != expected_reference {
         bail!(hub_error(
             ERR_API_FAILED,
@@ -826,24 +1325,23 @@ pub fn publish(args: PublishArgs) -> Result<()> {
             format!("the API stored {published}; the uploaded bundle hashes to {digest}")
         ));
     }
-    if response.size_bytes != bytes.len() as u64 {
+    if response.size_bytes != size {
         bail!(hub_error(
             ERR_SIZE_MISMATCH,
             format!(
-                "the API stored {} bytes; the uploaded bundle is {} bytes",
-                response.size_bytes,
-                bytes.len()
+                "the API stored {} bytes; the uploaded bundle is {size} bytes",
+                response.size_bytes
             )
         ));
     }
     if let Some(served_tag) = response.tag.as_deref()
-        && served_tag != args.tag
+        && served_tag != prepared.tag
     {
         bail!(hub_error(
             ERR_API_FAILED,
             format!(
                 "the API published tag `{served_tag}` instead of `{}`",
-                args.tag
+                prepared.tag
             )
         ));
     }
@@ -854,12 +1352,494 @@ pub fn publish(args: PublishArgs) -> Result<()> {
     if response.created == Some(false) {
         eprintln!(
             "the same bytes were already published; the `{}` tag now points at {published}",
-            args.tag
+            prepared.tag
         );
     }
     Ok(())
 }
 
+/// The unchanged Base64 JSON lane: PUT /v1/hub/capsules/<owner>/<name>.
+fn publish_base64(args: PublishArgs, prepared: Option<PreparedPublish>) -> Result<()> {
+    let bytes = fs::read(&args.capsule)
+        .with_context(|| format!("cannot read {}", args.capsule.display()))?;
+    if bytes.len() as u64 > MAX_BUNDLE_BYTES {
+        bail!(hub_error(
+            ERR_BUNDLE_TOO_LARGE,
+            format!(
+                "{} is {} bytes; a Base64 JSON publish carries at most {MAX_BUNDLE_BYTES} bytes",
+                args.capsule.display(),
+                bytes.len()
+            )
+        ));
+    }
+    // Only a bundle the local Run path would accept is ever published, and
+    // the Hub capability metadata is derived from exactly those validated
+    // routes rather than from any publisher-declared value.
+    let formed = crate::hub::validate_formed_bundle_document(&bytes)
+        .with_context(|| format!("{} must not be published", args.capsule.display()))?;
+    let capabilities =
+        derive_capabilities(&formed.bundle, &formed.derivations).with_context(|| {
+            format!(
+                "the capabilities of {} cannot be represented in Hub metadata",
+                args.capsule.display()
+            )
+        })?;
+    let prepared = match prepared {
+        Some(prepared) => prepared,
+        None => prepare_publish(&args)?,
+    };
+    let metadata = publish_metadata(&args, prepared.readme.as_deref(), capabilities);
+    let digest = bundle_sha256(&bytes);
+    let request = PublishRequest {
+        tag: prepared.tag.clone(),
+        digest: digest.clone(),
+        bundle_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        metadata,
+    };
+    let client = api_client()?;
+    let response = put_publish(
+        &client,
+        &prepared.base,
+        &prepared.token,
+        &prepared.owner,
+        &prepared.name,
+        &request,
+    )?;
+    finish_publish(&prepared, &digest, bytes.len() as u64, response)
+}
+
+/// Why the large lane stopped before publishing anything.
+enum LargePublish {
+    /// The account has no official publisher capacity (or the deployment cannot
+    /// presign at all): the Base64 lane keeps its old meaning.
+    Fallback(String),
+    Fatal(anyhow::Error),
+}
+
+/// What to do after a completion refusal.
+enum CompletionRefusal {
+    /// A fresh staged upload may settle it (410 expired, 409 size/digest).
+    Retry(String),
+    Fallback(String),
+    Fatal(anyhow::Error),
+}
+
+/// Why the presigned download was not usable.
+enum DownloadRefusal {
+    /// The deployment does not offer presigned downloads (404 / 503): the
+    /// public artifact endpoint is still authoritative.
+    Fallback(String),
+    Fatal(anyhow::Error),
+}
+
+/// The API's answer to POST .../uploads: the staged intent, one presigned PUT
+/// and the completion path. Bytes never travel in this body.
+#[derive(Debug, Deserialize)]
+struct UploadTicket {
+    upload_id: String,
+    #[serde(rename = "ref")]
+    reference: String,
+    #[serde(default)]
+    tag: Option<String>,
+    digest: String,
+    size_bytes: u64,
+    #[serde(default)]
+    max_bytes: Option<u64>,
+    #[serde(default)]
+    method: Option<String>,
+    upload_url: String,
+    #[serde(default)]
+    upload_headers: BTreeMap<String, String>,
+    #[serde(default)]
+    complete_path: String,
+}
+
+/// The API's answer to GET .../artifacts/:digest/download-url (no-store).
+#[derive(Debug, Deserialize)]
+struct DownloadUrlResponse {
+    #[serde(rename = "ref")]
+    reference: String,
+    digest: String,
+    size_bytes: u64,
+    url: String,
+}
+
+/// Publish through the official large-upload lane.
+///
+/// Order is part of the contract: the declared digest is computed by streaming
+/// the file (nothing buffered), the bundle is validated locally so bytes the Run
+/// path would refuse are never uploaded, then each attempt opens a fresh staged
+/// upload, streams the body while hashing it, and completes with the same
+/// metadata the Base64 lane sends.
+fn publish_large(
+    args: &PublishArgs,
+    prepared: &PreparedPublish,
+    size: u64,
+) -> Result<(), LargePublish> {
+    let (scanned, digest) =
+        hub_transfer::stream_file_sha256(&args.capsule).map_err(LargePublish::Fatal)?;
+    if scanned != size {
+        return Err(LargePublish::Fatal(hub_error(
+            ERR_SIZE_MISMATCH,
+            format!(
+                "{} changed while publishing ({size} bytes, then {scanned} bytes)",
+                args.capsule.display()
+            ),
+        )));
+    }
+    // Local validation reads the bundle document once (the validator owns the
+    // 768 MiB / 256 MiB decoded bounds); the transfer below streams the file a
+    // second time and never holds it.
+    let bytes = fs::read(&args.capsule)
+        .with_context(|| format!("cannot read {}", args.capsule.display()))
+        .map_err(LargePublish::Fatal)?;
+    let formed = crate::hub::validate_formed_bundle_document(&bytes)
+        .with_context(|| format!("{} must not be published", args.capsule.display()))
+        .map_err(LargePublish::Fatal)?;
+    let capabilities = derive_capabilities(&formed.bundle, &formed.derivations)
+        .with_context(|| {
+            format!(
+                "the capabilities of {} cannot be represented in Hub metadata",
+                args.capsule.display()
+            )
+        })
+        .map_err(LargePublish::Fatal)?;
+    drop(formed);
+    drop(bytes);
+    let metadata = publish_metadata(args, prepared.readme.as_deref(), capabilities);
+    let client = api_client().map_err(LargePublish::Fatal)?;
+    let transfer = hub_transfer::transfer_client().map_err(LargePublish::Fatal)?;
+    for attempt in 1..=LARGE_UPLOAD_ATTEMPTS {
+        let ticket = start_large_upload(&client, prepared, size, &digest)?;
+        hub_transfer::stream_put(
+            &transfer,
+            &ticket.upload_url,
+            &ticket.upload_headers,
+            &args.capsule,
+            size,
+            &digest,
+        )
+        .map_err(|error| LargePublish::Fatal(upload_transfer_error(prepared, error)))?;
+        match complete_large_upload(&client, prepared, &ticket, &metadata) {
+            Ok(response) => {
+                return finish_publish(prepared, &digest, size, response)
+                    .map_err(LargePublish::Fatal);
+            }
+            Err(CompletionRefusal::Fallback(reason)) => {
+                return Err(LargePublish::Fallback(reason));
+            }
+            Err(CompletionRefusal::Fatal(error)) => return Err(LargePublish::Fatal(error)),
+            Err(CompletionRefusal::Retry(reason)) => {
+                if attempt == LARGE_UPLOAD_ATTEMPTS {
+                    return Err(LargePublish::Fatal(hub_error(
+                        ERR_API_FAILED,
+                        format!(
+                            "the large upload was not accepted after {LARGE_UPLOAD_ATTEMPTS} attempts: {reason}"
+                        ),
+                    )));
+                }
+                eprintln!(
+                    "warning: {reason}; restarting the staged upload ({attempt}/{LARGE_UPLOAD_ATTEMPTS})"
+                );
+            }
+        }
+    }
+    Err(LargePublish::Fatal(hub_error(
+        ERR_API_FAILED,
+        "the large upload was not accepted",
+    )))
+}
+
+fn start_large_upload(
+    client: &Client,
+    prepared: &PreparedPublish,
+    size: u64,
+    digest: &str,
+) -> Result<UploadTicket, LargePublish> {
+    let reference = format!("{HUB_REF_PREFIX}{}/{}", prepared.owner, prepared.name);
+    let url = format!(
+        "{}{HUB_CAPSULES_PATH}{}/{}/uploads",
+        prepared.base, prepared.owner, prepared.name
+    );
+    // The body declares INTENT only; capability fields are never sent (the API
+    // refuses a request that tries to assert them).
+    let body = serde_json::json!({
+        "size_bytes": size,
+        "digest": digest,
+        "tag": prepared.tag,
+    });
+    let response = client
+        .post(&url)
+        .header(AUTHORIZATION, format!("Bearer {}", prepared.token))
+        .header(CONTENT_TYPE, "application/json")
+        .json(&body)
+        .send()
+        .map_err(|error| {
+            LargePublish::Fatal(hub_error(
+                ERR_API_FAILED,
+                format!("failed to reach the Ato API at {}: {error}", prepared.base),
+            ))
+        })?;
+    let status = response.status();
+    let text = response.text().unwrap_or_default();
+    if !status.is_success() {
+        let code = api_error_code(&text);
+        return Err(match (status.as_u16(), code.as_str()) {
+            (403, "official_publisher_required") => {
+                LargePublish::Fallback("this account is not an official publisher".to_owned())
+            }
+            (503, "presign_unavailable") => {
+                LargePublish::Fallback("the API cannot mint a presigned upload URL".to_owned())
+            }
+            _ => LargePublish::Fatal(api_failure_code(
+                "start a large upload",
+                &reference,
+                &prepared.base,
+                status,
+                &code,
+            )),
+        });
+    }
+    let ticket: UploadTicket = serde_json::from_str(&text).map_err(|error| {
+        LargePublish::Fatal(hub_error(
+            ERR_API_FAILED,
+            format!("the upload response is malformed: {error}"),
+        ))
+    })?;
+    if ticket.reference != reference {
+        return Err(LargePublish::Fatal(hub_error(
+            ERR_API_FAILED,
+            format!(
+                "the API opened an upload for `{}` instead of `{reference}`",
+                ticket.reference
+            ),
+        )));
+    }
+    let served = parse_digest(&ticket.digest).map_err(|message| {
+        LargePublish::Fatal(hub_error(
+            ERR_API_FAILED,
+            format!("the API staged `{}`: {message}", ticket.digest),
+        ))
+    })?;
+    if served != digest {
+        return Err(LargePublish::Fatal(hub_error(
+            ERR_DIGEST_MISMATCH,
+            format!("the API staged {served}; the bundle hashes to {digest}"),
+        )));
+    }
+    if ticket.size_bytes != size {
+        return Err(LargePublish::Fatal(hub_error(
+            ERR_SIZE_MISMATCH,
+            format!(
+                "the API staged {} bytes; the bundle is {size} bytes",
+                ticket.size_bytes
+            ),
+        )));
+    }
+    if let Some(tag) = ticket.tag.as_deref()
+        && tag != prepared.tag
+    {
+        return Err(LargePublish::Fatal(hub_error(
+            ERR_API_FAILED,
+            format!("the API staged tag `{tag}` instead of `{}`", prepared.tag),
+        )));
+    }
+    if let Some(method) = ticket.method.as_deref()
+        && method != "PUT"
+    {
+        return Err(LargePublish::Fatal(hub_error(
+            ERR_API_FAILED,
+            format!("the API asked for `{method}` instead of a presigned PUT"),
+        )));
+    }
+    let expected_complete = format!(
+        "{HUB_CAPSULES_PATH}{}/{}/uploads/{}/complete",
+        prepared.owner, prepared.name, ticket.upload_id
+    );
+    if !ticket.complete_path.is_empty() && ticket.complete_path != expected_complete {
+        return Err(LargePublish::Fatal(hub_error(
+            ERR_API_FAILED,
+            format!(
+                "the API named the completion path `{}` instead of `{expected_complete}`",
+                ticket.complete_path
+            ),
+        )));
+    }
+    if let Some(max_bytes) = ticket.max_bytes
+        && size > max_bytes
+    {
+        return Err(LargePublish::Fatal(hub_error(
+            ERR_BUNDLE_TOO_LARGE,
+            format!(
+                "this publisher may upload at most {max_bytes} bytes; the bundle is {size} bytes"
+            ),
+        )));
+    }
+    Ok(ticket)
+}
+
+fn complete_large_upload(
+    client: &Client,
+    prepared: &PreparedPublish,
+    ticket: &UploadTicket,
+    metadata: &PublishMetadata,
+) -> Result<PublishResponse, CompletionRefusal> {
+    let reference = format!("{HUB_REF_PREFIX}{}/{}", prepared.owner, prepared.name);
+    let path = if ticket.complete_path.is_empty() {
+        format!(
+            "{HUB_CAPSULES_PATH}{}/{}/uploads/{}/complete",
+            prepared.owner, prepared.name, ticket.upload_id
+        )
+    } else {
+        ticket.complete_path.clone()
+    };
+    let url = format!("{}{path}", prepared.base);
+    let body = serde_json::json!({ "metadata": metadata });
+    let response = client
+        .post(&url)
+        .header(AUTHORIZATION, format!("Bearer {}", prepared.token))
+        .header(CONTENT_TYPE, "application/json")
+        .json(&body)
+        .send()
+        .map_err(|error| {
+            CompletionRefusal::Fatal(hub_error(
+                ERR_API_FAILED,
+                format!("failed to reach the Ato API at {}: {error}", prepared.base),
+            ))
+        })?;
+    let status = response.status();
+    let text = response.text().unwrap_or_default();
+    if !status.is_success() {
+        let code = api_error_code(&text);
+        return Err(match (status.as_u16(), code.as_str()) {
+            (410, _) => CompletionRefusal::Retry("the API expired the staged upload".to_owned()),
+            (409, "size_mismatch" | "digest_mismatch") => {
+                CompletionRefusal::Retry(format!("the API reported {code} for the staged bytes"))
+            }
+            (422, _) => {
+                let reason = if code.is_empty() {
+                    "bundle_index_unreadable".to_owned()
+                } else {
+                    code.clone()
+                };
+                CompletionRefusal::Fatal(hub_error(
+                    ERR_INVALID_BUNDLE,
+                    format!(
+                        "the API could not read the uploaded bundle ({reason}); the bundle is not publishable"
+                    ),
+                ))
+            }
+            (503, "presign_unavailable") => {
+                CompletionRefusal::Fallback("the API cannot mint presigned URLs".to_owned())
+            }
+            _ => CompletionRefusal::Fatal(api_failure_code(
+                "complete the large upload",
+                &reference,
+                &prepared.base,
+                status,
+                &code,
+            )),
+        });
+    }
+    serde_json::from_str(&text).map_err(|error| {
+        CompletionRefusal::Fatal(hub_error(
+            ERR_API_FAILED,
+            format!("the completion response is malformed: {error}"),
+        ))
+    })
+}
+
+/// A presigned PUT that fails is never silently retried here: the caller decides
+/// from the structured refusal. Redirects are refused outright because a
+/// presigned URL names one key on one host.
+fn upload_transfer_error(prepared: &PreparedPublish, error: TransferError) -> anyhow::Error {
+    let reference = format!("{HUB_REF_PREFIX}{}/{}", prepared.owner, prepared.name);
+    match error {
+        TransferError::Refused { status, code: _ } if (300..400).contains(&status) => hub_error(
+            ERR_REDIRECT_REFUSED,
+            format!("the presigned upload for {reference} was redirected (HTTP {status})"),
+        ),
+        TransferError::Refused { status, code } => {
+            let suffix = if code.is_empty() {
+                String::new()
+            } else {
+                format!(" ({code})")
+            };
+            hub_error(
+                ERR_API_FAILED,
+                format!(
+                    "the presigned upload for {reference} was refused (HTTP {status}{suffix}); the sent bytes or their signed checksum did not match the declared digest"
+                ),
+            )
+        }
+        TransferError::Failed(error) => error,
+    }
+}
+
+fn api_failure_code(
+    action: &str,
+    target: &str,
+    base: &str,
+    status: StatusCode,
+    detail: &str,
+) -> anyhow::Error {
+    let suffix = if detail.is_empty() {
+        String::new()
+    } else {
+        format!(" ({detail})")
+    };
+    let subject = if target.is_empty() {
+        String::new()
+    } else {
+        format!(" for {target}")
+    };
+    match status.as_u16() {
+        300..=399 => hub_error(
+            ERR_REDIRECT_REFUSED,
+            format!("the API redirected the request to {action}{subject} ({status})"),
+        ),
+        401 => hub_error(
+            ERR_UNAUTHORIZED,
+            format!(
+                "the API at {base} refused to {action}{subject}{suffix}; run ato login --api-url {base} first"
+            ),
+        ),
+        403 => hub_error(
+            ERR_FORBIDDEN,
+            format!(
+                "the API refused to {action}{subject}{suffix}; this account does not own that namespace"
+            ),
+        ),
+        404 => hub_error(
+            ERR_NOT_FOUND,
+            format!("the Hub at {base} has no such capsule or version{subject}{suffix}"),
+        ),
+        410 => hub_error(
+            ERR_API_FAILED,
+            format!("the API expired the request to {action}{subject}{suffix}"),
+        ),
+        409 => hub_error(
+            ERR_DIGEST_MISMATCH,
+            format!("the API reported a conflict while trying to {action}{subject}{suffix}"),
+        ),
+        413 => hub_error(
+            ERR_BUNDLE_TOO_LARGE,
+            format!("the API refused the bundle as too large{subject}{suffix}"),
+        ),
+        422 => hub_error(
+            ERR_INVALID_BUNDLE,
+            format!("the API refused the bundle as unreadable{subject}{suffix}"),
+        ),
+        400 => hub_error(
+            ERR_INVALID_REQUEST,
+            format!("the API rejected the request to {action}{subject}{suffix}"),
+        ),
+        _ => hub_error(
+            ERR_API_FAILED,
+            format!("failed to {action}{subject}: HTTP {status}{suffix}"),
+        ),
+    }
+}
 fn read_readme(path: &Path) -> Result<String> {
     if path == Path::new("-") {
         let mut text = String::new();
@@ -893,7 +1873,7 @@ fn put_publish(
         return Err(api_failure(
             "publish",
             &format!("{HUB_REF_PREFIX}{owner}/{name}"),
-            &base,
+            base,
             status,
             &body,
         ));
@@ -1007,11 +1987,52 @@ mod tests {
     use std::thread::{self, JoinHandle};
 
     use ato_formation::verify::{
-        VerificationExecutionEvidence, VerificationTarget, VerificationTargetKind,
+        VerificationExecutionEvidence, VerificationNativeEvidence, VerificationTarget,
+        VerificationTargetKind,
     };
     use base64::Engine;
 
     use super::*;
+
+    /// An omitted optional field must be absent from the JSON, not null: the
+    /// Hub reads a present-but-null value as malformed metadata and refuses the
+    /// publish, so only the fields a publisher actually set may be sent.
+    #[test]
+    fn omitted_optional_metadata_is_absent_from_the_request() {
+        let metadata = PublishMetadata {
+            display_name: None,
+            summary: None,
+            readme_markdown: None,
+            license_spdx: None,
+            homepage: None,
+            repository: None,
+            porter: None,
+            surfaces: Vec::new(),
+            tags: Vec::new(),
+            environments: Vec::new(),
+            capabilities: HubCapabilities {
+                source: CAPABILITIES_SOURCE_BUNDLE,
+                contract_ref: format!("sha256:{}", "ab".repeat(32)),
+                derivations: Vec::new(),
+            },
+        };
+        let value = serde_json::to_value(&metadata).expect("metadata serializes");
+        for field in [
+            "display_name",
+            "summary",
+            "readme_markdown",
+            "license_spdx",
+            "homepage",
+            "repository",
+            "porter",
+        ] {
+            assert!(
+                value.get(field).is_none(),
+                "{field} must be omitted, not null"
+            );
+        }
+        assert!(value.get("capabilities").is_some());
+    }
 
     /// The committed interop sample's bundle digest.
     const SAMPLE_DIGEST: &str =
@@ -1646,6 +2667,60 @@ mod tests {
     }
 
     #[test]
+    fn every_receipt_schema_is_reported_unchanged() {
+        // The API accepts /1 through /5 with one common rule set; the CLI must
+        // carry a receipt through by schema, not narrow it to the one this
+        // build happens to produce for a local Static Web Run.
+        let resolved = resolved_at("http://127.0.0.1:9");
+        for (schema, native) in [
+            ("ato.contract-verification-receipt/1", false),
+            ("ato.contract-verification-receipt/2", false),
+            ("ato.contract-verification-receipt/3", false),
+            ("ato.contract-verification-receipt/4", false),
+            ("ato.contract-verification-receipt/5", true),
+        ] {
+            let mut receipt = receipt(SAMPLE_DIGEST, true, Some("attempt-1"));
+            receipt.schema = schema.to_owned();
+            if native {
+                receipt
+                    .execution
+                    .as_mut()
+                    .expect("the helper builds execution evidence")
+                    .native = Some(VerificationNativeEvidence {
+                    artifact_ref: format!("sha256:{}", "4".repeat(64)),
+                    materialized_tree_digest: format!("sha256:{}", "5".repeat(64)),
+                    entry: "app/run.sh".to_owned(),
+                    signature_policy: "require-valid-or-local-override".to_owned(),
+                    signature_target: "executable".to_owned(),
+                    verified_target: "app/run.sh".to_owned(),
+                    codesign_verify: "valid".to_owned(),
+                    signature_kind: "adhoc".to_owned(),
+                    codesign_detail: None,
+                    gatekeeper: "unavailable".to_owned(),
+                    gatekeeper_detail: None,
+                    local_override: false,
+                    sandbox: "seatbelt".to_owned(),
+                    enforced_read_only: vec!["/app".to_owned()],
+                    enforced_read_write: Vec::new(),
+                    enforced_inbound_ports: vec![18080],
+                    process_group: None,
+                    window_containment: "none".to_owned(),
+                });
+            }
+            let body = run_report_body(&resolved, &receipt)
+                .expect("a satisfied receipt is reportable whatever its schema");
+            assert_eq!(body["receipt"]["schema"], schema);
+            assert_eq!(body["receipt"]["fully_satisfied"], true);
+            if native {
+                assert_eq!(
+                    body["receipt"]["execution"]["native"]["sandbox"],
+                    "seatbelt"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_successful_run_posts_its_receipt_and_digest() {
         let api = StubApi::new(vec![json_response(
             "200 OK",
@@ -1696,8 +2771,325 @@ mod tests {
         );
     }
 
-    // ---- publishing -------------------------------------------------------
+    // ---- capabilities derived from the bundle ------------------------------
 
+    /// The canonical refs of the committed multi-derivation fixture.
+    const MULTI_PROCESS_DERIVATION: &str =
+        "sha256:5d1ec4660745130f196102c1bd81828993ab75d69130f0fdf2e1e2598fd9f3cc";
+    const MULTI_STATIC_DERIVATION: &str =
+        "sha256:5db5b2ba96e84aef2ff2c0e0931e5014ea2e5fb7b400eed8b9b45c40b5755633";
+    const MULTI_CONTRACT: &str =
+        "sha256:94d7bd2900fa01d8b000d1cf095b0f47bfcc279898c830f0542dd53ee99ffdaf";
+
+    fn capabilities_of(bytes: &[u8]) -> HubCapabilities {
+        let formed = crate::hub::validate_formed_bundle_document(bytes)
+            .expect("the fixture is a valid formed bundle");
+        derive_capabilities(&formed.bundle, &formed.derivations)
+            .expect("every declared route is representable")
+    }
+
+    #[test]
+    fn capabilities_are_derived_from_a_multi_derivation_bundle() {
+        let bytes = fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../samples/interop-multi-derivation.capsule"),
+        )
+        .expect("the multi-derivation fixture is committed");
+        let capabilities = capabilities_of(&bytes);
+        assert_eq!(capabilities.source, CAPABILITIES_SOURCE_BUNDLE);
+        assert_eq!(capabilities.contract_ref, MULTI_CONTRACT);
+        // The output is exactly the documented shape: over & requires are
+        // derived, and neither a host path nor an undeclared runtime leaks in.
+        assert_eq!(
+            serde_json::to_value(&capabilities).unwrap(),
+            serde_json::json!({
+                "source": "bundle",
+                "contract_ref": MULTI_CONTRACT,
+                "derivations": [
+                    {
+                        "derivation_ref": MULTI_PROCESS_DERIVATION,
+                        "realization": "local_process",
+                        "platform": null,
+                        "native_platform": null,
+                        "requires": { "container": false, "state": false },
+                        "surfaces": [
+                            { "id": "main", "kind": "http", "port": "app.http", "path": "/" }
+                        ]
+                    },
+                    {
+                        "derivation_ref": MULTI_STATIC_DERIVATION,
+                        "realization": "static_web",
+                        "platform": null,
+                        "native_platform": null,
+                        "requires": { "container": false, "state": false },
+                        "surfaces": [
+                            { "id": "main", "kind": "static_web", "port": "app.http", "path": "/" }
+                        ]
+                    }
+                ]
+            })
+        );
+        let rendered = serde_json::to_string(&capabilities).unwrap();
+        assert!(!rendered.contains("bound_paths"), "{rendered}");
+        assert!(!rendered.contains(env!("CARGO_MANIFEST_DIR")), "{rendered}");
+    }
+
+    #[test]
+    fn capabilities_name_an_oci_platform_and_container_requirement() {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/oci-service-group-proof");
+        let (bytes, _) = ato_portable_application::build_authored_bundle_v2(&source)
+            .expect("the OCI fixture packs");
+        let capabilities = capabilities_of(&bytes);
+        assert_eq!(capabilities.derivations.len(), 1);
+        let derivation = &capabilities.derivations[0];
+        assert_eq!(derivation.realization, "oci");
+        assert_eq!(derivation.platform.as_deref(), Some("linux/amd64"));
+        assert_eq!(derivation.native_platform, None);
+        assert!(derivation.requires.container);
+        assert!(derivation.requires.state);
+        assert_eq!(derivation.surfaces.len(), 1);
+        assert_eq!(derivation.surfaces[0].kind, "http");
+        assert_eq!(derivation.surfaces[0].path, "/");
+    }
+
+    #[test]
+    fn hub_capability_tokens_match_the_api_shape() {
+        for valid in ["app.http", "app_probe", "a:b", "a-b", "0"] {
+            assert!(is_capability_port_token(valid), "{valid}");
+        }
+        for invalid in ["", "app http", "app/http", "app?x", "app\n"] {
+            assert!(!is_capability_port_token(invalid), "{invalid}");
+        }
+        assert!(!is_capability_port_token(
+            &"a".repeat(MAX_CAPABILITY_PORT_BYTES + 1)
+        ));
+        // A surface label is a label, not a token: spaces, tabs and newlines
+        // are allowed; only the UTF-16 code-unit bound and refused controls
+        // apply.
+        assert!(is_capability_surface_id("main"));
+        assert!(is_capability_surface_id("My Surface 1"));
+        assert!(is_capability_surface_id("a\tb\nc"));
+        assert!(!is_capability_surface_id(""));
+        assert!(!is_capability_surface_id("a\rb"));
+        assert!(!is_capability_surface_id("a\x7fb"));
+        assert!(!is_capability_surface_id(
+            &"a".repeat(MAX_CAPABILITY_SURFACE_ID_UTF16_UNITS + 1)
+        ));
+        // An astral character is one Rust `char` but two UTF-16 code units, so
+        // 64 of them fill the bound and 65 overflow it.
+        assert!(is_capability_surface_id(&"😀".repeat(64)));
+        assert!(!is_capability_surface_id(&"😀".repeat(65)));
+        assert!(is_capability_surface_path("/"));
+        assert!(is_capability_surface_path("/proof.txt"));
+        assert!(is_capability_surface_path("/a\nb"));
+        assert!(!is_capability_surface_path("proof.txt"));
+        assert!(!is_capability_surface_path("/a\rb"));
+        assert!(!is_capability_surface_path("/a\x7fb"));
+        assert!(!is_capability_surface_path(&format!(
+            "/{}",
+            "a".repeat(MAX_CAPABILITY_SURFACE_PATH_BYTES)
+        )));
+        // The path bound is UTF-8 bytes: 682 `あ` are 2046 bytes plus `/` =
+        // 2047, while 683 are 2049 plus `/` = 2050.
+        assert!(is_capability_surface_path(&format!(
+            "/{}",
+            "あ".repeat(682)
+        )));
+        assert!(!is_capability_surface_path(&format!(
+            "/{}",
+            "あ".repeat(683)
+        )));
+        assert!(is_capability_platform("linux/amd64"));
+        assert!(is_capability_platform("macos/aarch64"));
+        assert!(!is_capability_platform("Linux/amd64"));
+        assert!(!is_capability_platform("linux/amd64/extra"));
+        assert!(!is_capability_platform("amd64"));
+        assert!(!is_capability_platform(&format!(
+            "{}/amd64",
+            "o".repeat(MAX_CAPABILITY_PLATFORM_BYTES)
+        )));
+        // 21 `あ` + `/` + 21 `い` are 43 code units but 129 UTF-8 bytes.
+        assert!(!is_capability_platform(&format!(
+            "{}/{}",
+            "あ".repeat(21),
+            "い".repeat(21)
+        )));
+    }
+
+    #[test]
+    fn a_derived_capability_document_fits_the_api_bound() {
+        let bytes = fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../samples/interop-multi-derivation.capsule"),
+        )
+        .expect("the multi-derivation fixture is committed");
+        let capabilities = capabilities_of(&bytes);
+        let encoded = serde_json::to_vec(&capabilities).unwrap();
+        assert!(
+            encoded.len() <= MAX_CAPABILITY_DOCUMENT_BYTES,
+            "{} bytes",
+            encoded.len()
+        );
+    }
+
+    /// The authoring fixture the portable-application crate uses for a native
+    /// Terminal adapter. `native_surface` rides an OCI route, so the derived
+    /// capability keeps `container = true`.
+    const NATIVE_SURFACE_MANIFEST: &str = r#"
+schema = "ato.capsule/1"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[runtime]]
+name = "oci.image"
+version = "docker.io/library/python@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+[[runtime]]
+name = "oci.platform"
+version = "linux/amd64"
+[[runtime]]
+name = "oci.memory_bytes"
+version = "268435456"
+[[runtime]]
+name = "oci.cpu_limit_millis"
+version = "1000"
+[[runtime]]
+name = "oci.pids_limit"
+version = "128"
+[[runtime]]
+name = "oci.user"
+version = "1000:1000"
+
+[[derive.step]]
+id = "serve"
+use = "ato.oci@1"
+op = "serve"
+argv = ["python3", "pty_app.py"]
+cwd = "."
+
+[derive.native_surface]
+kind = "terminal"
+profile = "ato.terminal-surface.v1"
+cols = 120
+rows = 40
+port = "app.native"
+probe_port = "app.probe"
+probe_path = "/result"
+probe_input = "go\n"
+probe_output_delimiter = "END"
+probe_max_output_bytes = 4096
+probe_timeout_ms = 5000
+
+[[port]]
+id = "app.native"
+use = "ato.pty@1"
+from = "serve"
+
+[[port]]
+id = "app.probe"
+use = "ato.http@1"
+from = "serve"
+
+[[contract.require]]
+id = "result"
+use = "ato.contract.http@1"
+port = "app.probe"
+path = "/result"
+expect = { status = 200, body_digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+"#;
+
+    fn native_surface_source(manifest: &str) -> tempfile::TempDir {
+        let directory = tempfile::tempdir().expect("tempdir");
+        fs::write(directory.path().join("capsule.toml"), manifest).expect("manifest");
+        fs::write(
+            directory.path().join("pty_app.py"),
+            "import sys\nsys.stdin.readline()\n",
+        )
+        .expect("app");
+        directory
+    }
+
+    #[test]
+    fn capabilities_split_native_terminal_and_pixel_routes() {
+        let directory = native_surface_source(NATIVE_SURFACE_MANIFEST);
+        let terminal = ato_portable_application::build_native_terminal_bundle(
+            directory.path(),
+            &directory.path().join("capsule.toml"),
+            "Native Terminal",
+        )
+        .expect("the terminal fixture packs");
+        let capabilities = capabilities_of(&terminal.0);
+        let derivation = &capabilities.derivations[0];
+        assert_eq!(derivation.realization, "native_terminal");
+        assert_eq!(derivation.platform.as_deref(), Some("linux/amd64"));
+        assert!(derivation.requires.container);
+        assert!(!derivation.requires.state);
+        assert_eq!(derivation.surfaces.len(), 1);
+        assert_eq!(derivation.surfaces[0].id, "main");
+        assert_eq!(derivation.surfaces[0].kind, "native_terminal");
+        assert_eq!(derivation.surfaces[0].port, "app.native");
+        assert_eq!(derivation.surfaces[0].path, "/");
+
+        let pixel_manifest = NATIVE_SURFACE_MANIFEST
+            .replace(
+                "kind = \"terminal\"\nprofile = \"ato.terminal-surface.v1\"\ncols = 120\nrows = 40",
+                "kind = \"pixel_stream\"\nprofile = \"ato.pixel-stream.v1\"\nwidth = 640\nheight = 480",
+            )
+            .replace(
+                "probe_input = \"go\\n\"\nprobe_output_delimiter = \"END\"\nprobe_max_output_bytes = 4096",
+                "probe_keysyms = [103]\nprobe_max_frame_bytes = 1228800",
+            )
+            .replace("use = \"ato.pty@1\"", "use = \"ato.tcp@1\"");
+        let directory = native_surface_source(&pixel_manifest);
+        let pixel = ato_portable_application::build_native_bundle(
+            directory.path(),
+            &directory.path().join("capsule.toml"),
+            "Native Pixel",
+        )
+        .expect("the pixel fixture packs");
+        let capabilities = capabilities_of(&pixel.0);
+        let derivation = &capabilities.derivations[0];
+        assert_eq!(derivation.realization, "native_pixel");
+        assert_eq!(derivation.surfaces[0].kind, "native_pixel");
+        assert_eq!(derivation.surfaces[0].port, "app.native");
+    }
+
+    #[test]
+    fn capabilities_name_the_native_desktop_platform() {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/native-desktop-multi-d");
+        let (bytes, _) = ato_portable_application::build_authored_bundle_v2(&source)
+            .expect("the native desktop fixture packs");
+        let capabilities = capabilities_of(&bytes);
+        assert_eq!(capabilities.derivations.len(), 3);
+        let static_web = capabilities
+            .derivations
+            .iter()
+            .find(|derivation| derivation.realization == "static_web")
+            .expect("the fixture declares a static route");
+        assert_eq!(static_web.native_platform, None);
+        assert_eq!(static_web.surfaces[0].kind, "static_web");
+        let mut platforms: Vec<_> = capabilities
+            .derivations
+            .iter()
+            .filter_map(|derivation| derivation.native_platform.clone())
+            .collect();
+        platforms.sort();
+        assert_eq!(platforms, vec!["macos/aarch64", "windows/x86_64"]);
+        for derivation in &capabilities.derivations {
+            if derivation.native_platform.is_some() {
+                assert_eq!(derivation.realization, "native_pixel");
+                assert!(!derivation.requires.container);
+                assert!(!derivation.requires.state);
+                assert_eq!(derivation.surfaces[0].kind, "native_pixel");
+            }
+        }
+    }
+
+    // ---- publishing -------------------------------------------------------
     fn publish_request(bytes: &[u8]) -> PublishRequest {
         PublishRequest {
             tag: "latest".to_owned(),
@@ -1714,6 +3106,11 @@ mod tests {
                 surfaces: vec!["web_ui".to_owned()],
                 tags: Vec::new(),
                 environments: vec!["macos-arm64".to_owned()],
+                capabilities: HubCapabilities {
+                    source: CAPABILITIES_SOURCE_BUNDLE,
+                    contract_ref: format!("sha256:{}", "c".repeat(64)),
+                    derivations: Vec::new(),
+                },
             },
         }
     }

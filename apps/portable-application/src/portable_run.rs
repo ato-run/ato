@@ -81,6 +81,35 @@ pub struct PortableRunContext<'a> {
     /// mandatory filesystem, state, egress or lifecycle policy. A route whose
     /// signature policy is `require-valid` refuses it regardless.
     pub native_local_override: bool,
+    /// The Ato home a native source route installs its managed toolchain and
+    /// build cache under. It is never a bundle fact.
+    pub ato_home: &'a Path,
+    /// The explicit decision a Run needs before it may fetch a managed
+    /// toolchain and build a source route. A bundle can require a toolchain but
+    /// cannot grant the right to install one.
+    pub native_source_consent: NativeSourceConsent,
+}
+
+/// The explicit decision before a native source build may acquire anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NativeSourceConsent {
+    /// No approval was given; an interactive caller could still ask for it.
+    #[default]
+    Denied,
+    /// No approval, and no one to ask (a non-interactive Run).
+    Unavailable,
+    /// The user approved fetching a managed toolchain and building.
+    Approved,
+}
+
+impl NativeSourceConsent {
+    pub(crate) fn toolchain_consent(self) -> crate::native_desktop::ToolchainConsent {
+        match self {
+            Self::Approved => crate::native_desktop::ToolchainConsent::Approved,
+            Self::Denied => crate::native_desktop::ToolchainConsent::Denied,
+            Self::Unavailable => crate::native_desktop::ToolchainConsent::Unavailable,
+        }
+    }
 }
 
 /// Project a validated native OCI route into the existing Runner wire contract.
@@ -274,6 +303,19 @@ fn route_platform(derivation: &ato_formation::authoring::BoundDerivation) -> Opt
         })
 }
 
+/// Whether the *runtime* process declares TCP egress.
+///
+/// Build-phase egress belongs to the build sandbox, which enforces it; the run
+/// Adapter only owns inbound loopback Ports, so only a runtime-phase
+/// declaration is one it would fail to enforce.
+fn declares_runtime_egress(
+    requirements: &ato_formation::requirements::ExecutionRequirements,
+) -> bool {
+    requirements.network.iter().any(|requirement| {
+        requirement.phase == ato_formation::requirements::ExecutionPhase::Runtime
+    })
+}
+
 fn refused(code: &str, message: impl Into<String>) -> Option<AttemptFailure> {
     Some(AttemptFailure {
         code: code.to_owned(),
@@ -307,6 +349,20 @@ fn state_delivered_by_path(state: &[ato_formation::authoring::BoundState]) -> bo
 impl CandidateRealizer for PortableBundleExecutor<'_> {
     fn delivers_model_sets(&self) -> bool {
         self.validated.realization == PortableRealizationKind::LocalProcess
+    }
+
+    /// This executor owns the host's PTY for the selected native Derivation.
+    ///
+    /// Admission refuses a native Surface declaration unless the realizer that
+    /// will actually run it names the exact Adapter profile and Derivation it
+    /// can own; this is that statement, and admit() still establishes the
+    /// physical availability and boundaries before anything starts.
+    fn native_surface_binding(&self) -> Option<(&str, &str)> {
+        let surface = self.validated.derivation.native_surface.as_ref()?;
+        Some((
+            surface.surface.profile(),
+            self.validated.derivation_ref.as_str(),
+        ))
     }
 
     fn admit(&self, _profile: &RuntimeProfile) -> Option<AttemptFailure> {
@@ -376,7 +432,7 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
                     "the selected native route carries no validated descriptor",
                 );
             }
-            if !self.validated.derivation.requirements.network.is_empty() {
+            if declares_runtime_egress(&self.validated.derivation.requirements) {
                 // Inbound loopback Ports are enforced by the Seatbelt profile;
                 // an arbitrary declared TCP destination is not. A mandatory
                 // policy that cannot be enforced before launch is a refusal,
@@ -723,33 +779,50 @@ impl PortableBundleExecutor<'_> {
                 "the selected native route carries no validated descriptor",
             )
         })?;
-        let artifact_ref = ato_computation::ContentRef::parse(native.descriptor.artifact.clone())
-            .map_err(|error| {
-            native_refusal(
-                "native_artifact_invalid",
-                format!("the artifact reference is invalid: {error}"),
-            )
-        })?;
-        let artifact_bytes = self.bundle.payload_bytes(&artifact_ref).map_err(|error| {
-            native_refusal(
-                "native_artifact_invalid",
-                format!("the verified artifact payload is unreadable: {error}"),
-            )
-        })?;
+        // A bundled artifact is the one the verified closure carries. A remote
+        // reference or a source build carries no blob, and the acquisition
+        // stage proves the pinned digest instead.
+        let bundled = match native.descriptor.bundled_artifact() {
+            None => None,
+            Some(reference) => {
+                let artifact_ref = ato_computation::ContentRef::parse(reference.to_owned())
+                    .map_err(|error| {
+                        native_refusal(
+                            "native_artifact_invalid",
+                            format!("the artifact reference is invalid: {error}"),
+                        )
+                    })?;
+                Some(self.bundle.payload_bytes(&artifact_ref).map_err(|error| {
+                    native_refusal(
+                        "native_artifact_invalid",
+                        format!("the verified artifact payload is unreadable: {error}"),
+                    )
+                })?)
+            }
+        };
+        let acquired = crate::native_desktop::acquire(
+            &native.descriptor,
+            bundled,
+            self.runtime_root,
+            self.context.ato_home,
+            self.context.native_source_consent.toolchain_consent(),
+        )?;
         let state_paths = state_mounts
             .iter()
             .map(|state| (state.id.clone(), state.host_path.clone()))
             .collect::<Vec<_>>();
         crate::native_desktop::start(NativeStart {
-            artifact_bytes,
+            payload: acquired.payload,
+            provenance: acquired.provenance,
             descriptor: &native.descriptor,
             ports: &native.ports,
+            terminal: native.terminal.as_ref(),
             workspace,
             runtime_root: self.runtime_root,
             state_paths,
             environment: self.binding_environment,
             local_override: self.context.native_local_override,
-            declares_egress: !route.derivation.requirements.network.is_empty(),
+            declares_egress: declares_runtime_egress(&route.derivation.requirements),
         })
     }
 }
@@ -2494,6 +2567,10 @@ pub fn run_portable_bundle_attempt(
         host: request.host,
         // A hosted/Formation attempt never carries a local override decision.
         native_local_override: false,
+        // A hosted attempt has no local approval path, so a source build is
+        // refused before it would read this directory.
+        ato_home: request.cache_root.parent().unwrap_or(request.cache_root),
+        native_source_consent: NativeSourceConsent::Denied,
     };
     let executor = PortableBundleExecutor {
         bundle: request.bundle,
@@ -2641,6 +2718,8 @@ default = "pure"
             sandbox_subcommand: "__portable-sandbox-exec",
             host: None,
             native_local_override: false,
+            ato_home: root.path(),
+            native_source_consent: NativeSourceConsent::Denied,
         };
         let executor = PortableBundleExecutor {
             bundle: &bundle,
@@ -2824,6 +2903,8 @@ Server(("127.0.0.1", int(os.environ["ATO_ENDPOINT_APP_HTTP_PORT"])), Handler).se
                 sandbox_subcommand: "__portable-sandbox-exec",
                 host: None,
                 native_local_override: false,
+                ato_home: &runtime_root,
+                native_source_consent: NativeSourceConsent::Denied,
             };
             let executor = PortableBundleExecutor {
                 bundle: &bundle,
@@ -3039,5 +3120,29 @@ mod process_group_policy_tests {
             "the shim policy must let the shim reach the broker's directory: {:?}",
             policy.read_only_paths
         );
+    }
+}
+
+#[cfg(test)]
+mod runtime_egress_tests {
+    use super::*;
+
+    /// Build-phase egress belongs to the build sandbox; only a runtime-phase
+    /// declaration is one the run Adapter would fail to enforce.
+    #[test]
+    fn only_runtime_phase_egress_belongs_to_the_run_adapter() {
+        let mut requirements = ato_formation::requirements::ExecutionRequirements::default();
+        assert!(!declares_runtime_egress(&requirements));
+        requirements.network = vec![ato_formation::requirements::NetworkRequirement {
+            phase: ato_formation::requirements::ExecutionPhase::Build,
+            host: "crates.io".to_owned(),
+            port: 443,
+        }];
+        assert!(
+            !declares_runtime_egress(&requirements),
+            "a build-phase destination is not the run Adapter's to enforce"
+        );
+        requirements.network[0].phase = ato_formation::requirements::ExecutionPhase::Runtime;
+        assert!(declares_runtime_egress(&requirements));
     }
 }

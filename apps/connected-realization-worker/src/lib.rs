@@ -3130,7 +3130,14 @@ impl ConnectedWorker {
             let declaration = ato_runtime_attempt::native_launch::NativeLaunchDeclaration::decode(
                 oci.native_surface.as_ref().expect("Native declaration"),
             )?;
-            observation_targets.insert(declaration.adapter.probe_port, native.observation_addr());
+            observation_targets.insert(
+                declaration
+                    .adapter
+                    .probe_port
+                    .clone()
+                    .context("the v1 native probe Port")?,
+                native.observation_addr(),
+            );
         }
         let _surface_gate = TcpProxy::start_with_mux(
             self.config.surface_listen,

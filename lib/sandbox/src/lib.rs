@@ -337,6 +337,12 @@ pub struct SandboxPolicy {
     /// network access is disabled. An empty list denies TCP egress.
     #[serde(default)]
     pub allowed_connect_tcp_ports: Vec<u16>,
+    /// TCP destination ports the workload may reach on *any* host when
+    /// unrestricted network access is disabled. Seatbelt cannot filter by host
+    /// name, so this is a port-scoped grant; a build uses it for HTTPS to the
+    /// crate and source hosts its declaration names.
+    #[serde(default)]
+    pub allowed_connect_remote_tcp_ports: Vec<u16>,
     /// Whether this sandbox is in "development mode" (more permissive)
     pub development_mode: bool,
     /// IPC socket paths that must be allowed through the Sandbox.
@@ -355,6 +361,7 @@ impl SandboxPolicy {
             allow_network: true,
             allowed_bind_tcp_ports: Vec::new(),
             allowed_connect_tcp_ports: Vec::new(),
+            allowed_connect_remote_tcp_ports: Vec::new(),
             development_mode: false,
             ipc_socket_paths: Vec::new(),
         }
@@ -405,6 +412,14 @@ impl SandboxPolicy {
     /// the rest of TCP egress remains denied.
     pub fn allow_tcp_connect(mut self, ports: impl IntoIterator<Item = u16>) -> Self {
         self.allowed_connect_tcp_ports.extend(ports);
+        self
+    }
+
+    /// Port-scoped egress to any host. A build reaches the crate and source
+    /// hosts its declaration names; Seatbelt cannot filter by host name, so the
+    /// grant is the port, and the declaration is what bounds the vocabulary.
+    pub fn allow_tcp_connect_remote(mut self, ports: impl IntoIterator<Item = u16>) -> Self {
+        self.allowed_connect_remote_tcp_ports.extend(ports);
         self
     }
 

@@ -1,0 +1,60 @@
+{
+  "verified_at_jst": "2026-11-17T16:27:34.844183+09:00",
+  "result": "failed",
+  "scope": "Fresh CLI installation from staging installer and published SolidCraft D1/D2 execution on macOS arm64. No locally built CLI or pre-existing credentials/toolchains/caches used.",
+  "installer_url": "https://stg-app.ato.run/install.sh",
+  "installer_sha256": "sha256:267d41659d68b867fca2df52913589faaf6904412a45c4ad423b5ebf2f162923",
+  "installer_exit_code": 1,
+  "installer_elapsed_seconds": 135.9,
+  "installer_failure": "CLI binary installed, but nacelle is absent from the release; archive and three legacy asset URLs all return HTTP 404.",
+  "release": {
+    "tag_name": "v0.9.3",
+    "target_commitish": "8b058e52f1a4d93e541cb863691266736122c632",
+    "published_at": "2026-11-16T08:09:59Z",
+    "html_url": "https://github.com/ato-run/ato/releases/tag/v0.9.3"
+  },
+  "binary_sha256": "sha256:edfcdef786e7ae39fa7f9bc0b9ccf2fe32b942a081790f1a02087f8c87d9eb10",
+  "bundle_sha256": "sha256:35f940038bc66cec78eb53485738bf029d4ce68d619993a024f8a3a10c10c7e3",
+  "downloaded_bundle_digest_matches": true,
+  "derivation_refs": {
+    "d1": "sha256:f58cdca4697158f519a9a24d7bc36a7deb00a531b913fce3859deccbb46551e9",
+    "d2": "sha256:382f1474eb77e0c18820f65a4d96edebfeddda6cc6b2b1cb5f4834bb9462406d"
+  },
+  "command_results": {
+    "cli-version": {
+      "exit_code": 0,
+      "elapsed_seconds": 3.103,
+      "log": "cli-version.log"
+    },
+    "d1": {
+      "exit_code": 1,
+      "elapsed_seconds": 5.528,
+      "log": "d1.log"
+    },
+    "d2": {
+      "exit_code": 2,
+      "elapsed_seconds": 0.019,
+      "log": "d2.log"
+    },
+    "list-derivations": {
+      "exit_code": 2,
+      "elapsed_seconds": 0.016,
+      "log": "list-derivations.log"
+    }
+  },
+  "d1_failure": "reference extraction for schema ato.derivation/1 failed: missing field probe_port",
+  "d2_failure": "unexpected argument --allow-native-source-build",
+  "list_failure": "unexpected argument --list-derivations",
+  "receipts_created": {
+    "d1": false,
+    "d2": false
+  },
+  "release_and_bundle_stable_during_test": true,
+  "staging_run_count_unchanged": 3,
+  "host_rust_toolchain_used": false,
+  "existing_home_or_cache_used": false,
+  "source_build_started": false,
+  "production_changes": false,
+  "staging_deploy_or_publish_changes": false,
+  "limitation": "User directories/environment isolated on the existing M1 host; this is not a fresh OS installation."
+}

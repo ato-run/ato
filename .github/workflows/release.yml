@@ -43,6 +43,7 @@ on:
   push:
     tags:
       - 'v*'
+      - '!v*-stg' # staging prereleases use release-staging.yml, never Homebrew
 
 jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do

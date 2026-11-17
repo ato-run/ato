@@ -53,13 +53,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
-use ato_objects::CapsuleBundleDocument;
 use ato_objects::capsulehub::{
     HUB_CHUNK_BYTES, HubKey, HubObjectId, MAX_HUB_PLAINTEXT_BYTES, SharedLink, decrypt_file,
     encrypt_file, object_id_of_file,
 };
 use ato_objects::decode_capsule_bundle_document;
-use ato_portable_application::validate_bytes_all;
+use ato_objects::{CapsuleBundleDocument, PortableApplicationBundle};
+use ato_portable_application::{ValidatedPortableApplication, validate_bytes_all};
 use clap::{Args, Subcommand};
 use reqwest::blocking::{Body, Client};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
@@ -91,6 +91,8 @@ pub enum HubCommands {
     /// stored publicly under `capsules/<owner>/<name>`, and the local
     /// validator admits exactly what `ato run` would accept.
     Publish(Box<crate::hub_public::PublishArgs>),
+    /// Read or update publisher-authored time estimates and dependencies for one Derivation.
+    Describe(crate::hub_public::DescribeArgs),
 }
 
 #[derive(Args)]
@@ -139,6 +141,7 @@ pub fn run(command: HubCommands) -> Result<()> {
         HubCommands::Push(args) => push(args),
         HubCommands::Pull(args) => pull(args),
         HubCommands::Publish(args) => crate::hub_public::publish(*args),
+        HubCommands::Describe(args) => crate::hub_public::describe(args),
     }
 }
 
@@ -388,14 +391,26 @@ fn pull(args: PullArgs) -> Result<()> {
     Ok(())
 }
 
-/// Client-side formed-capsule validation shared by push and pull.
+/// A formed hub object: the decoded bundle, its canonical `ContractRef` and
+/// every declared Derivation validated by the same path the local Run uses.
+///
+/// `ato hub publish` needs the whole value so it can derive per-Derivation
+/// execution capabilities from validated routes; push and pull only need the
+/// `ContractRef` and call [`validate_formed_bundle`].
+pub(crate) struct ValidatedFormedBundle {
+    pub(crate) contract_ref: String,
+    pub(crate) bundle: PortableApplicationBundle,
+    pub(crate) derivations: Vec<ValidatedPortableApplication>,
+}
+
+/// Client-side formed-capsule validation shared by push, pull and publish.
 ///
 /// Only contract-root portable application bundles (wire v3/v4) are hub
 /// objects: their identity is a `ContractRef`. Computation-root wire v2 is a
 /// different reference domain and must never be relabelled as a capsule
-/// identity. The returned value is the `ContractRef` recomputed by the
+/// identity. The returned `ContractRef` is recomputed by the
 /// portable-application validator from canonical `ato.contract/1` bytes.
-pub(crate) fn validate_formed_bundle(bytes: &[u8]) -> Result<String> {
+pub(crate) fn validate_formed_bundle_document(bytes: &[u8]) -> Result<ValidatedFormedBundle> {
     let document = decode_capsule_bundle_document(bytes)
         .context("the file is not a supported portable application bundle (wire v3/v4)")?;
     match document {
@@ -416,12 +431,21 @@ pub(crate) fn validate_formed_bundle(bytes: &[u8]) -> Result<String> {
                 bundle.index.root_contract_ref == first.contract_ref.as_str(),
                 "bundle root_contract_ref does not name the canonical Contract"
             );
-            Ok(first.contract_ref.to_string())
+            Ok(ValidatedFormedBundle {
+                contract_ref: first.contract_ref.to_string(),
+                bundle,
+                derivations: validated,
+            })
         }
         CapsuleBundleDocument::ComputationV2(_) => bail!(
             "computation-root wire v2 is not a contract-root capsule: its root is a ComputationRef, never a ContractRef; export a wire v3/v4 portable application before using a hub"
         ),
     }
+}
+
+/// The formed-capsule `ContractRef` shared by push and pull.
+pub(crate) fn validate_formed_bundle(bytes: &[u8]) -> Result<String> {
+    Ok(validate_formed_bundle_document(bytes)?.contract_ref)
 }
 
 fn hub_client() -> Result<Client> {

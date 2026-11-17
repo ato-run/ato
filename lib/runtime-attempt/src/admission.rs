@@ -58,6 +58,12 @@ pub enum EffectAuthorization<'a> {
     /// confirmation of effects the D declares beyond the disposable ones,
     /// which still need a confirmation this request does not carry.
     UserInvoked { derivation_ref: &'a str },
+    /// A person started exactly this Derivation *and* explicitly accepted the
+    /// requirements it declares (the CLI listed them and was told yes, for
+    /// example a native source build's fixed crate egress). It authorizes
+    /// those declared requirements for this D only; it still confirms no
+    /// declared effect beyond the disposable ones.
+    UserAuthorizedDeclaredRequirements { derivation_ref: &'a str },
     /// Search-scoped grant issued from an external frozen ceiling. It is not
     /// a user Run authorization and cannot be carried by a retained artifact.
     Exploration {
@@ -79,6 +85,9 @@ impl EffectAuthorization<'_> {
             Self::Unattended => "unattended",
             Self::PrivateIsolatedFormation => "private_isolated_formation",
             Self::UserInvoked { .. } => "user_invoked",
+            Self::UserAuthorizedDeclaredRequirements { .. } => {
+                "user_authorized_declared_requirements"
+            }
             Self::Exploration { .. } => "exploration",
             Self::FunctionalVerification { .. } => "functional_verification",
         }
@@ -205,6 +214,14 @@ pub(crate) fn admit_with_model_delivery(
                 return refused(
                     error.0,
                     "D requires conditions outside its search-scoped grant",
+                );
+            }
+        }
+        EffectAuthorization::UserAuthorizedDeclaredRequirements { derivation_ref } => {
+            if derivation_ref != spec.derivation_ref {
+                return refused(
+                    "authorization_mismatch",
+                    "the authorized requirements name another D",
                 );
             }
         }
@@ -516,6 +533,68 @@ mod tests {
             .runtimes
             .insert("python".to_owned(), "3.12.7".to_owned());
         assert_eq!(check_derivation(&route), None);
+    }
+
+    /// A person who accepted the requirements the CLI listed (for example a
+    /// native source build's fixed crate egress) authorizes those
+    /// requirements for that exact D. A plain user-invoked Run still refuses
+    /// any declared requirement, and an authorization names one D only.
+    #[test]
+    fn a_user_authorization_covers_the_declared_requirements_of_that_d() {
+        let contract = BoundContract {
+            schema: "ato.contract/1".into(),
+            requirements: vec![],
+        };
+        let mut d = derivation(EffectClass::Pure);
+        d.requirements = serde_json::from_value(serde_json::json!({
+            "network": [{"phase":"build","host":"crates.io","port":443}]
+        }))
+        .unwrap();
+        let spec = AttemptSpec {
+            contract: &contract,
+            contract_ref: "sha256:k",
+            derivation: &d,
+            derivation_ref: "sha256:d",
+            shape: CandidateShape::Process,
+            input_refs: Default::default(),
+            instance_snapshot_ref: None,
+            scenarios: vec![],
+        };
+        assert_eq!(
+            admit(
+                &spec,
+                EffectAuthorization::UserInvoked {
+                    derivation_ref: "sha256:d"
+                },
+                None
+            )
+            .map(|failure| failure.code)
+            .as_deref(),
+            Some("execution_authority_required")
+        );
+        assert_eq!(
+            admit(
+                &spec,
+                EffectAuthorization::UserAuthorizedDeclaredRequirements {
+                    derivation_ref: "sha256:d"
+                },
+                None
+            )
+            .map(|failure| failure.code),
+            None
+        );
+        assert_eq!(
+            admit(
+                &spec,
+                EffectAuthorization::UserAuthorizedDeclaredRequirements {
+                    derivation_ref: "sha256:other"
+                },
+                None
+            )
+            .map(|failure| failure.code)
+            .as_deref(),
+            Some("authorization_mismatch")
+        );
     }
 
     #[test]

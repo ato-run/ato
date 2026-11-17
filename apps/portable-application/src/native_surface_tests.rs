@@ -131,7 +131,7 @@ pub(crate) fn fixture(pixel: bool) -> PortableApplicationBundle {
     ];
     derivation.native_surface = Some(NativeSurfaceAdapter {
         surface,
-        probe_port: "app.probe".to_owned(),
+        probe_port: Some("app.probe".to_owned()),
         operations: vec![operation],
     });
     let application = ApplicationV2 {
@@ -303,7 +303,7 @@ fn native_profile_refuses_missing_k_digest_unobserved_actions_and_unsupported_ro
             d.steps[0].protocol = PROCESS_PROTOCOL.to_owned();
         },
         |d: &mut BoundDerivation| {
-            d.native_surface.as_mut().unwrap().probe_port = "app.native".to_owned();
+            d.native_surface.as_mut().unwrap().probe_port = Some("app.native".to_owned());
         },
         |d: &mut BoundDerivation| {
             d.ports[1].from = "sibling".to_owned();

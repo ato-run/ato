@@ -194,12 +194,18 @@ pub(crate) fn generate_sbpl_profile(policy: &SandboxPolicy) -> String {
         .copied()
         .filter(|port| *port != 0)
         .collect::<Vec<_>>();
+    let remote_ports = policy
+        .allowed_connect_remote_tcp_ports
+        .iter()
+        .copied()
+        .filter(|port| *port != 0)
+        .collect::<Vec<_>>();
     if policy.allow_network {
         profile.push_str("\n; Network access\n");
         profile.push_str("(allow network-outbound)\n");
         profile.push_str("(allow network-inbound)\n");
         profile.push_str("(allow system-socket)\n");
-    } else if !bind_ports.is_empty() || !connect_ports.is_empty() {
+    } else if !bind_ports.is_empty() || !connect_ports.is_empty() || !remote_ports.is_empty() {
         profile.push_str("\n; Port-scoped network access\n");
         profile.push_str("(allow system-socket)\n");
         // Inbound is scoped to the loopback host: the declared Port is the
@@ -218,6 +224,53 @@ pub(crate) fn generate_sbpl_profile(policy: &SandboxPolicy) -> String {
             profile.push_str(&format!(
                 "(allow network-outbound (remote tcp \"localhost:{port}\"))\n"
             ));
+        }
+        // A build reaches the crate and source hosts over HTTPS. Seatbelt is
+        // port-scoped only, so the grant is 443 to any host; the declaration
+        // already bounds the vocabulary, and a hostname must resolve before
+        // HTTPS is attempted, so the resolver ports travel with it.
+        for port in &remote_ports {
+            profile.push_str(&format!(
+                "(allow network-outbound (remote tcp \"*:{port}\"))\n"
+            ));
+        }
+        if !remote_ports.is_empty() {
+            // A hostname must resolve before HTTPS is attempted. macOS resolves
+            // through mDNSResponder over a Unix socket; a port-scoped grant does
+            // not cover that socket, so the resolver socket travels with the
+            // egress grant. Direct resolver queries are allowed as well.
+            profile.push_str("(allow network-outbound (remote udp \"*:53\"))\n");
+            profile.push_str("(allow network-outbound (remote tcp \"*:53\"))\n");
+            profile.push_str("(allow network-outbound (literal \"/var/run/mDNSResponder\"))\n");
+            profile.push_str(
+                "(allow network-outbound (literal \"/private/var/run/mDNSResponder\"))\n",
+            );
+            // The resolver follows /etc and /var symlinks before opening
+            // /etc/resolv.conf. Canonical-only filesystem grants do not cover
+            // metadata lookup on those symlinks, and resolv.conf points outside
+            // /private/etc to /private/var/run/resolv.conf.
+            for path in [
+                "/etc",
+                "/var",
+                "/var/run",
+                "/private",
+                "/private/etc",
+                "/private/var",
+                "/private/var/run",
+            ] {
+                profile.push_str(&format!(
+                    "(allow file-read-metadata (literal \"{path}\"))\n"
+                ));
+            }
+            for path in [
+                "/etc/hosts",
+                "/private/etc/hosts",
+                "/etc/resolv.conf",
+                "/private/etc/resolv.conf",
+                "/private/var/run/resolv.conf",
+            ] {
+                profile.push_str(&format!("(allow file-read* (literal \"{path}\"))\n"));
+            }
         }
     }
 
@@ -458,6 +511,54 @@ mod tests {
             profile.contains("(allow network-outbound (remote tcp \"localhost:43124\"))"),
             "outbound connect must name the loopback host:\n{profile}"
         );
+    }
+
+    /// A source build reaches the crate and source hosts its declaration
+    /// names, and a hostname must resolve before HTTPS is attempted. Seatbelt
+    /// is port-scoped only, so the build grant is 443 to any host plus the
+    /// resolver ports/socket/configuration; unrestricted network stays denied.
+    #[test]
+    fn a_build_egress_grant_renders_the_port_and_the_resolver() {
+        let policy = SandboxPolicy::new()
+            .with_network(false)
+            .allow_tcp_connect_remote([443]);
+        let profile = generate_sbpl_profile(&policy);
+        assert!(profile.contains("(allow network-outbound (remote tcp \"*:443\"))"));
+        assert!(profile.contains("(allow network-outbound (remote udp \"*:53\"))"));
+        assert!(profile.contains("(allow network-outbound (remote tcp \"*:53\"))"));
+        assert!(
+            profile
+                .contains("(allow network-outbound (literal \"/private/var/run/mDNSResponder\"))")
+        );
+        for path in ["/etc", "/var", "/private/var/run"] {
+            assert!(profile.contains(&format!("(allow file-read-metadata (literal \"{path}\"))")));
+            assert!(!profile.contains(&format!("(allow file-read* (subpath \"{path}\"))")));
+        }
+        assert!(profile.contains("(allow file-read* (literal \"/private/var/run/resolv.conf\"))"));
+        assert!(!profile.contains("\n(allow network-outbound)\n"));
+        assert!(!profile.contains("(allow network-inbound"));
+        assert!(!profile.contains("(remote tcp \"*:80\")"));
+    }
+
+    #[test]
+    fn local_only_and_disabled_network_do_not_grant_the_host_resolver() {
+        for policy in [
+            SandboxPolicy::new().with_network(false),
+            SandboxPolicy::new()
+                .with_network(false)
+                .allow_tcp_bind([43123]),
+            SandboxPolicy::new()
+                .with_network(false)
+                .allow_tcp_connect([43124]),
+            SandboxPolicy::new()
+                .with_network(false)
+                .allow_tcp_connect_remote([0]),
+        ] {
+            let profile = generate_sbpl_profile(&policy);
+            assert!(!profile.contains("mDNSResponder"));
+            assert!(!profile.contains("resolv.conf"));
+            assert!(!profile.contains("*:53"));
+        }
     }
 
     #[test]

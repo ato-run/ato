@@ -16,13 +16,20 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
-use ato_formation::verify::{VerificationExecutionEvidence, VerificationNativeEvidence};
+use ato_formation::native_surface::{NativeProbeOperation, NativeSurfaceAdapter};
+use ato_formation::verify::{
+    RuntimeTerminalObservation, VerificationExecutionEvidence, VerificationNativeEvidence,
+};
+use ato_pty_host::PtySession;
 use ato_runtime_attempt::launch::process_executor::state_path_env_name;
 use ato_runtime_attempt::realize::{RealizeFailure, Realized, RunningCandidate};
 use ato_sandbox::SandboxPolicy;
 
-use super::artifact::{ExtractedArtifact, extract_tar_gz};
-use super::{NativeRefusal, NativeStart, resolve_entry};
+use super::artifact::{ExtractedArtifact, adopt_tree, extract_archive, extract_archive_file};
+use super::terminal;
+use super::{
+    NativeArchiveSource, NativeArtifactPayload, NativeRefusal, NativeStart, resolve_entry,
+};
 use crate::portable_run::{endpoint_port_env_name, remove_owned};
 use crate::process_group::{ProcessServiceGroup, ServiceSpec};
 
@@ -399,11 +406,19 @@ pub(crate) fn prepare(
         });
     }
     let artifact_root = native_root.join("artifact");
-    let extracted =
-        extract_tar_gz(&request.artifact_bytes, &artifact_root).map_err(|error| NativeRefusal {
-            code: "native_artifact_invalid",
-            detail: format!("{error:#}"),
-        })?;
+    // Acquisition already happened; this stage only materializes what it
+    // produced. A format this Adapter cannot unpack keeps its own code so it is
+    // not reported as a corrupted artifact.
+    let extracted = match &request.payload {
+        NativeArtifactPayload::Archive(NativeArchiveSource::Memory(bytes)) => {
+            extract_archive(bytes, request.descriptor.format, &artifact_root)
+        }
+        NativeArtifactPayload::Archive(NativeArchiveSource::File(path)) => {
+            extract_archive_file(path, request.descriptor.format, &artifact_root)
+        }
+        NativeArtifactPayload::BuiltTree(root) => adopt_tree(root),
+    }
+    .map_err(super::artifact_refusal)?;
     let entry = resolve_entry(&extracted.root, &request.descriptor.entry)?;
     let signature = prepare_signature(
         request.descriptor,
@@ -647,6 +662,13 @@ fn verify_port_ownership(
 /// this Run owns.
 struct NativeDesktopCandidate {
     group: Option<ProcessServiceGroup>,
+    /// The host-owned PTY of a Terminal route. Exactly one of `group` and
+    /// `pty` is present: an HTTP route serves Ports, a Terminal route owns a
+    /// terminal.
+    pty: Option<PtySession>,
+    /// The declared Terminal surface, when this candidate is one. It supplies
+    /// the Port identity and the operation paths the exchanges report.
+    terminal: Option<NativeSurfaceAdapter>,
     endpoints: BTreeMap<String, String>,
     owned: Vec<PathBuf>,
     /// The pids this Run started, in start order. Reported when a stop cannot
@@ -708,7 +730,26 @@ impl RunningCandidate for NativeDesktopCandidate {
     fn exited(&mut self) -> Result<Option<String>> {
         match self.group.as_mut() {
             Some(group) => group.exited(),
-            None => Ok(Some("stopped".to_owned())),
+            None => Ok(self
+                .pty
+                .as_mut()
+                .map(PtySession::exited)
+                .unwrap_or_else(|| Some("stopped".to_owned()))),
+        }
+    }
+
+    /// Run the declared terminal exchanges while the PTY is still alive.
+    ///
+    /// A candidate with no PTY reports nothing: the verifier then fails every
+    /// terminal requirement closed as unobserved rather than accepting a
+    /// measurement this Run did not take.
+    fn observe_terminal(
+        &mut self,
+        operations: &[(&str, &NativeProbeOperation)],
+    ) -> Vec<RuntimeTerminalObservation> {
+        match (self.pty.as_mut(), self.terminal.as_ref()) {
+            (Some(session), Some(adapter)) => terminal::exchanges(session, adapter, operations),
+            _ => Vec::new(),
         }
     }
 
@@ -717,7 +758,10 @@ impl RunningCandidate for NativeDesktopCandidate {
         // helper is still running when only its main process exits.
         let outcome = match self.group.take() {
             Some(group) => group.stop().map_err(|error| format!("{error:#}")),
-            None => Ok(()),
+            None => match self.pty.take() {
+                Some(mut session) => session.stop(),
+                None => Ok(()),
+            },
         };
         let result = apply_stop_outcome(outcome, &self.owned, &self.pids, &self.retained);
         self.stopped = result.is_ok();
@@ -735,6 +779,7 @@ impl Drop for NativeDesktopCandidate {
         // termination that was never confirmed is not permission to delete the
         // Run area.
         drop(self.group.take());
+        drop(self.pty.take());
         if self.stopped {
             if let Err(error) = remove_owned(&self.owned) {
                 eprintln!("[ato run] {error:#}");
@@ -825,13 +870,30 @@ pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure
             detail: "sandbox-exec disappeared between admission and launch".to_owned(),
         }))
     })?;
-    let command = vec![
+    let mut command = vec![
         launcher.display().to_string(),
         "-f".to_owned(),
         profile_path.display().to_string(),
         prepared.entry.display().to_string(),
     ];
+    // A Terminal route may declare the arguments its program is addressed
+    // with; an HTTP route never does (validation refuses it), so this is empty
+    // everywhere else.
+    command.extend(request.descriptor.argv.iter().cloned());
     let environment = environment_for(&request, &scratch_root, request.ports);
+    // A Terminal route is observed through the PTY it owns, not through a
+    // listening socket: there is no Port to wait for and no listener to prove.
+    if let Some(terminal) = request.terminal {
+        return start_terminal(
+            &request,
+            &prepared,
+            terminal,
+            command,
+            environment,
+            &owned,
+            &native_root,
+        );
+    }
     let readiness = SocketAddr::from((Ipv4Addr::LOCALHOST, request.ports[0].guest_port));
     let spec = ServiceSpec {
         name: "native".to_owned(),
@@ -893,7 +955,7 @@ pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure
         pid,
         endpoint: Some(first_endpoint),
         native: Some(VerificationNativeEvidence {
-            artifact_ref: request.descriptor.artifact.clone(),
+            artifact_ref: request.provenance.artifact_ref.clone(),
             materialized_tree_digest: prepared.extracted.tree_digest.clone(),
             entry: request.descriptor.entry.clone(),
             signature_policy: request.descriptor.signature.as_str().to_owned(),
@@ -920,8 +982,17 @@ pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure
         containment: "seatbelt: read-only artifact/workspace, Run-scoped state writes, \
                       declared loopback Ports only; window/display not enforced"
             .to_owned(),
-        workspace: "artifact and workspace mounted read-only".to_owned(),
-        build_network: "not applicable: the artifact is a verified bundle payload".to_owned(),
+        workspace: format!(
+            "artifact and workspace mounted read-only; {}",
+            request.provenance.materialization()
+        ),
+        build_network: match request.provenance.kind {
+            "source" => "build sandbox: source read-only, Run-scoped target directory, TCP egress                          on 443 only; host-name filtering is not part of this Seatbelt grant"
+                .to_owned(),
+            "remote" => "not applicable: the artifact is a digest-pinned upstream payload this Run                          fetched and verified"
+                .to_owned(),
+            _ => "not applicable: the artifact is a verified bundle payload".to_owned(),
+        },
         candidate_network: "inbound on declared loopback Ports only; TCP egress denied".to_owned(),
         endpoints: endpoints.clone(),
         destroyed: false,
@@ -929,6 +1000,8 @@ pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure
     Ok(Realized {
         candidate: Box::new(NativeDesktopCandidate {
             group: Some(group),
+            pty: None,
+            terminal: None,
             endpoints,
             owned,
             pids: pids.clone(),
@@ -941,13 +1014,115 @@ pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure
     })
 }
 
+/// Start one selected native Terminal Derivation.
+///
+/// The prepared artifact, the signature verdicts and the Seatbelt profile are
+/// the same as an HTTP route's; only the transport differs. The Adapter owns
+/// the PTY, so the endpoint map is empty, no readiness Port is proven, and the
+/// declared terminal exchanges are what K observes.
+#[allow(clippy::too_many_arguments)]
+fn start_terminal(
+    request: &NativeStart<'_>,
+    prepared: &PreparedNative,
+    terminal: &crate::ValidatedNativeTerminal,
+    command: Vec<String>,
+    environment: BTreeMap<String, String>,
+    owned: &[PathBuf],
+    native_root: &Path,
+) -> Result<Realized, RealizeFailure> {
+    let Some((cols, rows)) = terminal.surface.terminal_geometry() else {
+        return Err(RealizeFailure::Execution(anyhow!(
+            "native_terminal_surface_invalid: the declared surface is not a terminal"
+        )));
+    };
+    let session = PtySession::spawn(&command, &environment, &prepared.extracted.root, cols, rows)
+        .map_err(|error| {
+        launch_failure(anyhow!("native_terminal_start_failed: {error}"), owned)
+    })?;
+    let pid = session.pid();
+    let execution = VerificationExecutionEvidence {
+        realization: "native_desktop".to_owned(),
+        runtime_executable: Some(prepared.entry.display().to_string()),
+        runtime_version: None,
+        pid: Some(pid),
+        endpoint: None,
+        native: Some(VerificationNativeEvidence {
+            artifact_ref: request.provenance.artifact_ref.clone(),
+            materialized_tree_digest: prepared.extracted.tree_digest.clone(),
+            entry: request.descriptor.entry.clone(),
+            signature_policy: request.descriptor.signature.as_str().to_owned(),
+            signature_target: prepared.signature.target_kind.as_str().to_owned(),
+            verified_target: prepared.signature.target.clone(),
+            codesign_verify: prepared.signature.report.codesign_verify.to_owned(),
+            signature_kind: prepared.signature.report.signature_kind.to_owned(),
+            codesign_detail: prepared.signature.report.codesign_detail.clone(),
+            gatekeeper: prepared.signature.report.gatekeeper.to_owned(),
+            gatekeeper_detail: prepared.signature.report.gatekeeper_detail.clone(),
+            local_override: prepared.signature.override_used,
+            sandbox: "seatbelt".to_owned(),
+            enforced_read_only: prepared.sandbox.read_only.clone(),
+            enforced_read_write: prepared.sandbox.read_write.clone(),
+            enforced_inbound_ports: Vec::new(),
+            process_group: Some(pid),
+            window_containment: "not enforced in this increment".to_owned(),
+        }),
+        ..Default::default()
+    };
+    let evidence = ato_formation::request::RealizationEvidence {
+        port_operations: Vec::new(),
+        executor: "ato native desktop adapter (macOS Seatbelt, PTY)".to_owned(),
+        containment: "seatbelt: read-only artifact/workspace, Run-scoped state writes; the terminal is a Run-owned PTY and the route opens no listening socket".to_owned(),
+        workspace: format!(
+            "artifact and workspace mounted read-only; {}",
+            request.provenance.materialization()
+        ),
+        build_network: match request.provenance.kind {
+            "source" => "build sandbox: source read-only, Run-scoped target directory, TCP egress on 443 only; host-name filtering is not part of this Seatbelt grant".to_owned(),
+            "remote" => "not applicable: the artifact is a digest-pinned upstream payload this Run fetched and verified".to_owned(),
+            _ => "not applicable: the artifact is a verified bundle payload".to_owned(),
+        },
+        candidate_network: "none: a terminal route opens no listening socket; TCP egress denied".to_owned(),
+        endpoints: BTreeMap::new(),
+        destroyed: false,
+    };
+    Ok(Realized {
+        candidate: Box::new(NativeDesktopCandidate {
+            group: None,
+            pty: Some(session),
+            terminal: Some(terminal.surface.clone()),
+            endpoints: BTreeMap::new(),
+            owned: owned.to_vec(),
+            pids: vec![("native".to_owned(), pid)],
+            retained: native_root.to_path_buf(),
+            stopped: false,
+        }),
+        evidence: Some(evidence),
+        execution,
+        kept: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native_desktop::NativeProvenance;
     use ato_formation::native_desktop::NativeSignaturePolicy;
 
     fn codesign_available() -> bool {
         codesign_tool().is_some() && spctl_tool().is_some()
+    }
+
+    /// The provenance a bundle-carried artifact reports in these tests.
+    fn provenance() -> NativeProvenance {
+        NativeProvenance {
+            kind: "bundled",
+            artifact_ref: format!("sha256:{}", "a".repeat(64)),
+            fetched_from: None,
+            source_commit: None,
+            build_cache: None,
+            toolchain: None,
+            build_argv: None,
+        }
     }
 
     /// The committed sample artifact is an unsigned shell script. Its
@@ -1322,6 +1497,8 @@ time.sleep(0.3)
         let pids = group.pids();
         let mut candidate = Box::new(NativeDesktopCandidate {
             group: Some(group),
+            pty: None,
+            terminal: None,
             endpoints: BTreeMap::from([(
                 "app.http".to_owned(),
                 format!("http://127.0.0.1:{port}"),
@@ -1488,11 +1665,15 @@ time.sleep(0.3)
             let descriptor = ato_formation::native_desktop::NativeDescriptor {
                 os: ato_formation::native_desktop::NativeOs::Macos,
                 arch: ato_formation::native_desktop::NativeArch::Aarch64,
-                artifact: format!("sha256:{}", "a".repeat(64)),
+                source: ato_formation::native_desktop::NativeArtifactSource::Bundled {
+                    artifact: format!("sha256:{}", "a".repeat(64)),
+                },
+
                 entry: "app/run.sh".to_owned(),
                 format: ato_formation::native_desktop::NativeArtifactFormat::TarGz,
                 signature: NativeSignaturePolicy::RequireValidOrLocalOverride,
                 signature_target: ato_formation::native_desktop::NativeSignatureTarget::Executable,
+                argv: Vec::new(),
             };
             let ports = vec![crate::ValidatedNativePort {
                 id: "app.http".to_owned(),
@@ -1500,9 +1681,11 @@ time.sleep(0.3)
             }];
             let environment = BTreeMap::new();
             let request = NativeStart {
-                artifact_bytes: Vec::new(),
+                payload: NativeArtifactPayload::Archive(NativeArchiveSource::Memory(Vec::new())),
+                provenance: provenance(),
                 descriptor: &descriptor,
                 ports: &ports,
+                terminal: None,
                 workspace: scratch.path().to_path_buf(),
                 runtime_root: scratch.path(),
                 state_paths: Vec::new(),
@@ -1549,11 +1732,15 @@ time.sleep(0.3)
             let descriptor = ato_formation::native_desktop::NativeDescriptor {
                 os: ato_formation::native_desktop::NativeOs::Macos,
                 arch: ato_formation::native_desktop::NativeArch::Aarch64,
-                artifact: format!("sha256:{}", "a".repeat(64)),
+                source: ato_formation::native_desktop::NativeArtifactSource::Bundled {
+                    artifact: format!("sha256:{}", "a".repeat(64)),
+                },
+
                 entry: "app/run.sh".to_owned(),
                 format: ato_formation::native_desktop::NativeArtifactFormat::TarGz,
                 signature: NativeSignaturePolicy::RequireValidOrLocalOverride,
                 signature_target: ato_formation::native_desktop::NativeSignatureTarget::Executable,
+                argv: Vec::new(),
             };
             // The interpreter has to be inside the read-only set; use the
             // system python rather than whatever PATH this test inherited.
@@ -1562,9 +1749,13 @@ time.sleep(0.3)
                 "/usr/bin:/bin:/usr/sbin:/sbin".to_owned(),
             )]);
             let request = NativeStart {
-                artifact_bytes: artifact.clone(),
+                payload: NativeArtifactPayload::Archive(NativeArchiveSource::Memory(
+                    artifact.clone(),
+                )),
+                provenance: provenance(),
                 descriptor: &descriptor,
                 ports: &ports,
+                terminal: None,
                 workspace: workspace.clone(),
                 runtime_root: &runtime_root,
                 state_paths: Vec::new(),
@@ -1685,17 +1876,23 @@ time.sleep(0.3)
         let descriptor = ato_formation::native_desktop::NativeDescriptor {
             os: ato_formation::native_desktop::NativeOs::Macos,
             arch: ato_formation::native_desktop::NativeArch::Aarch64,
-            artifact: format!("sha256:{}", "a".repeat(64)),
+            source: ato_formation::native_desktop::NativeArtifactSource::Bundled {
+                artifact: format!("sha256:{}", "a".repeat(64)),
+            },
+
             entry: "app/run.sh".to_owned(),
             format: ato_formation::native_desktop::NativeArtifactFormat::TarGz,
             signature: NativeSignaturePolicy::RequireValidOrLocalOverride,
             signature_target: ato_formation::native_desktop::NativeSignatureTarget::Executable,
+            argv: Vec::new(),
         };
         let environment = BTreeMap::new();
         let request = NativeStart {
-            artifact_bytes: artifact,
+            payload: NativeArtifactPayload::Archive(NativeArchiveSource::Memory(artifact)),
+            provenance: provenance(),
             descriptor: &descriptor,
             ports: &ports,
+            terminal: None,
             workspace: workspace.clone(),
             runtime_root: &runtime_root,
             state_paths: Vec::new(),
@@ -1824,6 +2021,8 @@ time.sleep(0.3)
         fs::create_dir_all(&area).unwrap();
         let candidate = NativeDesktopCandidate {
             group: None,
+            pty: None,
+            terminal: None,
             endpoints: BTreeMap::new(),
             owned: vec![area.clone()],
             pids: vec![("native".to_owned(), 7)],
@@ -1842,6 +2041,8 @@ time.sleep(0.3)
         fs::create_dir_all(&area).unwrap();
         let candidate = NativeDesktopCandidate {
             group: None,
+            pty: None,
+            terminal: None,
             endpoints: BTreeMap::new(),
             owned: vec![area.clone()],
             pids: Vec::new(),
@@ -1874,11 +2075,14 @@ time.sleep(0.3)
         ato_formation::native_desktop::NativeDescriptor {
             os: ato_formation::native_desktop::NativeOs::Macos,
             arch: ato_formation::native_desktop::NativeArch::Aarch64,
-            artifact: format!("sha256:{}", "a".repeat(64)),
+            source: ato_formation::native_desktop::NativeArtifactSource::Bundled {
+                artifact: format!("sha256:{}", "a".repeat(64)),
+            },
             entry: "MyApp.app/Contents/MacOS/MyApp".to_owned(),
             format: ato_formation::native_desktop::NativeArtifactFormat::TarGz,
             signature: policy,
             signature_target: ato_formation::native_desktop::NativeSignatureTarget::Bundle,
+            argv: Vec::new(),
         }
     }
 
@@ -1997,9 +2201,13 @@ time.sleep(0.3)
                 guest_port: port,
             }];
             let request = NativeStart {
-                artifact_bytes: artifact.clone(),
+                payload: NativeArtifactPayload::Archive(NativeArchiveSource::Memory(
+                    artifact.clone(),
+                )),
+                provenance: provenance(),
                 descriptor: &descriptor,
                 ports: &ports,
+                terminal: None,
                 workspace: workspace.clone(),
                 runtime_root: &runtime_root,
                 state_paths: Vec::new(),
@@ -2042,9 +2250,11 @@ time.sleep(0.3)
             guest_port: 18080,
         }];
         let request = NativeStart {
-            artifact_bytes: artifact,
+            payload: NativeArtifactPayload::Archive(NativeArchiveSource::Memory(artifact)),
+            provenance: provenance(),
             descriptor: &descriptor,
             ports: &ports,
+            terminal: None,
             workspace,
             runtime_root: &runtime_root,
             state_paths: Vec::new(),
