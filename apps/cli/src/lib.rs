@@ -14,6 +14,7 @@ mod hub_public;
 mod hub_transfer;
 mod mcp_stdio;
 mod model_cache;
+mod model_install;
 mod object_transport;
 mod portable_dependency;
 pub mod workspace;
@@ -140,6 +141,11 @@ enum Commands {
     ModelSet {
         #[command(subcommand)]
         command: model_cache::ModelSetCommands,
+    },
+    /// Download, inspect or remove the optional local Model Set assets.
+    Model {
+        #[command(subcommand)]
+        command: model_install::ModelCommands,
     },
     /// Import and operate a durable local portable Application Instance.
     App {
@@ -813,6 +819,7 @@ pub fn run() -> Result<()> {
         Commands::Run(args) => run_capsule(args),
         Commands::Reform(args) => run_reform(args),
         Commands::ModelSet { command } => model_cache::execute(command),
+        Commands::Model { command } => model_install::execute(command),
         Commands::App { command } => match command {
             AppCommands::Install(args) => install_local_application(args),
             AppCommands::Import(args) => import_local_application(args),
