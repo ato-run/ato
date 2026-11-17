@@ -16,6 +16,7 @@ mod mcp_stdio;
 mod model_cache;
 mod object_transport;
 mod portable_dependency;
+mod source_fetch;
 pub mod workspace;
 mod workspace_control;
 pub mod zip_store;
@@ -196,6 +197,16 @@ enum Commands {
     /// environments and run the Formation attempts addressed to it.
     #[command(subcommand)]
     RuntimeNetwork(RuntimeNetworkCommand),
+    /// Acquire what a Formation builds from: a pinned source snapshot.
+    ///
+    /// Only `https://github.com/<owner>/<repo>[/tree/<ref>[/<path>]]` is
+    /// accepted; the ref is resolved to a full commit SHA before any archive
+    /// is downloaded, and the archive is materialized only by the existing
+    /// verified-archive authority.
+    Source {
+        #[command(subcommand)]
+        command: source_fetch::SourceCommands,
+    },
     /// Report this binary's build identity (version, commit, profile).
     ///
     /// `--version` stays exactly as it was — a human-readable release-line
@@ -778,6 +789,9 @@ pub fn run() -> Result<()> {
     }
     match Cli::parse().command {
         Commands::Version { json } => version(json),
+        Commands::Source { command } => match command {
+            source_fetch::SourceCommands::Fetch(args) => source_fetch::fetch(args),
+        },
         Commands::Init(args) => init(args),
         Commands::Resume(args) => resume(args),
         Commands::Stop { capsule } => stop(&capsule),
