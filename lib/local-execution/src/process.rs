@@ -95,7 +95,17 @@ fn process_start_time(pid: u32) -> Option<String> {
     fields.get(19).map(|value| (*value).to_owned())
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(target_os = "macos")]
+fn process_start_time(pid: u32) -> Option<String> {
+    let info =
+        libproc::proc_pid::pidinfo::<libproc::libproc::bsd_info::BSDInfo>(pid as i32, 0).ok()?;
+    Some(format!(
+        "{}.{:06}",
+        info.pbi_start_tvsec, info.pbi_start_tvusec
+    ))
+}
+
+#[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
 fn process_start_time(pid: u32) -> Option<String> {
     command_output("ps", &["-o", "lstart=", "-p", &pid.to_string()])
 }
@@ -143,7 +153,17 @@ fn boot_session_identity() -> Result<String> {
     bail!("boot/session identity is unavailable on this platform")
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
+fn current_process_group() -> Result<u32> {
+    let info = libproc::proc_pid::pidinfo::<libproc::libproc::bsd_info::BSDInfo>(
+        std::process::id() as i32,
+        0,
+    )
+    .map_err(|error| anyhow::anyhow!("current process group is unavailable: {error}"))?;
+    Ok(info.pbi_pgid)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
 fn current_process_group() -> Result<u32> {
     command_output(
         "ps",
