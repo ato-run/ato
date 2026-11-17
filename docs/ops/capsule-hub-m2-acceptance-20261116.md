@@ -1,6 +1,6 @@
 # Capsule Hub M2 — 受け入れサマリ（2026-11-16）
 
-Status: M1 native D1/D2・二回目 cache hit・staging 公開に加え、公開 CLI 0.9.4-stg のクリーンインストールからの受け入れ完了。本番は未実施。
+Status: 正式CLI 0.9.4公開・空のユーザー環境からM1 D1/D2・D2 cache hitの受け入れまで完了。Hub API/UI変更はstagingのみ。本番Web/APIは未配備。
 Parent: ato #1819（重複 Issue なし）。契約: `docs/rfcs/draft/capsule-hub-m2-native.md`。
 
 ## 1. マージ済み PR（dev → stg 到達済み）
@@ -152,4 +152,10 @@ OS と Apple command-line tools は既存 M1 のものを使用しており、OS
 
 - v2 pixel surface、対話 viewer/gateway、hosted native 実行、Windows の native containment、
   dmg 展開、notarization/stapling 検証、ローカル validator 768MiB と公式上限 1GB の差。
-- 本番デプロイ・本番公開は未実施（受け入れ完了後に別承認）。
+- Web/APIの本番デプロイ・Capsule本番公開は未実施。正式CLI 0.9.4の公開は追加承認に基づき完了（§7）。
+
+## 7. 正式CLI 0.9.4とHub情報/UI修正（2026-11-17）
+
+正式配布版でD1 71.818秒、D2初回 1345.616秒、再実行 83.448秒。全receipt fully_satisfied=true、同一K・別D・異なるattempt、cache hitを確認。
+
+CLIは5targetの配布とHomebrewを公開した。Hubの見積時間/依存入力と部分描画・内部scroll修正はstagingへ反映。詳細は[正式版受け入れ](solidcraft-stable-094-acceptance-20261117.md)と機械可読Release Manifestを参照。以前の「本番未実施」は当時の記録で、現在もWeb/API本番配備は未実施。

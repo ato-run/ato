@@ -1,10 +1,39 @@
 # 引き継ぎ: Capsule Hub M2 — SolidCraft 2D の実機検証（2026-11-17 更新）
 
-Status: Current（公開 CLI 0.9.4-stg のクリーンインストールから M1 実機 D1/D2・二回目 cache hit まで完了。本番は未実施）
-パスは特記がなければ ato-run workspace root 基準。14:20 時点の旧手順は以下の現状で置き換える。
+Status: Current（正式 CLI 0.9.4 公開・クリーンインストールからM1 D1/D2・cache hitまで完了。Web/API本番は未配備）
+パスは特記がなければ ato-run workspace root 基準。最新状態は§0。以降の実測履歴は当時の配備と区別する。
 親 Issue: ato-run/ato #1819（重複 Issue を作らない）
 実装契約: `docs/rfcs/draft/capsule-hub-m2-native.md`
 受け入れサマリ: `apps/ato/docs/ops/capsule-hub-m2-acceptance-20261116.md`
+
+## 0. 最新の完了状態 — 正式版0.9.4
+
+- [v0.9.4](https://github.com/ato-run/ato/releases/tag/v0.9.4) をstableとして公開。CLI commit `6b252a89f7d5abaed8b075fb6d6409f60c5ea3df`、release / clean。
+- macOS arm64/x64、Linux arm64/x64、Windows x64の配布とHomebrew更新が成功。native受け入れを実行したhostはM1 / macOS 15.8.1。
+- stg公開installerを空のHOME/ATO_HOME/Cargo/Rust/cacheへ導入し、D1 71.818秒、D2初回 1345.616秒、D2再実行 83.448秒で完了。
+  同一K・別D・全receipt fully_satisfied=true。D2再実行のcache hitはmanifest/artifactと再ビルドなしの証跡で確認した。
+- API/PWAはstagingのみ。API `b7c5caf512c521650bf57a0b5e8d51c883c3c0fe` / Worker `63c3f0b9-142c-4496-b5c1-76bb9f46f434`、
+  PWA `176f1eeb1b54057e9e692532b2d7277a57e79813` / Worker `b092255a-1615-47f9-8b55-a2ce77f2aeb5`。検証前後で不変。
+- Derivationごとの見積時間・前提環境・依存関係・補足をCLI/APIと所有者向けHub編集画面へ追加。API migration0420はstagingだけに適用。
+- Hubの全体remountを解消し、選択時は一覧/検索/scrollを保持して詳細を更新。リストと詳細をviewport内で独立scrollさせ、「カプセルを公開」を「公開方法」の案内へ変更。
+  共通route境界/Settingsも棚卸し、異なる編集対象のdraft分離はleafで維持。staging desktop/mobileの実ブラウザで確認済み。
+- 通常のCLI Run報告でrun_count 10 → 13。直接のcount/verification改変はなし。lease解放、process group回収済み。
+- PR: ato #1892/#1894/#1895、ato-api #1293/#1294、ato-pwa #1029/#1030/#1035/#1036/#1037/#1038。
+- Web/API本番配備・本番migration・flag変更は未実施。本番の `ato.run/install.sh` のbytesは不変。正式CLI公開は追加の明示承認に基づく。
+- 詳細・Release Manifest・receipt hash: [正式版受け入れ](../../ops/solidcraft-stable-094-acceptance-20261117.md)。
+  以下の0.9.4-stg/ローカルCLIの実測値と配備値は履歴として維持する。
+
+stgの既定installerも0.9.4を取得する。正式版のGitHub installerも別の空HOMEで導入・同一binaryを確認済み:
+
+stgの配布入口:
+
+```sh
+curl -fsSL https://stg-app.ato.run/install.sh | sh -s -- --cli-only
+"$HOME/.local/bin/ato" version --json
+```
+
+stagingの公開Capsuleを実行する際は `ATO_API_URL=https://staging.api.ato.run` とdigest/Derivationを明示する。
+D2のみ `--allow-native-source-build --allow-unsigned-native` を渡す。全argvは正式版の証跡JSONに記録した。
 
 ## 1. 目的（この作業が完了したと言える条件）
 
@@ -14,7 +43,7 @@ Status: Current（公開 CLI 0.9.4-stg のクリーンインストールから M
 2. 両 D の **Receipt が同一 `contract_ref`**、D ごとに異なる `derivation_ref`、`fully_satisfied: true`
 3. ビルド成功と K 充足が分離されている（起動 → terminal exchange で K を観測）
 4. 2 回目の D2 実行が **内容ハッシュ cache hit** になること
-5. 受け入れ記録を更新し、本番公開の可否を別承認で判断する（**本番は未実施**）
+5. 受け入れ記録を更新する。正式CLI公開は追加承認済みで§0のとおり完了。Web/APIの本番配備は別判断で未実施。
 
 ## 2. 到達済み（dev / stg マージ済み）
 
@@ -73,16 +102,16 @@ Status: Current（公開 CLI 0.9.4-stg のクリーンインストールから M
 同じ Seatbelt profile の C リンクはディレクトリ作成前に exit 1、作成後に exit 0。
 元の長い Cargo stderr は CLI の先頭 2,000 文字制限に隠れたため、fingerprint diagnostics から回収した。
 
-## 4. 現在のコードと実行
+## 4. 0.9.4-stg検証時点のコードと実行（履歴）
 
 - 公開 CLI: [v0.9.4-stg](https://github.com/ato-run/ato/releases/tag/v0.9.4-stg)（macOS arm64、prerelease / latest=false）。
   source は stg `6b16e9e3998c4f4477461aa372fb2d314cadc6e0`、release build / git_dirty=false。
 - 公開 installer: `https://stg-app.ato.run/install.sh`。PWA source `69316be2e92ea3fb77f1ce56338fad6fbadfa051`、
-  Worker `53d5fb21-9efa-4cbf-b3b3-22df151697f2`。staging の既定版だけ 0.9.4-stg に固定する。
+  Worker `53d5fb21-9efa-4cbf-b3b3-22df151697f2`。この時点ではstagingの既定版だけ0.9.4-stgに固定した（現在は§0の0.9.4）。
 - 新規 HOME / ATO_HOME / Rust / Cargo / cache から install → D1 → D2 → D2 cache hit が成功。
   生ログと元 receipt は workspace `.tmp/sc-094-d2j3x07i/`、全手順 exit 0、lease 解放済み。
   詳細は `apps/ato/docs/ops/solidcraft-staging-094-acceptance-20261117.md`。
-- stable latest は v0.9.3 のまま。本番 installer の bytes 不変を確認。本番配備は行っていない。
+- この検証時点では stable latest は v0.9.3 のまま。本番 installer の bytes 不変を確認。本番配備は行っていない。
 
 以下は先行したローカル開発 CLI の受け入れ履歴であり、上記公開版の代用ではない。
 
@@ -120,7 +149,7 @@ curl -fsSL https://stg-app.ato.run/install.sh | sh -s -- --cli-only
 
 実測ではこれを空のユーザーディレクトリへ導入し、API origin を `https://staging.api.ato.run` に固定、
 上記 bundle の digest 固定参照と各 Derivation を明示して実行した。
-元の全 argv・環境条件・結果は `apps/ato/docs/ops/evidence/solidcraft-staging-094-acceptance-20261117.json`。
+現行の全argv・環境条件・結果は `apps/ato/docs/ops/evidence/solidcraft-stable-094-acceptance-20261117.json`。
 D2 には `--allow-native-source-build --allow-unsigned-native` が必要。D1 には署名 override を渡さない。
 
 repo 内サンプルからの回帰検証は既存スクリプトを使う（公開 bundle を使う検証とは区別する）:
@@ -135,7 +164,7 @@ ATO="$HOME/.local/bin/ato" \
 pack → list → D1 → D2（source build と local signature override を明示）→ D2 再実行 → receipt/cache 検査。
 D1 には署名 override を渡さない。全成功時に三つの receipt と `cache-evidence.json` を保存する。
 
-## 6. 受け入れ完了と次の境界
+## 6. 0.9.4-stgまでの受け入れと当時の境界（履歴）
 
 公開 CLI 0.9.4-stg の受け入れ（17:04–17:56 JST）:
 
@@ -181,11 +210,11 @@ D1 には署名 override を渡さない。全成功時に三つの receipt と 
 - Unix socket のテストは長い TMPDIR/cwd で失敗する。今回の短い test root は workspace `.tmp/m2t`。
 - sandbox 27、native 76、追加負例を含む source-build 11、checker fixture 7、Clippy、arch-check は成功。
   full workspace 初回失敗分は短い path と逐次実行で全件再検証済み。元の全体コマンド成功とは表現しない。
-- CI の formation 整形・README first-example・Linux PTY lint・Windows Unix API は base にもある失敗。
-  課金エラーではなく、成功済みとも扱わない。
+- 引き継ぎ時にあったCIのformation整形・README first-example・Linux PTY lint・Windows Unix APIの失敗は正式版向け変更で解消。
+  feature head34a7e6577の3 OS CLI/ClippyとRust workspace matrixは成功。取り消した重複runは成功扱いにしない。
 - staging origin は `https://staging.api.ato.run`。credential は origin に対応するものだけを使い、値をログに出さない。
 - staging lease は `apps/ato-api/.tmp/hub-mvp/ato-api/scripts/staging-deploy-locked.mjs` で取得・解放する。
-  他者の lease を削除しない。公開 CLI 検証では PWA のみ staging 配備した。API / migration / feature flag は変更なし。
+  他者のleaseを削除しない。0.9.4-stg検証ではPWAのみstaging配備した。その後、Hub情報追加でAPIとmigration0420をstagingへ反映した（§0）。
 - Node の Cloudflare 接続が特定の解決 IP で timeout した。今回だけの DNS preload を `.tmp/resolver-fix/`
   に置き、到達を確認した現在の DNS answer を使った。system DNS・exit node は変更していない。
 
@@ -198,5 +227,6 @@ D1 には署名 override を渡さない。全成功時に三つの receipt と 
 - staging 受け入れ: `apps/ato-api/docs/ops/capsule-hub-m2-large-publish-20261116.md`
 - staging PWA: `apps/ato-pwa/docs/ops/capsule-hub-m2-staging-deploy-20261117.md`
 - 受け入れサマリ: `apps/ato/docs/ops/capsule-hub-m2-acceptance-20261116.md`
-- 公開 CLI 受け入れ: `apps/ato/docs/ops/solidcraft-staging-094-acceptance-20261117.md`
+- 先行staging CLI受け入れ: `apps/ato/docs/ops/solidcraft-staging-094-acceptance-20261117.md`
+- 正式CLI受け入れ: `apps/ato/docs/ops/solidcraft-stable-094-acceptance-20261117.md`
 - 親 Issue: https://github.com/ato-run/ato/issues/1819
