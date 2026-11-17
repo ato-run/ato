@@ -885,14 +885,13 @@ mod tests {
         assert_eq!(resolve_choice(&[], None), DerivationChoice::NeedsSelection);
     }
 
-    /// Every declared route appears once, in the bundle's canonical order, and
-    /// two projections of the same bytes are the same document.
+    /// Every declared route appears once, in the bundle's canonical order.
+    /// Admission is a live host observation: another probe may legitimately
+    /// see a changed daemon or connector, without changing bundle identity.
     #[test]
-    fn the_list_document_is_stable_and_in_bundle_order() {
+    fn the_list_document_keeps_bundle_order_and_current_host_admission() {
         let bundle = native_multi();
         let first = candidates(&bundle, "sha256:fixture", Path::new("run")).expect("projected");
-        let second = candidates(&bundle, "sha256:fixture", Path::new("run")).expect("projected");
-        assert_eq!(first, second);
         assert_eq!(first.schema, LIST_SCHEMA);
         assert_eq!(first.bundle_sha256, "sha256:fixture");
         assert_eq!(first.contract_ref, bundle.index.root_contract_ref);
