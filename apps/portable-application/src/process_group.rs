@@ -58,6 +58,7 @@ impl ProcessServiceGroup {
     }
 
     /// The caller must observe its non-socket readiness before accepting the Run.
+    #[cfg(target_os = "macos")]
     pub(crate) fn start_unobserved(
         workspace: &std::path::Path,
         services: Vec<ServiceSpec>,
