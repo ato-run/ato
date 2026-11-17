@@ -7,6 +7,7 @@
 //! runtime concern and never runs from this module.
 use std::collections::BTreeMap;
 use std::fs::{self, File};
+use std::io::BufRead as _;
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -49,6 +50,8 @@ pub enum ModelCommands {
     Remove(RemoveArgs),
     /// Score one state against typed questions with the locally installed Model Set.
     Score(ScoreArgs),
+    /// Serve the System One contract on loopback from the locally installed Model Set.
+    Serve(ServeArgs),
 }
 
 #[derive(Args)]
@@ -108,6 +111,31 @@ pub struct ScoreArgs {
     #[arg(long)]
     pub python: Option<PathBuf>,
     /// Print the machine-readable report only.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args)]
+pub struct ServeArgs {
+    /// Model Set name.
+    #[arg(default_value = "kev-0.8b")]
+    pub model: String,
+    /// Interface to bind. Keep the default: this endpoint has no rate limit.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+    /// Port to bind.
+    #[arg(long, default_value_t = 8008)]
+    pub port: u16,
+    /// Override ATO_HOME.
+    #[arg(long)]
+    pub home: Option<PathBuf>,
+    /// Require this bearer token on POST /v1/systemone.
+    #[arg(long)]
+    pub token: Option<String>,
+    /// Interpreter that has the Kev runtime installed. Defaults to ATO_KEV_PYTHON, then python3.
+    #[arg(long)]
+    pub python: Option<PathBuf>,
+    /// Print the machine-readable startup line only.
     #[arg(long)]
     pub json: bool,
 }
@@ -307,6 +335,7 @@ pub fn execute(command: ModelCommands) -> Result<()> {
         ModelCommands::Status(args) => status(&args),
         ModelCommands::Remove(args) => remove(&args),
         ModelCommands::Score(args) => score(&args),
+        ModelCommands::Serve(args) => serve(&args),
     }
 }
 
@@ -315,6 +344,170 @@ pub fn execute(command: ModelCommands) -> Result<()> {
 /// so a run is reproducible from the installed Model Set alone.
 const KEV_RUNNER: &str = include_str!("../assets/kev_runner.py");
 const SCORE_SCHEMA: &str = "ato.model-score/1";
+
+const SERVE_SCHEMA: &str = "ato.model-serve/1";
+
+/// Answer the System One contract on loopback from the installed Model Set.
+///
+/// This is what a local decision provider talks to: the same POST /v1/systemone
+/// shape the reference Kev runtime serves, so "ato form --decision-provider kev"
+/// needs no cloud account and no second installation. Each request reloads the
+/// model in its own process (about three seconds for Kev-0.8B); the alternative
+/// would be keeping a Python child alive and serialising every request through it.
+fn serve(args: &ServeArgs) -> Result<()> {
+    let status = status_report(&args.model, args.home.clone(), false)?;
+    ensure!(
+        status.installed,
+        "model_set_incomplete: {} is missing {} of {} assets; run: ato model install {}",
+        args.model,
+        status.assets.iter().filter(|asset| !asset.present).count(),
+        status.assets.len(),
+        args.model
+    );
+    let root = PathBuf::from(&status.root);
+    let runner = root.join("kev_runner.py");
+    fs::write(&runner, KEV_RUNNER).with_context(|| format!("write {}", runner.display()))?;
+    let python = args
+        .python
+        .clone()
+        .or_else(|| std::env::var_os("ATO_KEV_PYTHON").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("python3"));
+    let token = args.token.clone();
+    let listener = std::net::TcpListener::bind((args.host.as_str(), args.port))
+        .with_context(|| format!("listen on {}:{}", args.host, args.port))?;
+    let address = listener.local_addr().context("read the bound address")?;
+    let endpoint = format!("http://{address}");
+    let report = serde_json::json!({
+        "schema": SERVE_SCHEMA,
+        "model": args.model,
+        "root": status.root,
+        "endpoint": endpoint,
+        "health": format!("{endpoint}/healthz"),
+        "systemone": format!("{endpoint}/v1/systemone"),
+        "authenticated": token.is_some(),
+    });
+    if args.json {
+        println!("{report}");
+    } else {
+        println!(
+            "{} is serving on {endpoint} (payload {})",
+            args.model, status.root
+        );
+        println!("  health:     {endpoint}/healthz");
+        println!("  system one: {endpoint}/v1/systemone");
+        if token.is_some() {
+            println!("  authorization: bearer token required");
+        }
+        println!("  stop with Ctrl-C");
+    }
+    for stream in listener.incoming() {
+        let Ok(mut stream) = stream else { continue };
+        let _ = handle_connection(&mut stream, &python, &runner, &status, token.as_deref());
+    }
+    Ok(())
+}
+
+fn handle_connection(
+    stream: &mut std::net::TcpStream,
+    python: &Path,
+    runner: &Path,
+    status: &ModelStatusReport,
+    token: Option<&str>,
+) -> Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    let mut reader = std::io::BufReader::new(stream.try_clone()?);
+    let mut request_line = String::new();
+    reader.read_line(&mut request_line)?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default().to_owned();
+    let path = parts.next().unwrap_or_default().to_owned();
+    let mut length = 0usize;
+    let mut authorized = token.is_none();
+    loop {
+        let mut header = String::new();
+        if reader.read_line(&mut header)? == 0 || header.trim().is_empty() {
+            break;
+        }
+        let lower = header.to_ascii_lowercase();
+        if let Some(value) = lower.strip_prefix("content-length:") {
+            length = value.trim().parse().unwrap_or(0);
+        }
+        if let Some(value) = lower.strip_prefix("authorization:") {
+            authorized = token.is_some_and(|expected| value.trim() == format!("bearer {expected}"));
+        }
+    }
+    let (status_code, body) = match (method.as_str(), path.as_str()) {
+        ("GET", "/healthz") => (
+            "200 OK",
+            serde_json::json!({"status": "ok", "model": status.model}).to_string(),
+        ),
+        ("POST", "/v1/systemone") => {
+            let mut body = vec![0u8; length.min(MAX_SYSTEMONE_BYTES)];
+            reader.read_exact(&mut body)?;
+            if length > MAX_SYSTEMONE_BYTES {
+                ("413 Payload Too Large", error_body("request is too large"))
+            } else if !authorized {
+                ("401 Unauthorized", error_body("a bearer token is required"))
+            } else {
+                match systemone(python, runner, status, &body) {
+                    Ok(answer) => ("200 OK", answer),
+                    Err(error) => ("422 Unprocessable Entity", error_body(&error.to_string())),
+                }
+            }
+        }
+        _ => ("404 Not Found", error_body("unknown route")),
+    };
+    write!(
+        stream,
+        "HTTP/1.1 {status_code}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    )?;
+    stream.flush()?;
+    Ok(())
+}
+
+fn error_body(message: &str) -> String {
+    serde_json::json!({"error": {"code": "invalid", "message": message}}).to_string()
+}
+
+/// The reference runtime's request ceiling for a state plus its questions.
+const MAX_SYSTEMONE_BYTES: usize = 48 * 1024;
+
+fn systemone(
+    python: &Path,
+    runner: &Path,
+    status: &ModelStatusReport,
+    body: &[u8],
+) -> Result<String> {
+    let request: serde_json::Value =
+        serde_json::from_slice(body).context("the request is not valid JSON")?;
+    let questions = request
+        .get("questions")
+        .cloned()
+        .context("the request needs questions")?;
+    ensure!(
+        questions
+            .as_object()
+            .map(|map| !map.is_empty())
+            .unwrap_or(false),
+        "the request needs at least one question"
+    );
+    let payload = serde_json::json!({
+        "state": request.get("state").cloned().unwrap_or(serde_json::Value::Null),
+        "questions": questions,
+        "model_root": status.root,
+    });
+    let value = invoke_runner(python, runner, &payload)?;
+    // The decision provider reads "model" first: it is the local family identity,
+    // not the caller's requested name, so a client cannot relabel the model.
+    Ok(serde_json::json!({
+        "model": status.model,
+        "answers": value.get("answers").cloned().unwrap_or(serde_json::Value::Null),
+        "checkpoint": value.get("checkpoint").cloned().unwrap_or(serde_json::Value::Null),
+        "runtime": value.get("runtime").cloned().unwrap_or(serde_json::Value::Null),
+    })
+    .to_string())
+}
 
 fn score(args: &ScoreArgs) -> Result<()> {
     let report = score_request(args)?;
@@ -969,6 +1162,166 @@ mod tests {
         // The runner must never reach the network for a pinned payload.
         assert!(!KEV_RUNNER.contains("snapshot_download"));
         assert!(!KEV_RUNNER.contains("from_pretrained(\"Qwen"));
+    }
+
+    fn serve_status(root: &Path) -> ModelStatusReport {
+        status_report(KEV_SET, Some(root.to_path_buf()), false).expect("status")
+    }
+
+    /// One HTTP exchange against handle_connection, with the response as text.
+    fn exchange(
+        python: &Path,
+        runner: &Path,
+        status: &ModelStatusReport,
+        token: Option<&str>,
+        request: &str,
+    ) -> String {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("addr");
+        let runner = runner.to_path_buf();
+        let python = python.to_path_buf();
+        let status = ModelStatusReport {
+            schema: status.schema,
+            model: status.model.clone(),
+            installed: status.installed,
+            root: status.root.clone(),
+            license: status.license,
+            source: ModelSource {
+                repository: status.source.repository.clone(),
+                revision: status.source.revision.clone(),
+                base_repository: status.source.base_repository.clone(),
+                base_revision: status.source.base_revision.clone(),
+            },
+            total_bytes: status.total_bytes,
+            installed_bytes: status.installed_bytes,
+            assets: Vec::new(),
+        };
+        let token = token.map(str::to_owned);
+        let request = request.to_owned();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            handle_connection(&mut stream, &python, &runner, &status, token.as_deref())
+                .expect("handle");
+        });
+        let mut client = std::net::TcpStream::connect(address).expect("connect");
+        client.write_all(request.as_bytes()).expect("write");
+        client.flush().expect("flush");
+        let mut response = String::new();
+        client.read_to_string(&mut response).expect("read");
+        handle.join().expect("join");
+        response
+    }
+
+    fn http(request: &str) -> String {
+        format!("{request}\r\n")
+    }
+
+    #[test]
+    fn health_answers_without_starting_the_model() {
+        // A python path that cannot exist proves the health route never spawns
+        // an interpreter.
+        let root = temp_root();
+        let status = serve_status(&root);
+        let response = exchange(
+            Path::new("/nonexistent/python"),
+            Path::new("/nonexistent/runner.py"),
+            &status,
+            None,
+            &http("GET /healthz HTTP/1.1\r\nhost: localhost\r\n\r\n"),
+        );
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+        assert!(response.contains("\"model\":\"kev-0.8b\""), "{response}");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn an_unknown_route_is_a_404() {
+        let root = temp_root();
+        let status = serve_status(&root);
+        let response = exchange(
+            Path::new("/nonexistent/python"),
+            Path::new("/nonexistent/runner.py"),
+            &status,
+            None,
+            &http("GET /nope HTTP/1.1\r\nhost: localhost\r\n\r\n"),
+        );
+        assert!(response.starts_with("HTTP/1.1 404 Not Found"), "{response}");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_configured_token_is_required_for_system_one() {
+        let root = temp_root();
+        let status = serve_status(&root);
+        let body = "{\"state\":\"s\",\"questions\":{\"q\":{}}}";
+        let request = format!(
+            "POST /v1/systemone HTTP/1.1\r\nhost: localhost\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let response = exchange(
+            Path::new("/nonexistent/python"),
+            Path::new("/nonexistent/runner.py"),
+            &status,
+            Some("secret-token"),
+            &request,
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 401 Unauthorized"),
+            "an unauthenticated request must be refused before the model runs: {response}"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_request_without_questions_is_a_422() {
+        let root = temp_root();
+        let status = serve_status(&root);
+        let body = "{\"state\":\"s\",\"questions\":{}}";
+        let request = format!(
+            "POST /v1/systemone HTTP/1.1\r\nhost: localhost\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let response = exchange(
+            Path::new("/nonexistent/python"),
+            Path::new("/nonexistent/runner.py"),
+            &status,
+            None,
+            &request,
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 422 Unprocessable Entity"),
+            "{response}"
+        );
+        assert!(response.contains("at least one question"), "{response}");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_runner_answer_is_served_as_the_local_model() {
+        let root = temp_root();
+        let status = serve_status(&root);
+        let script = root.join("stub_runner.py");
+        fs::write(
+            &script,
+            "import json,sys\n\
+             json.load(sys.stdin)\n\
+             json.dump({'answers': {'decision': {'type': 'choice', 'choice': 'c3'}},\n\
+                        'checkpoint': {'weights': 'lora'},\n\
+                        'runtime': {'backend': 'mlx'}}, sys.stdout)\n",
+        )
+        .expect("stub");
+        let body = "{\"state\":\"s\",\"questions\":{\"decision\":{}}}";
+        let request = format!(
+            "POST /v1/systemone HTTP/1.1\r\nhost: localhost\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let response = exchange(Path::new("python3"), &script, &status, None, &request);
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+        // The served model name is the local family, never the caller's string.
+        assert!(response.contains("\"model\":\"kev-0.8b\""), "{response}");
+        assert!(response.contains("\"choice\":\"c3\""), "{response}");
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
