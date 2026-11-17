@@ -20,8 +20,9 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use ato_formation::native_desktop::{CargoBuildInvocation, SourceBuild};
 use sha2::{Digest, Sha256};
@@ -145,9 +146,12 @@ pub fn cache_key(source: &SourceBuild, target: &str, entry: &str) -> String {
 const CACHE_MANIFEST: &str = "manifest.txt";
 
 fn sha256_file(path: &Path) -> Result<String, BuildFailure> {
-    let bytes = fs::read(path)
+    let mut file = fs::File::open(path)
         .map_err(|error| BuildFailure::Io(format!("could not read {}: {error}", path.display())))?;
-    Ok(format!("sha256:{:x}", Sha256::digest(&bytes)))
+    let mut hash = Sha256::new();
+    std::io::copy(&mut file, &mut hash)
+        .map_err(|error| BuildFailure::Io(format!("could not hash {}: {error}", path.display())))?;
+    Ok(format!("sha256:{:x}", hash.finalize()))
 }
 
 fn copy_file(source: &Path, destination: &Path) -> Result<(), BuildFailure> {
@@ -187,6 +191,9 @@ pub fn build_environment(
         target_dir.display().to_string(),
     );
     environment.insert("CARGO_INCREMENTAL".to_owned(), "0".to_owned());
+    // A native build shares an interactive desktop. Bound concurrent rustc
+    // processes so a first GUI build does not exhaust a small machine's RAM.
+    environment.insert("CARGO_BUILD_JOBS".to_owned(), "2".to_owned());
     environment.insert(
         "HOME".to_owned(),
         scratch.join("home").display().to_string(),
@@ -363,19 +370,36 @@ pub fn build(
     }
     let output_digest = sha256_file(&produced)?;
     copy_file(&produced, &staging.join(entry))?;
-    let cached = cache_root.join(entry);
-    copy_file(&produced, &cached)?;
+    // Publish complete output and evidence together. Concurrent builds must not
+    // truncate a cache executable that an installed GUI is currently running.
+    let cache_parent = home.join(BUILD_CACHE_DIR);
+    fs::create_dir_all(&cache_parent).map_err(|error| BuildFailure::Io(error.to_string()))?;
+    let pending = tempfile::Builder::new()
+        .prefix("build-")
+        .tempdir_in(&cache_parent)
+        .map_err(|error| BuildFailure::Io(error.to_string()))?;
+    copy_file(&produced, &pending.path().join(entry))?;
     let manifest = format!(
         "{key}\n{output_digest}\n{}\n{}\n",
         build.toolchain.as_str(),
         build.build.as_str()
     );
-    fs::write(cache_root.join(CACHE_MANIFEST), manifest).map_err(|error| {
+    fs::write(pending.path().join(CACHE_MANIFEST), manifest).map_err(|error| {
         BuildFailure::Io(format!(
             "could not write the cache manifest in {}: {error}",
             cache_root.display()
         ))
     })?;
+    if let Err(error) = fs::rename(pending.path(), &cache_root) {
+        if let Some(mut winner) = reuse_cache(&cache_root, &staging, entry, &key) {
+            winner.toolchain = build.toolchain.as_str();
+            winner.build_argv = build.build.as_str();
+            return Ok(winner);
+        }
+        return Err(BuildFailure::Io(format!(
+            "could not publish build cache: {error}"
+        )));
+    }
     Ok(BuiltArtifact {
         root: staging.clone(),
         entry: staging.join(entry),
@@ -443,7 +467,7 @@ impl BuildExecutor for SandboxedCargo {
                 profile_path.display()
             ))
         })?;
-        let output = Command::new(&launcher)
+        let mut child = Command::new(&launcher)
             .arg("-f")
             .arg(&profile_path)
             .arg(execution.cargo)
@@ -451,16 +475,44 @@ impl BuildExecutor for SandboxedCargo {
             .current_dir(execution.cwd)
             .env_clear()
             .envs(execution.environment)
-            .output()
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|error| BuildFailure::Failed(format!("could not start cargo: {error}")))?;
-        if !output.status.success() {
+        let mut stderr = child.stderr.take().expect("cargo stderr was piped");
+        let mut tail = std::collections::VecDeque::with_capacity(2000);
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let count = match stderr.read(&mut buffer) {
+                Ok(count) => count,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(BuildFailure::Failed(format!(
+                        "read cargo progress: {error}"
+                    )));
+                }
+            };
+            if count == 0 {
+                break;
+            }
+            let _ = std::io::stderr().write_all(&buffer[..count]);
+            for byte in &buffer[..count] {
+                if tail.len() == 2000 {
+                    tail.pop_front();
+                }
+                tail.push_back(*byte);
+            }
+        }
+        let status = child
+            .wait()
+            .map_err(|error| BuildFailure::Failed(format!("wait for cargo: {error}")))?;
+        if !status.success() {
             return Err(BuildFailure::Failed(format!(
                 "cargo exited with {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
-                    .chars()
-                    .take(2000)
-                    .collect::<String>()
+                status,
+                String::from_utf8_lossy(tail.make_contiguous())
             )));
         }
         Ok(())
@@ -628,6 +680,53 @@ mod tests {
         assert_eq!(second.output_digest, first.output_digest);
         assert_eq!(second.cache_key, first.cache_key);
         assert_eq!(fs::read(&second.entry).unwrap(), b"built binary");
+    }
+
+    #[test]
+    fn concurrent_builds_publish_one_complete_cache_entry() {
+        struct ConcurrentCargo(std::sync::Barrier);
+        impl BuildExecutor for ConcurrentCargo {
+            fn run(&self, execution: &BuildExecution<'_>) -> Result<(), BuildFailure> {
+                self.0.wait();
+                fs::create_dir_all(execution.target_dir.join("release")).unwrap();
+                fs::write(execution.target_dir.join("release/app"), b"built binary").unwrap();
+                Ok(())
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let source = archive(root.path(), COMMIT, "Cargo.lock bytes");
+        let recipe = source_build(COMMIT, &sha(b"Cargo.lock bytes"));
+        let toolchain = toolchain(&home);
+        let executor = ConcurrentCargo(std::sync::Barrier::new(2));
+        std::thread::scope(|scope| {
+            let handles = ["a", "b"].map(|name| {
+                let run = root.path().join(name);
+                let (recipe, home, toolchain, source, executor) =
+                    (&recipe, &home, &toolchain, &source, &executor);
+                scope.spawn(move || {
+                    build_with(recipe, home, &run, toolchain, source, executor).unwrap()
+                })
+            });
+            let [a, b] = handles.map(|handle| handle.join().unwrap());
+            assert_eq!(a.output_digest, b.output_digest);
+            assert_eq!(fs::read(a.entry).unwrap(), fs::read(b.entry).unwrap());
+        });
+        let no_build = FakeCargo {
+            calls: Cell::new(0),
+            fail: true,
+        };
+        let cached = build_with(
+            &recipe,
+            &home,
+            &root.path().join("cached"),
+            &toolchain,
+            &source,
+            &no_build,
+        )
+        .unwrap();
+        assert_eq!(cached.cache, BuildCache::Hit);
+        assert_eq!(no_build.calls.get(), 0);
     }
 
     #[test]

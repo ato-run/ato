@@ -1,6 +1,8 @@
 //! Bounded, read-only macOS disk-image materialization. No mounted code runs.
 use std::fs;
 use std::path::Path;
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 use super::artifact::{self, ExtractedArtifact, MAX_EXTRACTED_BYTES, MAX_EXTRACTED_ENTRIES};
 use anyhow::{Context, Result, ensure};
@@ -13,60 +15,85 @@ pub fn extract_file(image: &Path, destination: &Path) -> Result<ExtractedArtifac
     }
     #[cfg(target_os = "macos")]
     {
-        use std::process::{Command, Stdio};
         ensure!(!destination.exists(), "artifact destination already exists");
         let parent = destination
             .parent()
             .context("artifact destination has no parent")?;
         fs::create_dir_all(parent)?;
-        // Keep the directory until detach succeeds, including when copying fails.
+        // Outside extraction scratch: its owner's recursive cleanup must never
+        // traverse a mount that hdiutil failed to detach.
         let mount = tempfile::Builder::new()
-            .prefix("native-dmg-")
-            .tempdir_in(parent)?
+            .prefix("ato-native-dmg-")
+            .tempdir()?
             .keep();
-        let attach = Command::new("/usr/bin/hdiutil")
-            .args([
-                "attach",
-                "-readonly",
-                "-nobrowse",
-                "-noautoopen",
-                "-plist",
-                "-mountpoint",
-            ])
-            .arg(&mount)
-            .arg(image)
-            .stdin(Stdio::null())
-            .output();
-        let attached = attach.as_ref().is_ok_and(|out| out.status.success());
+        let attach = bounded_command(
+            Command::new("/usr/bin/hdiutil")
+                .args([
+                    "attach",
+                    "-readonly",
+                    "-nobrowse",
+                    "-noautoopen",
+                    "-plist",
+                    "-mountpoint",
+                ])
+                .arg(&mount)
+                .arg(image),
+            Duration::from_secs(180),
+        );
+        let attached = attach.as_ref().is_ok_and(|(status, _)| status.success());
         let result = match attach {
-            Ok(out) if out.status.success() => copy_apps(&mount, destination),
-            Ok(out) => Err(anyhow::anyhow!(
-                "native_dmg_attach_failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            )),
+            Ok((status, _)) if status.success() => copy_apps(&mount, destination),
+            Ok((_, stderr)) => Err(anyhow::anyhow!("native_dmg_attach_failed: {stderr}")),
             Err(error) => Err(error).context("native_dmg_attach_failed"),
         };
         // A failed attach can still have mounted a partition. Detach first;
         // never recursively delete a potentially mounted directory.
-        let detach = Command::new("/usr/bin/hdiutil")
-            .arg("detach")
-            .arg(&mount)
-            .stdin(Stdio::null())
-            .output();
-        let detached = detach.as_ref().is_ok_and(|out| out.status.success());
-        if attached && !detached {
+        let detach = bounded_command(
+            Command::new("/usr/bin/hdiutil").arg("detach").arg(&mount),
+            Duration::from_secs(30),
+        );
+        let detached = detach.as_ref().is_ok_and(|(status, _)| status.success());
+        // remove_dir never follows or traverses a mounted filesystem. An attach
+        // failure can still have mounted a partition; retain/report that too.
+        let removed = fs::remove_dir(&mount).is_ok();
+        if !detached && (attached || !removed) {
             anyhow::bail!(
                 "native_dmg_detach_failed: retained mount at {}",
                 mount.display()
             );
         }
-        // remove_dir is nonrecursive and fails safely if anything remains.
-        let _ = fs::remove_dir(&mount);
         if result.is_err() {
             let _ = fs::remove_dir_all(destination);
         }
         result
     }
+}
+
+/// Avoid a stuck image helper holding installation forever or filling a pipe.
+fn bounded_command(command: &mut Command, timeout: Duration) -> Result<(ExitStatus, String)> {
+    use std::io::{Read, Seek};
+    let mut error_output = tempfile::tempfile()?;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(error_output.try_clone()?)
+        .spawn()?;
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
+            result => {
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!("disk image helper timed out or could not be observed: {result:?}");
+            }
+        }
+    };
+    error_output.rewind()?;
+    let mut bytes = Vec::new();
+    error_output.take(8192).read_to_end(&mut bytes)?;
+    Ok((status, String::from_utf8_lossy(&bytes).into_owned()))
 }
 
 pub fn extract_bytes(bytes: &[u8], destination: &Path) -> Result<ExtractedArtifact> {
@@ -145,6 +172,18 @@ fn copy_apps(mount: &Path, destination: &Path) -> Result<ExtractedArtifact> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_stuck_helper_is_terminated_at_its_deadline() {
+        let started = Instant::now();
+        assert!(
+            bounded_command(
+                Command::new("/bin/sleep").arg("5"),
+                Duration::from_millis(25)
+            )
+            .is_err()
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
     #[test]
     fn copies_only_apps_and_preserves_content() {
         let root = tempfile::tempdir().unwrap();

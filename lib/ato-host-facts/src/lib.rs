@@ -33,3 +33,6 @@ pub use reason::{CapabilityState, CapabilityStatus, Reason, ReasonCode};
 
 /// The execution ABI that requires Docker access.
 pub const OCI_EXECUTION_CAPABILITY: &str = "execution_abi:oci";
+
+#[cfg(target_os = "macos")]
+pub mod window;

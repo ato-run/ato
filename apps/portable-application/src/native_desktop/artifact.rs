@@ -772,6 +772,29 @@ mod tests {
     }
 
     #[test]
+    fn installed_tree_has_a_stable_address_and_refuses_modified_contents() {
+        let bytes = archive(&[Entry::File("app/run", b"verified binary", 0o755)]);
+        let root = temp_root();
+        let archive = root.path().join("archive.tar.gz");
+        fs::write(&archive, &bytes).unwrap();
+        let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+        let installed =
+            cached_archive_tree(&archive, NativeArtifactFormat::TarGz, &digest, root.path())
+                .unwrap();
+        fs::remove_file(&archive).unwrap();
+        assert_eq!(
+            installed,
+            cached_archive_tree(&archive, NativeArtifactFormat::TarGz, &digest, root.path())
+                .unwrap()
+        );
+        fs::write(installed.join("app/run"), b"tampered binary").unwrap();
+        assert!(
+            cached_archive_tree(&archive, NativeArtifactFormat::TarGz, &digest, root.path())
+                .is_err()
+        );
+    }
+
+    #[test]
     fn a_destination_that_exists_is_never_overwritten() {
         let bytes = archive(&[Entry::File("app/run", b"a", 0o644)]);
         let scratch = temp_root();
@@ -829,5 +852,45 @@ mod symlink_tests {
         let scratch = tempfile::tempdir().unwrap();
         let root = scratch.path().join("artifact");
         assert!(extract_tar_gz(&archive, &root).is_err());
+    }
+}
+
+/// Keep a verified installation tree at a stable path outside any Run. Every
+/// start rehashes it; partial extractions are never published as installations.
+pub fn cached_archive_tree(
+    archive: &Path,
+    format: NativeArtifactFormat,
+    archive_digest: &str,
+    home: &Path,
+) -> Result<PathBuf> {
+    let cache = home.join("cache/native-installed-v1").join(format.as_str());
+    fs::create_dir_all(&cache)?;
+    let entry = cache.join(archive_digest.trim_start_matches("sha256:"));
+    let validate = || -> Result<PathBuf> {
+        let tree = entry.join("tree");
+        let observed = adopt_tree(&tree)?;
+        let manifest = fs::read_to_string(entry.join("verified-tree"))?;
+        ensure!(
+            manifest == format!("{archive_digest}\n{}\n", observed.tree_digest),
+            "native_install_cache_corrupt: {}",
+            entry.display()
+        );
+        Ok(tree)
+    };
+    if entry.exists() {
+        return validate();
+    }
+    let pending = tempfile::Builder::new()
+        .prefix("install-")
+        .tempdir_in(&cache)?;
+    let extracted = extract_archive_file(archive, format, &pending.path().join("tree"))?;
+    fs::write(
+        pending.path().join("verified-tree"),
+        format!("{archive_digest}\n{}\n", extracted.tree_digest),
+    )?;
+    match fs::rename(pending.path(), &entry) {
+        Ok(()) => Ok(entry.join("tree")),
+        Err(_) if entry.exists() => validate(), // Another installer won the atomic publish.
+        Err(error) => Err(error).context("publish native installation tree"),
     }
 }
