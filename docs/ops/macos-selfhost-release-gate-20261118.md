@@ -12,9 +12,9 @@ Verifier/Receipt を得た」場合だけ記す。未測定・環境要因・承
 |---|---|---|---|
 | 1 | CLIインストール（Homebrew） | **BLOCKED（ユーザー操作）** | 手順書 `docs/ops/macos-selfhost-install-check.md` は完成。`brew install ato-run/ato/ato-cli` はサンドボックスが `~/.homebrew` への書き込みを拒否するため、ユーザーの Terminal 実行が必要 |
 | 2 | Kev-0.8B（任意DL + ローカル推論） | **PASS** | 12 asset / 1,835,330,682 bytes を sha256 固定で導入し、実推論を実測。再現テスト `apps/cli/tests/model_inference.rs` |
-| 3 | Capsule取り込み（.capsule + Hub参照） | **PARTIAL** | `.capsule` の durable lifecycle は PR #1876 で実測。Hub参照→検証→実行は dev で PASS（receipt `fully_satisfied: true`）。Hub参照→durable import は PR #1877 待ち |
-| 4 | ソースから実行（GitHub → Formation） | **PARTIAL** | 既知D経路は実測済み（Spoon-Knife: fetch→form→pack→run→receipt）。LLM生成Dは**公式API権限が無く未測定** |
-| 5 | ローカル管理（CLI + Desktop UI） | **PARTIAL** | CLI は PR #1876 で実測。Desktop UI は別repo（ato-desktop）で未着手 |
+| 3 | Capsule取り込み（.capsule + Hub参照） | **PASS** | `.capsule` の durable lifecycle は PR #1876 で実測。Hub参照→install→起動→停止→再起動を dev で実測（§3b）。Hub参照→検証→実行の receipt も `fully_satisfied: true`（§3） |
+| 4 | ソースから実行（GitHub → Formation） | **PARTIAL** | 既知D: **PASS**（Spoon-Knife を v0.9.5 で form → receipt `fully_satisfied: true`、§4）。hosted Runtime Network は Runtime 未登録で候補0（§4b）。LLM生成DはローカルLLMで typed Draft 生成まで実証（PR #1908/#1909）、検証・実行は Runtime 登録待ち |
+| 5 | ローカル管理（CLI + Desktop UI） | **PARTIAL** | CLI と `ato ui` は PR #1876 で実測（UI から起動→配信→停止、§5）。Desktop（Tauri, 別repo）は未着手 |
 
 ## 1. リリース成果物（Homebrew が入れる binary）の実測
 
