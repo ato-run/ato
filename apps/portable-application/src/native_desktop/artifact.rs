@@ -23,6 +23,29 @@ use sha2::{Digest, Sha256};
 
 /// Total bytes a Run may materialize from one artifact.
 pub const MAX_EXTRACTED_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Extract limits for one archive.
+///
+/// A runtime artifact is one program; a source tree is a whole repository at a
+/// commit, carrying tests, docs and fixtures the build may not touch. The
+/// source tree is therefore bounded far above the artifact cap, and still
+/// bounded.
+#[derive(Debug, Clone, Copy)]
+pub struct ExtractLimits {
+    pub max_bytes: u64,
+    pub max_entries: u64,
+}
+
+pub const ARTIFACT_LIMITS: ExtractLimits = ExtractLimits {
+    max_bytes: MAX_EXTRACTED_BYTES,
+    max_entries: MAX_EXTRACTED_ENTRIES,
+};
+
+/// A source build unpacks the pinned commit, not one program.
+pub const SOURCE_LIMITS: ExtractLimits = ExtractLimits {
+    max_bytes: 4 * 1024 * 1024 * 1024,
+    max_entries: 400_000,
+};
 /// Entries a Run may materialize from one artifact.
 pub const MAX_EXTRACTED_ENTRIES: u64 = 100_000;
 
@@ -43,6 +66,19 @@ pub fn extract_tar_gz(archive: &[u8], destination: &Path) -> Result<ExtractedArt
 
 /// Unpack a `tar.gz` from any reader under `destination`.
 pub fn extract_tar_reader<R: Read>(archive: R, destination: &Path) -> Result<ExtractedArtifact> {
+    extract_tar_reader_with(archive, destination, ARTIFACT_LIMITS)
+}
+
+/// Unpack a source-build tarball: the same rules, with the source tree bounds.
+pub fn extract_source_tar_gz(archive: &[u8], destination: &Path) -> Result<ExtractedArtifact> {
+    extract_tar_reader_with(std::io::Cursor::new(archive), destination, SOURCE_LIMITS)
+}
+
+fn extract_tar_reader_with<R: Read>(
+    archive: R,
+    destination: &Path,
+    limits: ExtractLimits,
+) -> Result<ExtractedArtifact> {
     ensure!(
         !destination.exists(),
         "artifact destination already exists: {}",
@@ -66,8 +102,9 @@ pub fn extract_tar_reader<R: Read>(archive: R, destination: &Path) -> Result<Ext
         let mut entry = entry.context("the native artifact entry is unreadable")?;
         entries += 1;
         ensure!(
-            entries <= MAX_EXTRACTED_ENTRIES,
-            "the native artifact carries more than {MAX_EXTRACTED_ENTRIES} entries"
+            entries <= limits.max_entries,
+            "the native artifact carries more than {} entries",
+            limits.max_entries
         );
         let kind = entry.header().entry_type();
         let raw = entry
@@ -100,8 +137,9 @@ pub fn extract_tar_reader<R: Read>(archive: R, destination: &Path) -> Result<Ext
                     .context("a native artifact entry has no size")?;
                 total_bytes = total_bytes.saturating_add(size);
                 ensure!(
-                    total_bytes <= MAX_EXTRACTED_BYTES,
-                    "the native artifact expands past {MAX_EXTRACTED_BYTES} bytes"
+                    total_bytes <= limits.max_bytes,
+                    "the native artifact expands past {} bytes",
+                    limits.max_bytes
                 );
                 let output = destination.join(&relative);
                 if let Some(parent) = output.parent() {
@@ -191,8 +229,9 @@ pub fn extract_tar_reader<R: Read>(archive: R, destination: &Path) -> Result<Ext
                 .with_context(|| format!("read artifact symlink target {}", source.display()))?;
             total_bytes = total_bytes.saturating_add(bytes.len() as u64);
             ensure!(
-                total_bytes <= MAX_EXTRACTED_BYTES,
-                "the native artifact expands past {MAX_EXTRACTED_BYTES} bytes"
+                total_bytes <= limits.max_bytes,
+                "the native artifact expands past {} bytes",
+                limits.max_bytes
             );
             let output = destination.join(&link);
             if let Some(parent) = output.parent() {
