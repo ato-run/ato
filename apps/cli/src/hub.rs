@@ -91,6 +91,8 @@ pub enum HubCommands {
     /// stored publicly under `capsules/<owner>/<name>`, and the local
     /// validator admits exactly what `ato run` would accept.
     Publish(Box<crate::hub_public::PublishArgs>),
+    /// Read or update publisher-authored time estimates and dependencies for one Derivation.
+    Describe(crate::hub_public::DescribeArgs),
 }
 
 #[derive(Args)]
@@ -139,6 +141,7 @@ pub fn run(command: HubCommands) -> Result<()> {
         HubCommands::Push(args) => push(args),
         HubCommands::Pull(args) => pull(args),
         HubCommands::Publish(args) => crate::hub_public::publish(*args),
+        HubCommands::Describe(args) => crate::hub_public::describe(args),
     }
 }
 

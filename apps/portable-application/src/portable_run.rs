@@ -103,11 +103,11 @@ pub enum NativeSourceConsent {
 }
 
 impl NativeSourceConsent {
-    pub(crate) fn toolchain_consent(self) -> crate::native_desktop::toolchain::ToolchainConsent {
+    pub(crate) fn toolchain_consent(self) -> crate::native_desktop::ToolchainConsent {
         match self {
-            Self::Approved => crate::native_desktop::toolchain::ToolchainConsent::Approved,
-            Self::Denied => crate::native_desktop::toolchain::ToolchainConsent::Denied,
-            Self::Unavailable => crate::native_desktop::toolchain::ToolchainConsent::Unavailable,
+            Self::Approved => crate::native_desktop::ToolchainConsent::Approved,
+            Self::Denied => crate::native_desktop::ToolchainConsent::Denied,
+            Self::Unavailable => crate::native_desktop::ToolchainConsent::Unavailable,
         }
     }
 }

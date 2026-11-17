@@ -50,6 +50,9 @@ use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 
+mod info;
+pub use info::{DescribeArgs, describe};
+
 /// Reserved first-argument prefix for a Hub reference.
 pub const HUB_REF_PREFIX: &str = "capsules/";
 /// The tag a reference without a selector resolves.

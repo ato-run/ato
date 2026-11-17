@@ -1219,16 +1219,16 @@ fn validate_terminal_observations(
     // exchanges. They must agree on the terminal Port and on every operation, so
     // whichever Route a Run selects observes exactly K.
     let port = routes[0].1.surface.port();
-    if routes.iter().any(|(_, adapter)| adapter.surface.port() != port) {
+    if routes
+        .iter()
+        .any(|(_, adapter)| adapter.surface.port() != port)
+    {
         return Err(invalid(
             "derivation.native_surface",
             "native terminal routes declare the same terminal Port",
         ));
     }
-    let operations = routes[0]
-        .1
-        .operation_paths()
-        .collect::<BTreeSet<&str>>();
+    let operations = routes[0].1.operation_paths().collect::<BTreeSet<&str>>();
     for (label, adapter) in routes.iter().skip(1) {
         let declared = adapter.operation_paths().collect::<BTreeSet<&str>>();
         if declared != operations {

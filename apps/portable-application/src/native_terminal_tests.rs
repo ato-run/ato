@@ -6,8 +6,11 @@
 //! decided by tests over a scripted terminal, and two tests drive the same
 //! code against a real PTY where the host permits one.
 
-use std::collections::{BTreeMap, VecDeque};
+#[cfg(unix)]
+use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::io::Write as _;
+#[cfg(unix)]
 use std::path::Path;
 use std::time::Instant;
 
@@ -496,6 +499,7 @@ fn a_receipt_states_the_exchange_in_the_existing_observation_shape() {
 }
 
 /// Whether this host lets a process allocate a pseudo terminal.
+#[cfg(unix)]
 fn pty_available() -> bool {
     match ato_pty_host::PtySession::spawn(
         &["/bin/true".to_owned()],
@@ -514,6 +518,7 @@ fn pty_available() -> bool {
 
 /// The same exchanges against a real PTY: echo off, no newlines, so the
 /// capture is exactly the program's output through the delimiter.
+#[cfg(unix)]
 #[test]
 fn a_real_pty_runs_the_declared_exchange_and_matches_the_same_digest() {
     if !pty_available() {

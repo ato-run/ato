@@ -42,13 +42,13 @@ brew install ato-run/ato/ato
 **Linux / macOS (without Homebrew)**
 
 ```sh
-curl -fsSL https://github.com/ato-run/ato/releases/download/v0.9.1/ato-cli-installer.sh | sh
+curl -fsSL https://github.com/ato-run/ato/releases/download/v0.9.4/ato-cli-installer.sh | sh
 ```
 
-**Windows x86_64:** install the [v0.9.1 MSI](https://github.com/ato-run/ato/releases/download/v0.9.1/ato-cli-x86_64-pc-windows-msvc.msi).
+**Windows x86_64:** install the [v0.9.4 MSI](https://github.com/ato-run/ato/releases/download/v0.9.4/ato-cli-x86_64-pc-windows-msvc.msi).
 
 ```sh
-ato --version # 0.9.1
+ato --version # 0.9.4
 ```
 
 ### 2. Grab a workspace somebody already made

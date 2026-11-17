@@ -232,6 +232,7 @@ fn two_components_scope_model_inputs_save_outputs_and_require_all_k() {
         // This route declares HTTP requirements only; a scenario requirement
         // would fail closed as unobserved (see RuntimeObservation::scenarios).
         scenarios: Vec::new(),
+        terminal: Vec::new(),
         http: vec![RuntimeHttpObservation::from_response(
             "app.http", "GET", "/", 200, &app_body,
         )],
