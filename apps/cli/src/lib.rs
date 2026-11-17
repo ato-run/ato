@@ -284,6 +284,8 @@ struct SourceOciBuildArgs {
 
 #[derive(Subcommand)]
 enum AppCommands {
+    /// Add a Capsule from a local file or a Hub reference as a durable Instance.
+    Add(AppAddArgs),
     /// Import an immutable portable bundle as a new independent Instance.
     Import(AppImportArgs),
     /// Start a new durable Run for an imported Instance.
@@ -415,6 +417,29 @@ struct AppImportArgs {
     /// migration is refused with `state-migration-approval-required`.
     #[arg(long)]
     approve_state_migration: bool,
+}
+
+#[derive(Debug, Args)]
+struct AppAddArgs {
+    /// A local `.capsule` file or a Hub reference
+    /// `capsules/<owner>/<name>[:tag|@sha256:<hex>]`.
+    ///
+    /// A path that exists keeps its local meaning; the `capsules/` prefix is a
+    /// Hub reference only when no such file exists.
+    input: PathBuf,
+    /// Select one declared DerivationRef. Required when the bundle has more
+    /// than one route.
+    #[arg(long)]
+    derivation: Option<String>,
+    /// Approve the saved-data migration the import named in its refusal.
+    ///
+    /// Never implied: without this flag an import whose saved data needs a
+    /// migration is refused with `state-migration-approval-required`.
+    #[arg(long)]
+    approve_state_migration: bool,
+    /// Ato API origin used to resolve `capsules/<owner>/<name>` references.
+    #[arg(long, env = "ATO_API_URL", default_value = "https://api.ato.run")]
+    api_url: String,
 }
 
 #[derive(Debug, Args)]
@@ -803,6 +828,7 @@ pub fn run() -> Result<()> {
         Commands::Reform(args) => run_reform(args),
         Commands::ModelSet { command } => model_cache::execute(command),
         Commands::App { command } => match command {
+            AppCommands::Add(args) => add_local_application(args),
             AppCommands::Import(args) => import_local_application(args),
             AppCommands::Start(args) => start_local_instance(args),
             AppCommands::Stop { instance } => stop_local_instance(&instance),
@@ -1923,6 +1949,50 @@ fn run_capsule(mut args: RunArgs) -> Result<()> {
 
 fn local_application_store() -> Result<LocalApplicationStore> {
     LocalApplicationStore::open(ato_home()?).map_err(Into::into)
+}
+
+/// Add a Capsule from either a local file or a Hub reference.
+///
+/// One resolver decides which one the input is, and the result is the same
+/// durable Instance either way. `app import` stays as the file-only
+/// compatibility alias.
+fn add_local_application(args: AppAddArgs) -> Result<()> {
+    let home = ato_home()?;
+    let hub = hub_public::resolve_for_run(&args.input, &args.api_url, &home)?;
+    let bytes = match &hub {
+        Some(resolved) => {
+            eprintln!(
+                "Resolved {} [{}] -> {}",
+                resolved.reference.reference(),
+                resolved.reference.query(),
+                resolved.digest
+            );
+            fs::read(&resolved.bundle_path)
+                .with_context(|| format!("read {}", resolved.bundle_path.display()))?
+        }
+        None => {
+            if args.input.extension().and_then(|value| value.to_str()) != Some("capsule")
+                || !args.input.is_file()
+            {
+                bail!(
+                    "`ato app add` accepts a local .capsule file or a Hub reference `capsules/<owner>/<name>`"
+                );
+            }
+            fs::read(&args.input).with_context(|| format!("read {}", args.input.display()))?
+        }
+    };
+    let approval = if args.approve_state_migration {
+        StateMigrationApproval::granted()
+    } else {
+        StateMigrationApproval::not_granted()
+    };
+    let instance = local_application_store()?.import_with_state_migration(
+        &bytes,
+        args.derivation.as_deref(),
+        approval,
+    )?;
+    println!("{}", serde_json::to_string_pretty(&instance)?);
+    Ok(())
 }
 
 fn import_local_application(args: AppImportArgs) -> Result<()> {
