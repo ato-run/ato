@@ -145,6 +145,29 @@ receipt: fully_satisfied True
 - `ato app import capsules/…` は **ローカルファイルのみ**（`error: accepts only a portable .capsule file`）→ PR #1877 待ち
 - dev の `ato app start` は `worker process start time is unavailable`（サンドボックスが `/bin/ps` を拒否）→ PR #1876 の libproc で解消済み
 
+## 4. ソースから実行（既知D）の実測 — 公開済み v0.9.5 で再測定
+
+GitHub の実リポジトリ（`octocat/Spoon-Knife` @ `d0dd1f61b33d64e29d8bc1372a94ef6a2fee76a9`）を取得し、
+**公開済み v0.9.5 バイナリ**で Formation を実行した。
+
+```
+$ curl -L -o src.tar.gz https://codeload.github.com/octocat/Spoon-Knife/tar.gz/d0dd1f61b33d64e29d8bc1372a94ef6a2fee76a9
+$ ./ato form .tmp/gh/src --runtime local --network denied --max-attempts 4 --out out --work-root work
+status:        formed
+candidate:     static-files/v1
+contract_ref:  sha256:872f2b8eb7501c02a…
+derivation_ref sha256:c1bbb7041d875f988…
+receipt:       fully_satisfied: true
+outcomes:      seal=succeeded, runtime_verification=succeeded, cleanup=succeeded, publication=succeeded
+```
+
+- ソースに `capsule.toml` が無い状態から、Formation が候補Dを導出し、**ビルド・実行・Contract 観測まで通して**
+  `fully_satisfied: true` の receipt を得た。これが「既知Dで実行できるOSS」の受入証跡。
+- 検証済み成果物は content-addressed bundle（`out/bundles/<sha>/manifest.json` + blobs）として保持される。
+  `ato run` は `.capsule` ファイルのみを受け付けるため、配布用の束にするには authoring 入力
+  （`capsule.toml`）を持つソースで `ato pack` する経路になる。
+- **LLM生成Dが必要なOSS**の経路は未測定（下記「阻害要因」）。
+
 ## 4. ソースから実行の阻害要因（要判断）
 
 - 既知D経路は実測済み（GitHub URL → source fetch → form → pack → run → receipt）
