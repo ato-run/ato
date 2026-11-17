@@ -26,7 +26,7 @@ use std::process::Command;
 use ato_formation::native_desktop::{CargoBuildInvocation, SourceBuild};
 use sha2::{Digest, Sha256};
 
-use super::artifact::extract_tar_gz;
+use super::artifact::extract_source_tar_gz;
 use super::toolchain::RustToolchain;
 
 /// Identifies the build recipe itself, so changing what a build does cannot
@@ -329,7 +329,7 @@ pub fn build(
             source_archive.display()
         ))
     })?;
-    extract_tar_gz(&archive, &source_root)
+    extract_source_tar_gz(&archive, &source_root)
         .map_err(|error| BuildFailure::ArchiveInvalid(format!("{error:#}")))?;
     let tree = verify_source_tree(&source_root, build)?;
 
