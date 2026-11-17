@@ -196,6 +196,11 @@ enum Commands {
     /// environments and run the Formation attempts addressed to it.
     #[command(subcommand)]
     RuntimeNetwork(RuntimeNetworkCommand),
+    /// Report what this host can do before anything is installed or run.
+    ///
+    /// Read-only: it never downloads a model, starts a Run, or changes
+    /// configuration. A failing check is a reason not to promise the feature.
+    Doctor(DoctorArgs),
     /// Report this binary's build identity (version, commit, profile).
     ///
     /// `--version` stays exactly as it was — a human-readable release-line
@@ -283,6 +288,12 @@ enum AppCommands {
     Inspect { instance: String },
     /// Export the immutable Application and this Instance's saved snapshot.
     Export(AppExportArgs),
+    /// List every durable Instance this host holds, with its state.
+    List(AppListArgs),
+    /// Open the running Instance's Surface in the browser.
+    Open(AppOpenArgs),
+    /// Remove the registration; saved data is kept unless `--purge-data`.
+    Remove(AppRemoveArgs),
 }
 
 #[derive(Subcommand)]
@@ -425,6 +436,38 @@ struct AppExportArgs {
     instance: String,
     #[arg(short, long, default_value = "application.capsule")]
     output: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct AppListArgs {
+    /// Emit one JSON object instead of one line per Instance.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct AppOpenArgs {
+    instance: String,
+}
+
+#[derive(Debug, Args)]
+struct AppRemoveArgs {
+    instance: String,
+    /// Delete the Instance's saved data as well. Never implied: without this
+    /// flag the registration is removed and the data is retained under
+    /// `<ATO_HOME>/removed/<instance-id>/state`.
+    #[arg(long)]
+    purge_data: bool,
+    /// Emit one JSON object instead of a human-readable line.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct DoctorArgs {
+    /// Emit one JSON object instead of human-readable lines.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -760,6 +803,259 @@ fn version(json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Report what this host can do before anything is installed or run.
+///
+/// Every check is read-only. A failing check is a reason not to promise the
+/// feature, so this command exits non-zero instead of printing a warning and
+/// succeeding.
+fn doctor(args: DoctorArgs) -> Result<()> {
+    let identity = BuildIdentity::current();
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    let supported = os == "macos" && arch == "aarch64";
+    let mut checks: Vec<(&'static str, &'static str, String, Option<String>)> = Vec::new();
+
+    checks.push((
+        "target",
+        if supported { "pass" } else { "fail" },
+        format!("{os}/{arch}"),
+        if supported {
+            None
+        } else {
+            Some("this release supports Apple Silicon macOS only".to_owned())
+        },
+    ));
+
+    let home = ato_home()?;
+    let probe = home.join(".doctor-write-probe");
+    let home_result = fs::create_dir_all(&home)
+        .and_then(|()| fs::write(&probe, b"ok"))
+        .and_then(|()| fs::remove_file(&probe));
+    match home_result {
+        Ok(()) => checks.push(("ato-home", "pass", home.display().to_string(), None)),
+        Err(error) => checks.push((
+            "ato-home",
+            "fail",
+            format!("{} is not writable: {error}", home.display()),
+            Some("set ATO_HOME to a writable directory".to_owned()),
+        )),
+    }
+
+    // A durable Instance start records the worker's process start time, and on
+    // macOS that goes through `ps`. A host that cannot run `ps` can still do
+    // ephemeral Runs but cannot manage Instances; say so before the user tries.
+    let pid = std::process::id().to_string();
+    match Command::new("ps")
+        .args(["-o", "lstart=", "-p", &pid])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let start = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            if start.is_empty() {
+                checks.push((
+                    "process-identity",
+                    "fail",
+                    "ps returned no process start time".to_owned(),
+                    Some("durable Instances cannot be started on this host".to_owned()),
+                ));
+            } else {
+                checks.push(("process-identity", "pass", start, None));
+            }
+        }
+        Ok(output) => checks.push((
+            "process-identity",
+            "fail",
+            format!("ps exited with {}", output.status),
+            Some("durable Instances cannot be started on this host".to_owned()),
+        )),
+        Err(error) => checks.push((
+            "process-identity",
+            "fail",
+            format!("ps is unavailable: {error}"),
+            Some("a restricted exec environment must allow /bin/ps".to_owned()),
+        )),
+    }
+
+    match find_on_path("docker") {
+        Some(path) => checks.push(("docker", "pass", path.display().to_string(), None)),
+        None => checks.push((
+            "docker",
+            "warn",
+            "docker is not installed".to_owned(),
+            Some("only container-based derivations need it; Capsule Runs do not".to_owned()),
+        )),
+    }
+
+    let model_cache = home.join("models");
+    checks.push((
+        "model-cache",
+        if model_cache.is_dir() { "pass" } else { "warn" },
+        if model_cache.is_dir() {
+            model_cache.display().to_string()
+        } else {
+            "no model installed (optional)".to_owned()
+        },
+        None,
+    ));
+
+    let failed = checks.iter().filter(|check| check.1 == "fail").count();
+    let warned = checks.iter().filter(|check| check.1 == "warn").count();
+    if args.json {
+        let payload = serde_json::json!({
+            "schema": "ato.doctor/1",
+            "version": identity.version,
+            "commit": identity.git_commit,
+            "profile": identity.profile,
+            "os": os,
+            "arch": arch,
+            "supported": supported,
+            "supported_targets": ["macos-arm64"],
+            "unsupported_targets": ["macos-x86_64", "windows", "linux"],
+            "ok": failed == 0,
+            "checks": checks
+                .iter()
+                .map(|(id, status, detail, hint)| serde_json::json!({
+                    "id": id,
+                    "status": status,
+                    "detail": detail,
+                    "hint": hint,
+                }))
+                .collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("ato {}", identity.version);
+        println!("commit: {}", identity.git_commit);
+        println!("host: {os}/{arch}");
+        for (id, status, detail, hint) in &checks {
+            println!("{status:<4}  {id:<16}  {detail}");
+            if let Some(hint) = hint {
+                println!("      {:16}  {hint}", "");
+            }
+        }
+        println!("{failed} failed, {warned} warning(s)");
+    }
+    if failed > 0 {
+        bail!("doctor: {failed} check(s) failed");
+    }
+    Ok(())
+}
+
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|directory| directory.join(name))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+fn list_local_instances(args: AppListArgs) -> Result<()> {
+    let store = local_application_store()?;
+    let instances = store.list()?;
+    let mut entries = Vec::with_capacity(instances.len());
+    for instance in instances {
+        let active = store.active_run(&instance.instance_id)?;
+        let (state, run) = match active {
+            Some(run) => {
+                let state = match run.status {
+                    LocalInstanceRunStatus::Starting => "starting",
+                    LocalInstanceRunStatus::Active => "running",
+                    LocalInstanceRunStatus::Quarantined => "failed",
+                };
+                let run = serde_json::json!({
+                    "run_id": run.run_id,
+                    "status": run.status.as_str(),
+                    "pid": run.pid,
+                    "url": run.url,
+                    "receipt_path": run.receipt_path,
+                });
+                (state, Some(run))
+            }
+            None => ("stopped", None),
+        };
+        entries.push(serde_json::json!({
+            "instance": instance,
+            "state": state,
+            "active_run": run,
+        }));
+    }
+    if args.json {
+        let payload = serde_json::json!({
+            "schema": "ato.local-instance-list/1",
+            "instances": entries,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+    if entries.is_empty() {
+        println!("no local Instances");
+        return Ok(());
+    }
+    println!("STATE      ENDPOINT              INSTANCE / CAPSULE");
+    for entry in &entries {
+        let instance = &entry["instance"];
+        let state = entry["state"].as_str().unwrap_or("stopped");
+        let endpoint = entry["active_run"]["url"].as_str().unwrap_or("-");
+        println!(
+            "{:<10} {:<20} {}",
+            state,
+            endpoint,
+            instance["instance_id"].as_str().unwrap_or("-")
+        );
+        println!(
+            "{:<10} {:<20} {}",
+            "",
+            "",
+            instance["contract_ref"].as_str().unwrap_or("-")
+        );
+    }
+    Ok(())
+}
+
+fn open_local_instance(instance_id: &str) -> Result<()> {
+    let store = local_application_store()?;
+    let _ = store.instance(instance_id)?;
+    let Some(run) = store.active_run(instance_id)? else {
+        bail!(
+            "local Instance `{instance_id}` is not running; start it with `ato app start {instance_id}`"
+        );
+    };
+    let Some(url) = run.url else {
+        bail!(
+            "local Instance `{instance_id}` has no endpoint (Run state: {})",
+            run.status.as_str()
+        );
+    };
+    open_browser(&url)?;
+    println!("{url}");
+    Ok(())
+}
+
+fn remove_local_instance(args: AppRemoveArgs) -> Result<()> {
+    let store = local_application_store()?;
+    let removal = store.remove(&args.instance, args.purge_data)?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&removal)?);
+        return Ok(());
+    }
+    if removal.data_retained {
+        println!("Removed Instance {}.", removal.instance_id);
+        if let Some(path) = &removal.retained_path {
+            println!("Saved data retained at {path}.");
+            println!(
+                "Delete it with: ato app remove {} --purge-data",
+                removal.instance_id
+            );
+        }
+    } else {
+        println!(
+            "Removed Instance {} and its saved data.",
+            removal.instance_id
+        );
+    }
+    Ok(())
+}
+
 /// The process exit code a refusal asks for.
 ///
 /// A missing explicit decision (a Derivation to name, a permission to accept)
@@ -778,6 +1074,7 @@ pub fn run() -> Result<()> {
     }
     match Cli::parse().command {
         Commands::Version { json } => version(json),
+        Commands::Doctor(args) => doctor(args),
         Commands::Init(args) => init(args),
         Commands::Resume(args) => resume(args),
         Commands::Stop { capsule } => stop(&capsule),
@@ -794,6 +1091,9 @@ pub fn run() -> Result<()> {
             AppCommands::Stop { instance } => stop_local_instance(&instance),
             AppCommands::Inspect { instance } => inspect_local_instance(&instance),
             AppCommands::Export(args) => export_local_instance(args),
+            AppCommands::List(args) => list_local_instances(args),
+            AppCommands::Open(args) => open_local_instance(&args.instance),
+            AppCommands::Remove(args) => remove_local_instance(args),
         },
         Commands::ExportPlan(args) => export_plan(args),
         Commands::Export(args) => export_portable(args),
