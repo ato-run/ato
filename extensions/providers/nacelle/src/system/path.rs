@@ -32,22 +32,14 @@ pub fn validate_path(path_str: &str, allowed_paths: &[String]) -> Result<(), Str
         .iter()
         .filter_map(|p| {
             let ap = Path::new(p);
-            if !ap.is_absolute() {
+            if !ap.is_absolute() || ap.components().any(|c| matches!(c, Component::ParentDir)) {
                 return None;
             }
-            if ap.exists() {
-                fs::canonicalize(ap).ok()
-            } else {
-                // Best-effort: canonicalize the nearest existing ancestor.
-                let mut cur = Some(ap);
-                while let Some(c) = cur {
-                    if c.exists() {
-                        return fs::canonicalize(c).ok();
-                    }
-                    cur = c.parent();
-                }
-                None
+            let mut cur = ap;
+            while !cur.exists() {
+                cur = cur.parent()?;
             }
+            Some(fs::canonicalize(cur).ok()?.join(ap.strip_prefix(cur).ok()?))
         })
         .collect();
 
@@ -170,6 +162,16 @@ mod tests {
 
         let err = validate_path("/etc/shadow", &allowed_paths).unwrap_err();
         assert!(err.contains("not in the allowed paths"));
+    }
+
+    #[test]
+    fn nonexistent_allowlist_root_does_not_allow_its_ancestors_or_siblings() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let allowed = temp.path().join("missing/models");
+        let roots = vec![allowed.to_string_lossy().into_owned()];
+        assert!(validate_path(temp.path().to_str().unwrap(), &roots).is_err());
+        assert!(validate_path(temp.path().join("other").to_str().unwrap(), &roots).is_err());
+        assert!(validate_path(allowed.join("model").to_str().unwrap(), &roots).is_ok());
     }
 
     #[test]
