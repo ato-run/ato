@@ -1,0 +1,2113 @@
+{
+  "version": "0.9.5",
+  "checked_at": "2026-11-17T18:54:00.853413+00:00",
+  "release_url": "https://github.com/ato-run/ato/releases/tag/v0.9.5",
+  "release_id": 449058521,
+  "latest": true,
+  "prerelease": false,
+  "assets": [
+    {
+      "name": "ato-cli-aarch64-apple-darwin.tar.xz",
+      "bytes": 6498368,
+      "sha256": "sha256:b28c7adb635aa7104a792fc7ffae95132be25e865a5faf1ad971085db8a1b82b"
+    },
+    {
+      "name": "ato-cli-aarch64-apple-darwin.tar.xz.sha256",
+      "bytes": 103,
+      "sha256": "sha256:125bb48f86dc614ef84a7fb8da4c2b65f7ca30e8ab2daeee08adeab793809fb4"
+    },
+    {
+      "name": "ato-cli-aarch64-unknown-linux-gnu.tar.xz",
+      "bytes": 6272816,
+      "sha256": "sha256:8c8048fdc762f740f535ea277e519a5156374fa01e42e9d6ce1a576d861b99a8"
+    },
+    {
+      "name": "ato-cli-aarch64-unknown-linux-gnu.tar.xz.sha256",
+      "bytes": 108,
+      "sha256": "sha256:a1b36f670097d60879bf8ac4f73f8e529b6ec12c90cd7cffa5576f1cbb4c163f"
+    },
+    {
+      "name": "ato-cli-installer.sh",
+      "bytes": 54623,
+      "sha256": "sha256:bef22f3977dd996e8d6cf7a3dde988c212697d45278e08bc0cfd6a696b9c2592"
+    },
+    {
+      "name": "ato-cli-x86_64-apple-darwin.tar.xz",
+      "bytes": 7231984,
+      "sha256": "sha256:b833f03f86c1e44594a0aaa672f6d75bdb60879a678e42ea6997cea45305f211"
+    },
+    {
+      "name": "ato-cli-x86_64-apple-darwin.tar.xz.sha256",
+      "bytes": 102,
+      "sha256": "sha256:f7cb94bee51e1b1992a7ec51779d62bfb05c9cbbf06aedeab660fead05c7638d"
+    },
+    {
+      "name": "ato-cli-x86_64-pc-windows-msvc.msi",
+      "bytes": 11841536,
+      "sha256": "sha256:59191142041946b30289ee461f512f74b2fc7fc8281e21c137fb2bec311ef97b"
+    },
+    {
+      "name": "ato-cli-x86_64-pc-windows-msvc.msi.sha256",
+      "bytes": 102,
+      "sha256": "sha256:19518c077b1ccaa15e15a2d9d415365d95b9a357004882a71ed44b8b875d94c3"
+    },
+    {
+      "name": "ato-cli-x86_64-pc-windows-msvc.zip",
+      "bytes": 11871627,
+      "sha256": "sha256:8d7e61284726e6e905cb788c9b8030c3cc0ec98acddd12f3bae551eb79b0da91"
+    },
+    {
+      "name": "ato-cli-x86_64-pc-windows-msvc.zip.sha256",
+      "bytes": 102,
+      "sha256": "sha256:3b8220eaf1cbf49c4689a78cc098de0c98d2be86cdafa600607b4f17490da84e"
+    },
+    {
+      "name": "ato-cli-x86_64-unknown-linux-gnu.tar.xz",
+      "bytes": 7054772,
+      "sha256": "sha256:6bcfc07d7a07c7f5fdb79beda49359168066d232e2f73a35c21a346c9071b936"
+    },
+    {
+      "name": "ato-cli-x86_64-unknown-linux-gnu.tar.xz.sha256",
+      "bytes": 107,
+      "sha256": "sha256:80c8e490076d9ea9e686979cffa6b06f8c1d8f37701e90b07b673144113738fa"
+    },
+    {
+      "name": "ato-cli.rb",
+      "bytes": 2644,
+      "sha256": "sha256:65ff01b29231b9214c420a88470902752ea3079fd961d3c95f93ec862f938deb"
+    },
+    {
+      "name": "dist-manifest.json",
+      "bytes": 42844,
+      "sha256": "sha256:248864c18825a39d796ffe2a61fbf6b43ed011e170ae8f31bd1be5703e076d9a"
+    },
+    {
+      "name": "sha256.sum",
+      "bytes": 699,
+      "sha256": "sha256:c06cf89aa1d63ced8ef7d2ba22f895fe39385e165f56ceb25d89c20078c5e181"
+    },
+    {
+      "name": "source.tar.gz",
+      "bytes": 32408030,
+      "sha256": "sha256:bf60789038aa08593587a622c3549b2dcb65d8a6a8b2cc9f7841a2fdea5b2b51"
+    },
+    {
+      "name": "source.tar.gz.sha256",
+      "bytes": 81,
+      "sha256": "sha256:5775fb124b7fff747b50e4ac0320958ebf15f16b2ef197636e198500a2a1ab53"
+    }
+  ],
+  "identity": {
+    "version": "0.9.5",
+    "git_commit": "8ee783ba317f2233f1de8694998cc3e051ff0c0b",
+    "git_dirty": "false",
+    "profile": "release"
+  },
+  "installed_binary_sha256": "sha256:87887d3da6bd822d5dba0e7075a4327738d7344ccc964c63319e926c83962989",
+  "installer_seconds": 12.49,
+  "homebrew_formula_verified": true,
+  "production_web_installer_bytes_unchanged": "sha256:267d41659d68b867fca2df52913589faaf6904412a45c4ad423b5ebf2f162923",
+  "plan": {
+    "version": "0.9.5",
+    "stg": "a1b8e1078181cddc1f98b6c4fbd726ff7aef5687",
+    "accepted_gui_runtime_source": "8e35343f34eabdc9defbaf94f44e5901b643cf3d",
+    "runtime_source_unchanged": true,
+    "scope": "CLI release and Homebrew only; no production Web/API deployment or migrations",
+    "main": "8ee783ba317f2233f1de8694998cc3e051ff0c0b",
+    "pull_requests": [
+      1902,
+      1903,
+      1904
+    ],
+    "workflow_run": 44149093428,
+    "release_plan_pr_checks": [
+      44148539569,
+      44148539653
+    ],
+    "local_validation": {
+      "metadata": 0,
+      "dist-generate": 0,
+      "fmt": 0,
+      "check-cli": 0,
+      "build-identity": 0,
+      "clippy-cli": 0
+    }
+  },
+  "ci": {
+    "summary": {
+      "Release / Homebrew": {
+        "status": "completed",
+        "conclusion": "success"
+      },
+      "CLI macOS / Linux / Windows": {
+        "status": "completed",
+        "conclusion": "success"
+      },
+      "Rust macOS / relay": {
+        "status": "completed",
+        "conclusion": "success"
+      },
+      "Rust Windows（再試行）": {
+        "status": "completed",
+        "conclusion": "success"
+      },
+      "Rust Linux（再試行）": {
+        "status": "completed",
+        "conclusion": "failure"
+      },
+      "architecture / snapshot materializer": {
+        "status": "completed",
+        "conclusion": "success"
+      }
+    },
+    "release": {
+      "run_id": 44149093428,
+      "jobs": [
+        {
+          "id": 134272144763,
+          "name": "plan",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@v6",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install dist",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Cache dist",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run dist host --steps=create --tag=v0.9.5 --output-format=json > plan-dist-manifest.json",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Upload dist-manifest.json",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@v6",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "id": 134272728990,
+          "name": "build-local-artifacts (x86_64-pc-windows-msvc)",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "enable windows longpaths",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@v6",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Rust non-interactively if not already installed",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Install dist",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Fetch local artifacts",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install dependencies",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Build artifacts",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post-build",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Upload artifacts",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@v6",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "id": 134272729006,
+          "name": "build-local-artifacts (aarch64-apple-darwin)",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "enable windows longpaths",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@v6",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Rust non-interactively if not already installed",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Install dist",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Fetch local artifacts",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install dependencies",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Build artifacts",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post-build",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Upload artifacts",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@v6",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "id": 134272729020,
+          "name": "build-local-artifacts (aarch64-unknown-linux-gnu)",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "enable windows longpaths",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@v6",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Rust non-interactively if not already installed",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Install dist",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Fetch local artifacts",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install dependencies",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Build artifacts",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post-build",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Upload artifacts",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@v6",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "id": 134272729027,
+          "name": "build-local-artifacts (x86_64-unknown-linux-gnu)",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "enable windows longpaths",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@v6",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Rust non-interactively if not already installed",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Install dist",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Fetch local artifacts",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install dependencies",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Build artifacts",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post-build",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Upload artifacts",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@v6",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "id": 134272729035,
+          "name": "build-local-artifacts (x86_64-apple-darwin)",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "enable windows longpaths",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@v6",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Rust non-interactively if not already installed",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Install dist",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Fetch local artifacts",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install dependencies",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Build artifacts",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post-build",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Upload artifacts",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@v6",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "id": 134282957727,
+          "name": "build-global-artifacts",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@v6",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install cached dist",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run chmod +x ~/.cargo/bin/dist",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Fetch local artifacts",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run dist build --tag=v0.9.5 --output-format=json \"--artifacts=global\" > dist-manifest.json",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Upload artifacts",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@v6",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "id": 134283341975,
+          "name": "host",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@v6",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install cached dist",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run chmod +x ~/.cargo/bin/dist",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Fetch artifacts",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run dist host --tag=v0.9.5 --steps=upload --steps=release --output-format=json > dist-manifest.json",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Upload dist-manifest.json",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Download GitHub Artifacts",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Cleanup",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Create GitHub Release",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@v6",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "id": 134283790812,
+          "name": "publish-homebrew-formula",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@v6",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Fetch homebrew formulae",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Commit formula files",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@v6",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "id": 134284369548,
+          "name": "announce",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@v6",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@v6",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        }
+      ]
+    },
+    "cli": {
+      "run_id": 44149018848,
+      "jobs": [
+        {
+          "id": 134271884318,
+          "name": "cli (macos-latest)",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run dtolnay/rust-toolchain@stable",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/setup-python@v5",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Linux sandbox dependency",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Windows durable attempt journal",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Run cargo clippy -p ato-cli --all-targets -- -D warnings",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/setup-python@v5",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "id": 134271884687,
+          "name": "cli (windows-latest)",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run dtolnay/rust-toolchain@stable",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/setup-python@v5",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Linux sandbox dependency",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Windows durable attempt journal",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run cargo clippy -p ato-cli --all-targets -- -D warnings",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/setup-python@v5",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "id": 134271884774,
+          "name": "cli (ubuntu-latest)",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run dtolnay/rust-toolchain@stable",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/setup-python@v5",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Linux sandbox dependency",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Windows durable attempt journal",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run cargo test -p ato-cli -p ato-adapter-api -p ato-adapter-binding -p ato-adapter-http -p ato-adapter-process -p ato-adapter-pty -p ato-adapter-workspace -p ato-kernel -p ato-objects -- --test-threads=1 --nocapture",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Run cargo clippy -p ato-cli --all-targets -- -D warnings",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/setup-python@v5",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        }
+      ]
+    },
+    "rust": {
+      "run_id": 44149018729,
+      "first_attempt": [
+        {
+          "id": 134271883408,
+          "name": "relay binaries (rebuilt from source)",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run dtolnay/rust-toolchain@1.96.0",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run mlugg/setup-zig@v2",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Rebuild the relay binaries",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Upload the rebuilt binaries",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Compare with the committed binaries",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run mlugg/setup-zig@v2",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "id": 134271883821,
+          "name": "workspace (windows-latest)",
+          "status": "completed",
+          "conclusion": "failure",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run dtolnay/rust-toolchain@stable",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/setup-python@v5",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Linux sandbox dependency",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Provision declared Linux fixture toolchains",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Run cargo fmt --all -- --check",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Check workspace",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Check host workspace (Windows)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Build the worker sandbox shim",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Test workspace",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Derivation transformation v0 E2E (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Upload transformation v0 evidence (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Scenario verifier v1 E2E (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Upload scenario verifier v1 evidence (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Stateful transformation E2E (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Upload stateful transformation evidence (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Portable worker regressions (Windows)",
+              "status": "completed",
+              "conclusion": "failure"
+            },
+            {
+              "name": "OCI service group direct E2E (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Clippy workspace",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Clippy host workspace (Windows)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run cargo run --locked -p arch-check",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Post Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Post Run actions/setup-python@v5",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Post Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "id": 134271884090,
+          "name": "workspace (macos-latest)",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run dtolnay/rust-toolchain@stable",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/setup-python@v5",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Linux sandbox dependency",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Provision declared Linux fixture toolchains",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Run cargo fmt --all -- --check",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Check workspace",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Check host workspace (Windows)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Build the worker sandbox shim",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Test workspace",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Derivation transformation v0 E2E (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Upload transformation v0 evidence (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Scenario verifier v1 E2E (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Upload scenario verifier v1 evidence (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Stateful transformation E2E (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Upload stateful transformation evidence (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Portable worker regressions (Windows)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "OCI service group direct E2E (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Clippy workspace",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Clippy host workspace (Windows)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Run cargo run --locked -p arch-check",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/setup-python@v5",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "id": 134271884523,
+          "name": "workspace (ubuntu-24.04)",
+          "status": "completed",
+          "conclusion": "failure",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run dtolnay/rust-toolchain@stable",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/setup-python@v5",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Linux sandbox dependency",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Provision declared Linux fixture toolchains",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run cargo fmt --all -- --check",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Check workspace",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Check host workspace (Windows)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Build the worker sandbox shim",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Test workspace",
+              "status": "completed",
+              "conclusion": "failure"
+            },
+            {
+              "name": "Derivation transformation v0 E2E (Linux)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Upload transformation v0 evidence (Linux)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Scenario verifier v1 E2E (Linux)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Upload scenario verifier v1 evidence (Linux)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Stateful transformation E2E (Linux)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Upload stateful transformation evidence (Linux)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Portable worker regressions (Windows)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "OCI service group direct E2E (Linux)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Clippy workspace",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Clippy host workspace (Windows)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Run cargo run --locked -p arch-check",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Post Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Post Run actions/setup-python@v5",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Post Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        }
+      ],
+      "second_attempt": [
+        {
+          "id": 134281406578,
+          "name": "workspace (windows-latest)",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run dtolnay/rust-toolchain@stable",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/setup-python@v5",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Linux sandbox dependency",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Provision declared Linux fixture toolchains",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Run cargo fmt --all -- --check",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Check workspace",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Check host workspace (Windows)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Build the worker sandbox shim",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Test workspace",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Derivation transformation v0 E2E (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Upload transformation v0 evidence (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Scenario verifier v1 E2E (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Upload scenario verifier v1 evidence (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Stateful transformation E2E (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Upload stateful transformation evidence (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Portable worker regressions (Windows)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "OCI service group direct E2E (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Clippy workspace",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Clippy host workspace (Windows)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run cargo run --locked -p arch-check",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/setup-python@v5",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "id": 134281407126,
+          "name": "workspace (ubuntu-24.04)",
+          "status": "completed",
+          "conclusion": "failure",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run dtolnay/rust-toolchain@stable",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/setup-python@v5",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Linux sandbox dependency",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Provision declared Linux fixture toolchains",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run cargo fmt --all -- --check",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Check workspace",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Check host workspace (Windows)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Build the worker sandbox shim",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Test workspace",
+              "status": "completed",
+              "conclusion": "failure"
+            },
+            {
+              "name": "Derivation transformation v0 E2E (Linux)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Upload transformation v0 evidence (Linux)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Scenario verifier v1 E2E (Linux)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Upload scenario verifier v1 evidence (Linux)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Stateful transformation E2E (Linux)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Upload stateful transformation evidence (Linux)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Portable worker regressions (Windows)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "OCI service group direct E2E (Linux)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Clippy workspace",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Clippy host workspace (Windows)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Run cargo run --locked -p arch-check",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Post Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Post Run actions/setup-python@v5",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Post Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "id": 134281409929,
+          "name": "relay binaries (rebuilt from source)",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run dtolnay/rust-toolchain@1.96.0",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run mlugg/setup-zig@v2",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Rebuild the relay binaries",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Upload the rebuilt binaries",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Compare with the committed binaries",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run mlugg/setup-zig@v2",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "id": 134281465440,
+          "name": "workspace (macos-latest)",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run dtolnay/rust-toolchain@stable",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/setup-python@v5",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Linux sandbox dependency",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Provision declared Linux fixture toolchains",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Run cargo fmt --all -- --check",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Check workspace",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Check host workspace (Windows)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Build the worker sandbox shim",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Test workspace",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Derivation transformation v0 E2E (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Upload transformation v0 evidence (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Scenario verifier v1 E2E (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Upload scenario verifier v1 evidence (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Stateful transformation E2E (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Upload stateful transformation evidence (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Portable worker regressions (Windows)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "OCI service group direct E2E (Linux)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Clippy workspace",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Clippy host workspace (Windows)",
+              "status": "completed",
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Run cargo run --locked -p arch-check",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/setup-python@v5",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run Swatinem/rust-cache@v2",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        }
+      ],
+      "initial_failures": [
+        {
+          "platform": "Linux",
+          "job_id": 134271884523,
+          "test": "tests::cdp_main_world_native_consumer_probe_keeps_registry_generation_stable",
+          "error": "timed out waiting for loopback CDP"
+        },
+        {
+          "platform": "Windows",
+          "job_id": 134271883821,
+          "test": "tests::browser_e2e_routes_keyboard_and_click_through_authority_then_ack_then_record",
+          "error": "timed out waiting for loopback CDP"
+        }
+      ],
+      "remaining_failure": {
+        "platform": "Linux",
+        "job_id": 134281407126,
+        "test": "runtime_launch::network_broker::tests::fixed_tcp_propagates_client_eof_and_returns_the_connection_slot",
+        "path": "apps/connected-realization-worker/src/runtime_launch/network_broker.rs:1082",
+        "error": "bind fixed TCP allocation: Address already in use (os error 98)",
+        "test_summary": "258 passed; 1 failed; 26 ignored",
+        "scope": "unchanged from v0.9.4; full-workspace CI is not all green"
+      }
+    }
+  },
+  "previous_gui_acceptance": "docs/ops/solidcraft-gui-staging-095-acceptance-20261118.md",
+  "stable_gui_e2e_repeated": false,
+  "clean_environment": [
+    "HOME",
+    "ATO_HOME",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "TMPDIR",
+    "PATH"
+  ],
+  "production_web_api_deployed": false,
+  "homebrew_commit": {
+    "html_url": "https://github.com/ato-run/homebrew-ato/commit/f6cb3f849c77bbee424ca3b46132bbdfbae9d8ea",
+    "message": "ato-cli 0.9.5",
+    "sha": "f6cb3f849c77bbee424ca3b46132bbdfbae9d8ea"
+  },
+  "public_tag_target": {
+    "object": {
+      "sha": "8ee783ba317f2233f1de8694998cc3e051ff0c0b",
+      "type": "commit",
+      "url": "https://api.github.com/repos/ato-run/ato/git/commits/8ee783ba317f2233f1de8694998cc3e051ff0c0b"
+    },
+    "tag": "v0.9.5"
+  },
+  "staging_hub_anonymous_read": {
+    "derivation_ref": "sha256:d3e816f10e6faddf99e7d151b9e4185fafece30cc6481734f9e9cc1c82d09115",
+    "digest": "sha256:bd9ede29c27274ff2dd1d1cd8d5c08b251672cd8f8fffe4fda99b0129e495d47",
+    "info": {
+      "dependencies": [
+        {
+          "name": "macOS (Apple Silicon)",
+          "provisioning": "host",
+          "purpose": "run",
+          "version": null
+        },
+        {
+          "name": "Xcode Command Line Tools (clang/linker)",
+          "provisioning": "host",
+          "purpose": "build",
+          "version": null
+        },
+        {
+          "name": "Rust",
+          "provisioning": "managed",
+          "purpose": "build",
+          "version": "1.95.0"
+        },
+        {
+          "name": "SolidCraft source archive and locked Cargo dependencies",
+          "provisioning": "download",
+          "purpose": "build",
+          "version": "8ba46e9e2181396a9b5903b98031399aef61cf26"
+        }
+      ],
+      "estimate_environment": "Apple M1 / macOS 15.8.1 / ato-cli 0.9.5-stg; stg clean-install measurement; D1/D2 cold preparation overlapped",
+      "estimated_cached_run_seconds": 11,
+      "estimated_first_run_seconds": 2614,
+      "label": "D2: ソースから GUI をビルド",
+      "notes": "CAD GUI で直方体を作成し、長さを 40 mm から 50 mm に編集、保存・終了・再起動後の 50 × 30 × 10 mm を確認。時間はこの検証環境での実測を基にした目安で、機材・回線で変わります。設計ファイルは表示された Saved data (home) 内に保存してください。 D2 は --allow-native-source-build --allow-unsigned-native が必要です。再実行時の build cache hit を確認。"
+    },
+    "revision": 1,
+    "source": "publisher",
+    "updated_at": "2026-11-17 17:13:23"
+  }
+}
