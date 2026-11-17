@@ -1389,7 +1389,13 @@ fn parse_single_route(
             // A Terminal surface opens no listening socket, so it promises no
             // guest port: the Adapter owns the PTY. Every other native route
             // still declares the loopback port its app serves.
-            match (guest_port, native_surface.is_some()) {
+            match (
+                guest_port,
+                native_surface.is_some()
+                    || runtimes
+                        .get(crate::native_desktop::NATIVE_PRESENTATION_RUNTIME)
+                        .is_some_and(|value| value == "local-window"),
+            ) {
                 (Some(port), false) if port != 0 => port,
                 (Some(_), false) => {
                     return Err(invalid(
@@ -1407,7 +1413,7 @@ fn parse_single_route(
                 (Some(_), true) => {
                     return Err(invalid(
                         "derivation.guest_port",
-                        "a native terminal surface opens no listening socket; omit guest_port",
+                        "a native terminal or local-window surface opens no app listening socket; omit guest_port",
                     ));
                 }
             };

@@ -73,6 +73,8 @@ pub const NATIVE_SIGNATURE_TARGET_RUNTIME: &str = "ato.native.signature_target";
 /// bounded, declared fact — the Adapter executes it directly, never through a
 /// shell — and only a route that declares a terminal Surface may state it.
 pub const NATIVE_ARGV_RUNTIME: &str = "ato.native.argv";
+/// A macOS window observed by its owning Adapter, with no app HTTP listener.
+pub const NATIVE_PRESENTATION_RUNTIME: &str = "ato.native.presentation";
 /// Largest number of arguments a Terminal route may declare.
 pub const MAX_NATIVE_ARGV: usize = 16;
 /// Largest single argument a Terminal route may declare, in bytes.
@@ -100,8 +102,8 @@ pub const NATIVE_BUILD_CACHE_RUNTIME: &str = "ato.native.build_cache";
 pub const NATIVE_FORMAT_TAR_GZ: &str = "tar.gz";
 /// A `.zip` archive. Accepted for a remote artifact only.
 pub const NATIVE_FORMAT_ZIP: &str = "zip";
-/// A `.dmg` disk image. Accepted for a remote artifact only; the Adapter
-/// has no disk-image extractor in this increment and refuses it at execution.
+/// A `.dmg` disk image. Accepted for a remote artifact only; materialized by
+/// the macOS Adapter with a read-only mount and bounded app-bundle copy.
 pub const NATIVE_FORMAT_DMG: &str = "dmg";
 
 /// The one build cache policy a source route may declare.
@@ -551,6 +553,8 @@ fn parse_native_argv(value: &str) -> Result<Vec<String>, NativeDescriptorError> 
 /// The validated declaration of one native serving step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeDescriptor {
+    /// Local desktop window observed by the Adapter, rather than app HTTP.
+    pub local_window: bool,
     pub os: NativeOs,
     pub arch: NativeArch,
     /// The executable path, relative to the materialized artifact root.
@@ -690,6 +694,7 @@ impl NativeDescriptor {
                     | NATIVE_BUILD_ARGV_RUNTIME
                     | NATIVE_BUILD_CACHE_RUNTIME
                     | NATIVE_ARGV_RUNTIME
+                    | NATIVE_PRESENTATION_RUNTIME
             ) {
                 return Err(NativeDescriptorError("native_descriptor_unknown_key"));
             }
@@ -743,7 +748,17 @@ impl NativeDescriptor {
             None => Vec::new(),
             Some(value) => parse_native_argv(value)?,
         };
+        let local_window = match step
+            .runtimes
+            .get(NATIVE_PRESENTATION_RUNTIME)
+            .map(String::as_str)
+        {
+            None => false,
+            Some("local-window") if os == NativeOs::Macos => true,
+            _ => return Err(NativeDescriptorError("native_presentation_unsupported")),
+        };
         Ok(Self {
+            local_window,
             os,
             arch,
             entry,
@@ -840,6 +855,12 @@ impl NativeDescriptor {
             runtimes.insert(
                 NATIVE_ARGV_RUNTIME.to_owned(),
                 serde_json::to_string(&self.argv).expect("a string vector serializes"),
+            );
+        }
+        if self.local_window {
+            runtimes.insert(
+                NATIVE_PRESENTATION_RUNTIME.to_owned(),
+                "local-window".to_owned(),
             );
         }
         runtimes
@@ -1021,6 +1042,39 @@ mod tests {
             (NATIVE_ARTIFACT_RUNTIME, sha()),
             (NATIVE_ENTRY_RUNTIME, "app/run.sh".to_owned()),
         ]
+    }
+
+    #[test]
+    fn local_window_is_explicit_macos_only_and_round_trips() {
+        let values = valid_runtimes();
+        let pairs = values
+            .iter()
+            .map(|(k, v)| (*k, v.as_str()))
+            .collect::<Vec<_>>();
+        let mut declaration = step(&pairs);
+        let original = NativeDescriptor::from_step(&declaration).unwrap();
+        assert!(!original.local_window);
+        assert!(
+            !original
+                .runtimes()
+                .contains_key(NATIVE_PRESENTATION_RUNTIME)
+        );
+        declaration
+            .runtimes
+            .insert(NATIVE_PRESENTATION_RUNTIME.into(), "local-window".into());
+        let window = NativeDescriptor::from_step(&declaration).unwrap();
+        assert!(window.local_window);
+        assert_eq!(
+            window
+                .runtimes()
+                .get(NATIVE_PRESENTATION_RUNTIME)
+                .map(String::as_str),
+            Some("local-window")
+        );
+        declaration
+            .runtimes
+            .insert(NATIVE_OS_RUNTIME.into(), "windows".into());
+        assert!(NativeDescriptor::from_step(&declaration).is_err());
     }
 
     /// A Terminal route's argument vector is a bounded, printable fact: the
