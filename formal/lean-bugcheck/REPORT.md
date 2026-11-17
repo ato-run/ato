@@ -78,7 +78,7 @@ CLI の `ato form`（`apps/cli/src/lib.rs:1452-1515`）は `LocalDirectory` を�
 | 高 | Model Set の受信・キャッシュ (`lib/runtime-attempt/src/data_plane`) | range / resume の範囲計算と quota の予約・ピーク上界を Lean で証明。成長ゼロ import が ceiling 超過キャッシュで拒否される反例 1 件（候補・CLI のみ到達・Rust 再現は未実行） | quota の意図（総量か成長か）、配信経路に上限が無いことの是非、同時実行 |
 | 高 | Run admission と Contract receipt (`lib/runtime-attempt`, `lib/formation`) | AGENTS.md の v3 不変条件と一致（選択 D のみ能力判定、stage 分離、K と verdict の 1:1、空 K 拒否、受理側の再計算）。Detected mismatch なし | receipt 生成側 API の将来利用、hosted の受理中継、実 HTTP/実コンテナ |
 
-上表以外の行（portable capsule、runtime-attempt、formation source、data plane、Coordinator/Hosted Runner、ato-api/ato-pwa/Desktop）は第1回の記載から進展なし。
+上表以外の行（portable capsule、runtime-attempt、formation source、data plane、Coordinator/Hosted Runner、ato-api/ato-pwa/Desktop）は第1回の記載から進展なし（第3回で更新した。下記「第3回 棚卸し」を参照）。
 
 環境上の制約: この作業 worktree のサンドボックスは `ps` を EPERM で拒否するため、`lib/local-execution` の macOS 実装が
 process start time を取得できず durable Run の worker が ACTIVE になれない。したがって「run が動いている状態」を前提とする挙動
@@ -325,6 +325,169 @@ capture 側（同 241-243）は symlink を `WorkspaceError::Symlink` で拒否�
 - U1 は Lean モデル化していない（資源量の見積り）。メモリ版を直接叩く OOM 再現も未実施。
 - 今回見たのは 4 機能（Semantic Core / Kernel / Composition / CLI）と 3 行（Formation、data plane、admission/receipt）で、
   棚卸し表の残りの行は未着手のまま。全機能の網羅でも全バグの解消でもない。
+## 第3回 棚卸し（残りの行、対象 024ac2a54、2026-11-18）
+
+第1回・第2回で「未着手」だった行（Portable Capsule、Run 記録の復旧、netd の残り、Coordinator/Formation Worker/Hosted Runner、
+Materializer/Instance、ato-api/ato-pwa/Desktop/配信）を対象に、棚卸しを一巡させた。**棚卸し表の全行に状態を付けた**が、
+行ごとの深さは異なる（コード全域の読解ではなく、境界ごとの到達範囲の記録）。修正・PR・外部通知はしていない。
+
+### 今回の棚卸し表（第3回で更新。全行の状態）
+
+| 優先 | 機能 | 状態（今回の到達点） | 未検査 / 次の範囲 |
+|---|---|---|---|
+| 高 | Run の記録とローカル保存 (`lib/objects`, `lib/local-execution`) | **R1/R2/R3 を確定**（実コード再現あり）。crash 復旧・並行の候補は R4/R5 | 電源断の実測、ENOSPC/EIO、真の並行実行 |
+| 高 | Portable Capsule v2/v3/v4 (`lib/objects`, `apps/portable-application`) | 調査中（結果は次コミットで追記） | hosted import の実環境、v4 の実 Run |
+| 高 | Run admission と Contract receipt | 第2回で一致を確認。今回 **B13**（ato-api の受理 schema が /1 固定で Rust の /3 を拒否）を追加 | 実 hosted import での再現、Control Plane 側の retry 判断 |
+| 高 | Formation の source 取得・展開 (`lib/formation`) | U1 の判定を維持（到達経路なし・資源の非対称のみ） | 埋め込み利用者、zstd window |
+| 高 | Model Set の受信・キャッシュ (`lib/runtime-attempt/src/data_plane`) | 第2回で範囲/quota の性質と B9 候補を確認 | 配信経路の上限、同時実行 |
+| 高 | 通信の認可・egress (`services/netd`) | **N1 を確定**（DENIED_RANGES が IPv4 埋め込み 3 形式を欠く）。N5-N8 を否定 | 6to4/NAT64-local の実経路、gateway 実接続 |
+| 中 | Semantic Core、Kernel、Composition | 第2回で B2/B3/B8 と性質を確認。今回の残りなし | 実評価スタック、C1/C2/C10 |
+| 中 | CLI lifecycle、Materializer、local Instance | **B11/B12 を確定**。候補 6 件（下記） | durable Run 稼働中の挙動、vm-snapshot 本体 |
+| 中 | Coordinator、Formation Worker、Hosted Runner | **H1-H4 を確定**。Coordinator（ato-api）は repo 外で未検査。H5-H8 候補 | ato-api の fence/retry/reaping、実 staging 6 slot |
+| 中 | ato-api、ato-pwa、Desktop、配信 | ato-api は B13 と境界 probe、PWA は実行テスト 178 件、Desktop は IPC/navigation を確認。配信 2 repo は**未読** | PWA 875 ファイルの残り、ato-edge/usercontent、Desktop cargo test |
+
+### B11 — `[encap] materializers`（realization 要求）が sealed identity に入る（未修正・F2 の確定）
+
+`lib/local-execution/src/authoring.rs:948` の `seal_state` は `AuthoringState{config, workspace_snapshot}` 全体を JCS 化する。
+`config` には `EncapConfig{materializers}`（同 120-125）が入るため、realization の要求だけが違う 2 つの `capsule.toml` は
+別の `ComputationRef` になる。実コードで `[encap]` 以外同一の 3 プロジェクトを `ato init --initial-only` し、
+`blake3:212a9bff…` / `f2fe5a5c…` / `45f73142…` と別 ref になること、residual 実バイトに `encap.materializers` が
+入っていることを確認した。`encap --materialize <id>` で後から materializer を選んでも root は変わらないため、
+「実体ではなく宣言だけが identity を動かす」非対称がある。MATERIALIZATION.md と AGENTS.md 不変条件 5
+（materialization は identity を変えない）に反する。Lean: `MaterializerIdentity.request_changes_identity_BUG`、
+`three_requests_three_identities`、修正版 `fixed_identity_ignores_request`、対照 `encap_keeps_root`。
+到達: `ato init` → `seal_authored_root` → `seal_state`。未検証: `ato run <file.capsule>` の E2E、v3/v4 bundle の同種混入。
+
+### B12 — durable local Instance の Starting lease が孤児化し、回復経路が無い（未修正）
+
+`claim_run`（`apps/portable-application/src/lib.rs:1950`）から `activate_run`（同 2388）の間に親 CLI が死ぬと
+（Ctrl-C・端末クローズ・OOM kill）、`active-run.json` が `starting` のまま残る。以後 `ato app start` は
+`already has Run … in status starting`、`ato app stop` は `still preparing and cannot be stopped` で拒否され、
+`active-run.json` を手で消すまで回復しない。token はディスクに平文で残る（再現で確認）ので、塞がっている理由は
+秘密性ではなく「非 Active lease を release するコマンドが無い」こと。B6（authoring 側）と同型だが別ファイル・別コマンド。
+Lean: `InstanceLease.starting_lease_is_absorbing`、`starting_lease_closed_to_user_commands`、健全側 `release_fences_by_token` ほか。
+実コード再現: `repro/instance_lease.rs`（合成 `instance.json` + `claim_run` 1 回。`run.sh` で実行）。
+未検証: 実プロセスを殺しての再現（`ps` EPERM で worker を ACTIVE にできない）。
+
+### R1 — 欠落した Record を cursor 復旧が見逃し、seq 再利用で履歴が恒久に再生不能になる（未修正）
+
+`atomic_create` / `atomic_write`（`lib/objects/src/repository.rs:1050-1079`）は file を `sync_all` してから rename するが
+**親 directory を fsync しない**。cursor は別 directory（`runs/active.json`）にあるため、「cursor は durable、record の rename は消失」
+という順序が起こり得る。`next_sequence`（888-906）は最大 seq + 1 で欠番を埋めず、`active_run` の復旧（779-799）は
+cursor より後だけを見るので欠落を検出しない。結果、seq が再利用され append-only 列が非連結になり、
+`records_for_causal_branch` が恒久 `CausalHeadMismatch` を返す（`ato resume` / `encap` / replay が不能）。
+Lean: `RecordRecovery.lost_record_is_invisible_to_the_cursor` / `lost_record_sequence_is_reused` / `reuse_breaks_the_chain`。
+実コード再現: `repro/record_recovery.rs`（record 2 を削除して再現。`run.sh` で実行）。
+未検証: 実 FS の電源断での rename 消失（削除で代替）、ENOSPC/EIO。
+
+### R2 — cursor 書込みだけ失敗すると sink が永久に停止する（未修正）
+
+`commit_observation` は record を `atomic_create` した後に `atomic_write(runs/active.json)` する。2 つ目だけ失敗すると、
+record は durable で `active_run()` は新 head を返すのに、`RepositoryObservationSink` の cached head は古いままなので
+以後の `emit` が全て `ActiveRunConflict` になる（再同期経路が無い）。Lean: `RecordRecovery.cursor_write_failure_stalls_the_sink`。
+実コード再現: `repro/record_cursor_write.rs`（`.capsule/runs` を 0555 にして EACCES を注入）。
+未検証: ENOSPC/EIO、adapter が emit の Err をどう扱うかの全数確認。
+
+### R3 — `create_branch` が origin を先に書き、失敗で orphan origin を残す（未修正）
+
+`create_branch`（repository.rs:520-558）は origin → head の順に `atomic_create` する。head 側だけ失敗すると
+`branch_origin()` は値を持つが `head()` は None という状態が残り、同名 branch の再作成は origin の AlreadyExists で恒久失敗する。
+origin を渡さず作り直すと古い anchor が残り、先頭 Record で causal replay が壊れる。
+Lean: `BranchOriginOrder.partial_failure_leaves_an_orphan_origin` / `orphan_origin_blocks_the_retry` / 修正版 `createBranchFixed`。
+実コード再現: `repro/record_branch_origin.rs`（`refs/heads` を 0555 にして再現）。到達: `ato resume --branch X` の create_branch。
+
+### N1 — egress の CIDR deny list が IPv4 埋め込み IPv6 形式 3 種を欠く（未修正）
+
+`services/netd/src/egress/gate.rs` の `DENIED_RANGES` は `::ffff:0:0/96` を含むが、`::/96`（IPv4-compatible）、
+`2002::/16`（6to4）、`64:ff9b:1::/48`（RFC 8215 local-use NAT64）を欠く。実ファイルから定数を抽出して実行し、
+`::7f00:1`（::127.0.0.1）、`2002:7f00:1::`、`2002:a9fe:a9fe::`（169.254.169.254）、`64:ff9b:1::7f00:1` が
+`denied=false` になることを確認した（positive control は denied=true）。
+Lean: `EgressCidr.compat_loopback_allowed_BUG` / `sixToFour_loopback_allowed_BUG` / `nat64_local_loopback_allowed_BUG`、
+修正版 `deniedFixed` で `fixed_spec`。既存の `Egress.no_loopback_or_linklocal` は `effectiveV4` が `some` の形式だけを対象にした定理で、
+これらの形式は射程外（矛盾しない）。到達: allowlist のホスト名が DNS でこれらの形式に解決される場合のみ（低〜中）。
+未検証: 実ホストが 6to4 / NAT64 local の経路を持つか。
+
+### H1 — Hosted Runner が format / 期限 / commit 失敗を 1 つの wire code に畳み込む（未修正・Detected mismatch）
+
+`apps/connected-realization-worker/src/lib.rs:2213-2243` は、`validate_lease` / `verified_spec` の不整合、
+`max_duration` 到達、state commit 失敗をすべて `realization_failed` として報告する。中間 code は
+`message.contains("execution authorization")` の**prose 一致**で決めており、`lib/formation/src/failure.rs:11-14` が
+明示的に否定している方針（code を型で運ぶ）と正反対。AGENTS.md の「format invalid / admission failure /
+execution failure / Contract failure を同じエラーへ畳み込まない」に対する Detected mismatch。
+Lean: `HostedFailureCode.distinct_causes_share_the_wire_code` / `only_authorization_is_separable` / 修正版 `spec_code_is_injective`。
+実行: `repro/hosted_lease_logic.rs`（判断関数を実ソースから逐語コピー。`run.sh` で実行）。
+注意: Formation Worker 側は code+stage を型で運んでおり非対称。
+
+### H2 — 宣言した max_duration 到達が「失敗」として報告され、slot が recovery 隔離に入る（未修正）
+
+`wait_for_stop`（lease.rs:1393）は deadline 到達で bail し、呼び出し側は `realization_failed` + `mark_slot_recovered(false)` にする。
+設計意図（lease.rs:114-118）は「cron/browser に依存しない cleanup」なので期限到達は想定経路だが、
+control plane には失敗として届き、state は commit 済み（「失敗したのに durable state が進む」）、その slot は
+recovery が stopped を届けるまで新規受付を止める。
+
+### H3 / H4 — lease の `expires_at` が Run の寿命を縛らない / 定数の doc と実装が矛盾
+
+`expires_at` を参照するのは `validate_lease`（lib.rs:3951-3956）の受理時 1 回だけで、比較はローカル壁時計。
+Run の寿命は `maximum_lifetime` だけが決める。同じファイルの `ExecutionAuthorizationMonitor` は
+「壁時計と比較しない」と明記しており、同一概念に 2 つの時計方針がある。また `RUNTIME_LAUNCH_MAX_DURATION_SECS` の
+doc は「省略時は 1 時間 cap」と書くが、`execution_authorization` 付き lease では `maximum_lifetime` が None になり cap が無い。
+Lean: `HostedLeaseLifetime.expiry_does_not_bound_the_run` / `cap_omitted_BUG`。
+到達: `max_duration_secs` も execution_authorization も付かない runtime_launch lease（H3）、authorization 付き lease（H4）。
+未検証: ato-api が expires_at を回収に使っているか、実機の時計ずれ。
+
+### B13 — ato-api の receipt 受理 schema が /1 固定で、Rust の /3（TLS 証拠）を拒否する（未修正・cross-repo）
+
+Rust の hosted validator は `verify_observed_candidate` で receipt を作り、schema を
+「native → /5、connector → /4、TLS 証拠あり → /3、…、それ以外 → /1」と決める（`lib/runtime-attempt/src/verification.rs:313-329`）。
+`ato.contract.tls@1` requirement を hosted で観測する経路があるため（`validator_agent.rs:263-300`）、TLS を持つ app の receipt は /3 になる。
+一方 ato-api の受理 schema は `schema: z.literal("ato.contract-verification-receipt/1")` 固定（`src/services/capsule_bundle.ts:553-576`）で、
+ack route は `zValidator` なので /3 は 400 になり、validator は ack 失敗で停止する。
+影響は fail closed（誤って verified にはならない）だが、TLS requirement を持つ portable app は hosted で verified に到達できない。
+AGENTS.md の「CLI と ato.run は同一 schema の receipt を発行し」に対する Detected mismatch。
+証拠はコード読解のみ（ato-api に node_modules が無く zod を実行できない）。未検証: 実 hosted import での再現、ato-api に /3 以降を受ける別経路があるか。
+### 候補（第3回。コード読解のみ、確定バグに数えない）
+
+- R4: `stop_and_seal`（`seal.rs:104-116`）の 5 段階（active_run → stop_active → evolve_workspace → seal frontier → update_head → release）が
+  単一 lock で括られていない。途中で落ちると records だけ進み head が古いまま lease が残り、B6 の回復不能状態に合流する。`stop_and_seal` は冪等でない。
+- R5: 起動に失敗した `resume` も `create_branch` を先に行うため branch が残り、同じ `--branch X` の再試行が `already exists` で拒否される。
+- H5: attempt journal の UNKNOWN バリアは `work_root` ローカル（`journal.rs:232-275`）。別 Runner / 別 work_root への再配送は止まらない。
+  実コード再現で「同じ work root では 7 が 7/8 を止めるが、別 work root では 7 が再び通る」を確認。
+- H6: journal の flock はブロッキングで timeout が無く、hosted は 6 slot が 1 `work_root` を共有する。同一 job の 2 attempt が同時に来ると
+  slot の heartbeat が止まり得る。
+- H7: 失敗メッセージが `{error:#}` の全チェーン（2000 文字上限）で制御プレーンへ送られる。要求 URL が混ざる可能性は未検証。
+- H8: 成功した renewal が deadline を後退させ得る（fail-closed、可用性のみ）。
+- N2: grant はハンドシェイク callback 内で消費され、その後の `ActiveViewerGuard` / guest・RFB 接続失敗で回復できない（修正済み #3 の残余）。
+- N3: origin は signed claims に含まれず、replay cache は jti のみ。allowlist 内の別 origin でも一度だけ通る（権限昇格は無い）。
+- N4: replay cache は in-memory / per-gateway。再起動後に replay できる窓は最大 `MAX_ASSERTION_REMAINING_TTL_SECS = 300` 秒。
+- I1: `finish_instance_stop` の save が途中失敗すると、`instance.json` は新しい状態へ置換済みなのに ack が出ず、利用者には timeout だけが見える。
+- I2: `restored_snapshot()` 単体は metadata-only の証拠（実バイトを読まない）。現行呼び出し元は直後に実バイトを検証する。
+- I3: `ReplayMaterializer` の v1 `verify` は `restore` より弱く、`encap` の `verified == target` 検査が恒真になる（通常経路は causal 検査で止まる）。
+- I4: `MaterializerRegistry` / `ContractVerifierRegistry` の `register` も insert してから Err（B2 と同型・現行到達不能）。
+- I5: static-web の dotfile（`.nojekyll`）は `media_type_for` が `None` を返し producer が bail する（fail closed・可用性）。
+- I6: static-web producer の collect→read 間の TOCTOU（collect は symlink を拒否、その後の `fs::metadata` は辿る）。要検証。
+- A1: ato-api の ack は `expectedObservationIds.length === 0 ||` で観測集合検査を短絡する。report の `requirement_ids` は zod 上空を許すため、
+  空なら任意の satisfied observations で verified になり得る（正規 validator は空を送らない）。
+- A2: ack の実行証拠検査は `job.run_id ? … : true` で、run_id の無い job では attempt/lease/realization の一致を検査しない。
+- A3: OAuth の `clientAllowsScopes` は client が `apps:read` を持つだけで instance 系スコープを要求できる。Instance アクセスは grant 検査が唯一の防壁。
+
+### 否定（第3回。疑ったが成り立っていた）
+
+- N5: 並行 `TransferBudget::consume` の過剰許可は起きない。`used` は拒否された試行の分も加算する単調量で、安全側の過剰拒否だけが起こる（Lean）。
+- N6: DNS は 1 回だけ解決し、deny-any 判定済みの `SocketAddr` に接続する。rebind TOCTOU は無い。
+- N7: pixel / terminal の origin 判定は設定時に正規化を強制し、ハンドシェイクは完全一致。
+- N8: transaction lock は非再入だが、保持中に lock を取る関数を呼ばない。deadlock は無い。
+- N9: `active_run` の復旧は crash に対して吸収的（record が durable である限り）。欠番は `none` で止まり、黙って読み飛ばさない。
+- I7: v4 snapshot の restore evidence は index の ref だけに依存しない（bundle 全 payload digest + `observe_run_state` の再 capture、
+  ephemeral は `instance_snapshot_missing` で Failed）。
+- I8: 同じ bundle の別 import は独立 Instance（application bytes のみ共有）。
+- I9: active Run の lease fence（token/status/head lineage）と boot session + start time 照合は健全。
+- I10: static-web manifest のパス境界・digest・connect-src・frame-ancestors に新規の受理穴なし。snapshot materializer は verify-only で仕様どおり。
+- H9: attempt の一意性（同一 work_root）、execution authorization の単調性・時計非依存、Contract verification failure が
+  `realization_failed` に畳み込まれないこと（別経路）を確認。`cargo test -p ato-runtime-attempt --lib journal::` は 7 件成功。
+- A4: ato-api の CORS/CSRF 境界は純関数を Node 22 で実行して確認。probe URL は 19 入力で escape 0、
+  `canonicalizeOrigin` は path/query/hash/userinfo/`null`/`*` を拒否し、完全一致比較。
+- PWA: README の escape-first レンダラと auth 群の既存テスト 178 件が成功（`npx vitest run src/auth src/lib/repoSource`）。
+- Desktop: IPC は 7 command に限定、capability は `main` window のみ、navigation は fail-closed の純粋関数で unit test されている（読解）。
 ## 引き継ぎ後の修正
 
 対象は `feat/lean-bugcheck` @ `bbeea6f` を起点とする worktree。下の5件を修正し、Lean 4.36.0 で修正版のモデルを検査した。`run.sh` は失敗時に非ゼロ終了し、ソースを書き換えずに回帰検証する。Lean は `$LEAN` または `~/.elan/bin/lean` から指定する。
@@ -351,8 +514,10 @@ capture 側（同 241-243）は symlink を `WorkspaceError::Symlink` で拒否�
 - 小さく純粋なセキュリティ判定ロジック 6 箇所（約 1,500 行）を手書きで Lean 4 にモデル化（`AtoBugcheck.lean`、Mathlib 不使用、`sorry` なし、Lean 4.36.0 で検査済み）。
 - 「成り立つべき性質」が証明できなかった箇所は反例を定理（`*_BUG`）として固定し、実コードで再現。
 - 全体は Rust 約 40 万行。見たのはその一部で、ここに無い箇所は未検証。
-- 第2回でモデルを拡張し、`AtoBugcheck.lean` は 20 セクション・104 定理になった（Connection 正規化 / boundary / 識別子、authoring と compose の配線ゲート、kernel 登録、compose 深さ、CLI resume と lease、data plane の quota と range、resolve の信頼境界）。
-- `run.sh` は Lean カーネル検査の後、未使用コード走査を除く 9 系統の実コード再現（path / budget / netd / static-web / record / kernel+compose / kernel depth / authoring gate / CLI lifecycle）を順に実行し、失敗時に非ゼロ終了する。
+- 第2回・第3回でモデルを拡張し、`AtoBugcheck.lean` は 40 セクション超・200 定理超になった（Semantic Core の正規化/識別子/resolve、authoring と compose の配線ゲート、
+  kernel 登録、compose 深さ、CLI resume/lease、data plane の quota/range、record 復旧/seq/分岐 origin、egress の CIDR 形式、hosted lease の寿命/attempt/失敗 code、
+  materializer identity、Instance lease、v4 snapshot restore）。
+- `run.sh` は Lean カーネル検査の後、未使用コード走査を除く 15 系統の実コード再現（path / budget / netd グラント / static-web / record 連続性 / record 復旧・cursor・分岐 origin / egress CIDR / hosted lease / kernel+compose / kernel depth / authoring gate / Instance lease / CLI resume / CLI lifecycle）を順に実行し、失敗時に非ゼロ終了する。
 
 ## 引き継ぎ時に見つかった問題（修正前の状態）
 | # | 場所 | 内容 | Lean | 実コード再現 | 影響 |

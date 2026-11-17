@@ -29,7 +29,7 @@ echo '== manifest error regression'
 (cd "$REPO" && cargo test -p ato-materializer-static-web --lib distinguishes_empty_and_invalid_materialization_ids)
 echo '== discontinuous record counterexample'
 # One build for every rlib the repros link, so cargo unifies features once.
-(cd "$REPO" && cargo build -p ato-objects -p ato-computation -p ato-kernel -p ato-compose -p ato-local-execution)
+(cd "$REPO" && cargo build -p ato-objects -p ato-computation -p ato-kernel -p ato-compose -p ato-local-execution -p ato-portable-application)
 TARGET_DIR="${CARGO_TARGET_DIR:-$REPO/target}"
 case "$TARGET_DIR" in /*) ;; *) TARGET_DIR="$REPO/$TARGET_DIR" ;; esac
 rustc --edition 2024 "$HERE/repro/record_continuity.rs" \
@@ -37,6 +37,23 @@ rustc --edition 2024 "$HERE/repro/record_continuity.rs" \
   --extern "ato_computation=$TARGET_DIR/debug/libato_computation.rlib" \
   -L "dependency=$TARGET_DIR/debug/deps" -o "$OUT/record-continuity"
 "$OUT/record-continuity"
+echo '== record recovery, cursor write and branch origin counterexamples'
+for repro in record_recovery record_cursor_write record_branch_origin; do
+  rustc --edition 2024 "$HERE/repro/$repro.rs" \
+    --extern "ato_objects=$TARGET_DIR/debug/libato_objects.rlib" \
+    --extern "ato_computation=$TARGET_DIR/debug/libato_computation.rlib" \
+    -L "dependency=$TARGET_DIR/debug/deps" -o "$OUT/$repro"
+  OUT="$OUT" "$OUT/$repro"
+done
+echo '== egress CIDR covers every IPv4-embedded IPv6 form'
+awk '/^const DENIED_RANGES/,/^\];/' "$REPO/services/netd/src/egress/gate.rs" > "$OUT/egress_denied_ranges.rs"
+IPNET="$(ls -t "$TARGET_DIR"/debug/deps/libipnet-*.rlib | head -1)"
+OUT="$OUT" rustc --edition 2024 "$HERE/repro/netd_egress_cidr.rs" \
+  --extern "ipnet=$IPNET" -L "dependency=$TARGET_DIR/debug/deps" -o "$OUT/netd-egress-cidr"
+OUT="$OUT" "$OUT/netd-egress-cidr"
+echo '== hosted lease failure codes, lifetime and attempt journal'
+rustc -O --edition 2024 "$HERE/repro/hosted_lease_logic.rs" -o "$OUT/hosted-lease-logic"
+"$OUT/hosted-lease-logic"
 echo '== duplicate kernel registration and compose depth counterexamples'
 rustc --edition 2024 "$HERE/repro/core_boundaries.rs" \
   --extern "ato_objects=$TARGET_DIR/debug/libato_objects.rlib" \
@@ -66,6 +83,12 @@ rustc --edition 2024 "$HERE/repro/semantic_authoring_gate.rs" \
   -L "dependency=$TARGET_DIR/debug/deps" -o "$OUT/semantic-authoring"
 mkdir -p "$OUT/lean-bugcheck"
 (cd "$OUT/lean-bugcheck" && "$OUT/semantic-authoring")
+echo '== durable local Instance starting-lease orphaning'
+rustc --edition 2024 "$HERE/repro/instance_lease.rs" \
+  --extern "ato_portable_application=$TARGET_DIR/debug/libato_portable_application.rlib" \
+  -L "dependency=$TARGET_DIR/debug/deps" -o "$OUT/instance-lease"
+mkdir -p "$OUT/instance"
+OUT="$OUT/instance" "$OUT/instance-lease"
 echo '== rejected resume overwrites the workspace snapshot'
 ATO_CLI="${ATO_CLI:-$TARGET_DIR/debug/ato}"
 if [ ! -x "$ATO_CLI" ]; then

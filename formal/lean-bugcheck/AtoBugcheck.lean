@@ -1257,3 +1257,1216 @@ theorem valid_segment_no_upper (s : List Ch) (h : validSegment s = true) :
       simp [okByte] at hok
 
 end IdentifierSyntax
+
+
+/-! ## 21. lib/local-execution/src/authoring.rs :: [encap] materializers in sealed identity -/
+namespace MaterializerIdentity
+
+/-- authoring config のうち computation に関わる部分（process / port / connection）。 -/
+structure Computation where
+  process : List String
+deriving DecidableEq, Repr
+
+/-- [encap] materializers。どの Materializer を encap が呼ぶかの要求。 -/
+abbrev MaterializationRequest := List String
+
+/-- 実コードの identity: seal_authoring_state は AuthoringState（= config 全体）を
+    JCS 化して residual にするので、materialization 要求も残差に入る。 -/
+def identityWithRequest (c : Computation) (r : MaterializationRequest) :
+    Computation × MaterializationRequest :=
+  (c, r)
+
+/-- 要求を identity から除いた場合。 -/
+def identityWithoutRequest (c : Computation) (_r : MaterializationRequest) :
+    Computation × MaterializationRequest :=
+  (c, [])
+
+/-- MATERIALIZATION.md / AGENTS.md 不変条件 5 が要求する性質。 -/
+def SameCapsule (a b : Computation × MaterializationRequest) : Prop := a.1 = b.1
+
+/-- 反例: 同じ computation でも、materialization 要求だけが違うと別の identity になる。 -/
+theorem request_changes_identity_BUG :
+    ∃ c r1 r2, r1 ≠ r2 ∧
+      identityWithRequest c r1 ≠ identityWithRequest c r2 := by
+  refine ⟨⟨[]⟩, ["ato.replay@1"], ["ato.replay@2"], by decide, by decide⟩
+
+/-- 実測した 3 例（[encap] materializers だけが違う同じ capsule.toml）は
+    3 つの異なる ComputationRef になった。モデル上の同型。 -/
+theorem three_requests_three_identities :
+    (identityWithRequest ⟨["true"]⟩ ["ato.replay@1"]) ≠
+      (identityWithRequest ⟨["true"]⟩ ["ato.replay@2"]) ∧
+    (identityWithRequest ⟨["true"]⟩ ["ato.replay@2"]) ≠
+      (identityWithRequest ⟨["true"]⟩ []) := by
+  refine ⟨by decide, by decide⟩
+
+/-- 修正版: residual から要求を落とせば identity は要求に依存しない。 -/
+theorem fixed_identity_ignores_request (c : Computation) (r1 r2 : MaterializationRequest) :
+    identityWithoutRequest c r1 = identityWithoutRequest c r2 := rfl
+
+/-- 同じ computation の下で、要求の個数だけ Capsule identity が増える。 -/
+theorem request_multiplies_identities :
+    ((List.map (identityWithRequest ⟨[]⟩) [["a"], ["b"]]).map Prod.snd).length = 2 := by
+  decide
+
+/-- 対照: encap --materialize の選択は root を変えない
+    （descriptor は論理 root の隣に運ばれる）。 -/
+def encapRoot (target : Nat) (_selection : MaterializationRequest) : Nat := target
+
+theorem encap_keeps_root (t : Nat) (r : MaterializationRequest) :
+    encapRoot t r = t := rfl
+
+/-- したがって「宣言された既定 materializer 集合」だけが identity を動かす。
+    動作（encap --materialize）は動かさない。 -/
+theorem declared_request_is_the_only_identity_effect :
+    ∃ c r, encapRoot 7 r = 7 ∧ identityWithRequest c r ≠ identityWithRequest c [] := by
+  refine ⟨⟨[]⟩, ["ato.snapshot@1"], rfl, by decide⟩
+
+end MaterializerIdentity
+
+/-! ## 22. apps/portable-application/src/local_instance.rs :: independent imports -/
+namespace InstanceIndependence
+
+structure Import where
+  instanceId : Nat
+  applicationId : Nat
+  bundleDigest : Nat
+deriving DecidableEq, Repr
+
+/-- import は bundle bytes から application を、毎回新しい instance id を作る。 -/
+def importOnce (bundleDigest : Nat) (freshId : Nat) : Import :=
+  ⟨freshId, bundleDigest, bundleDigest⟩
+
+/-- 同じ bytes の 2 回の import。 -/
+def importTwice (bundleDigest : Nat) (id1 id2 : Nat) : Import × Import :=
+  (importOnce bundleDigest id1, importOnce bundleDigest id2)
+
+theorem imports_are_independent (d i1 i2 : Nat) (h : i1 ≠ i2) :
+    let p := importTwice d i1 i2
+    p.1.applicationId = p.2.applicationId ∧ p.1.instanceId ≠ p.2.instanceId := by
+  simp [importTwice, importOnce, h]
+
+/-- 同じ bytes は同じ application に載るので immutable bundle は再利用される。 -/
+theorem same_bytes_share_application (d : Nat) :
+    (importOnce d 1).applicationId = (importOnce d 2).applicationId := rfl
+
+end InstanceIndependence
+
+/-! ## 23. apps/portable-application/src/lib.rs :: claim_run / activate_run lease -/
+namespace InstanceLease
+
+inductive Status where
+  | starting
+  | active
+  | quarantined
+deriving DecidableEq, Repr
+
+structure Lease where
+  token : Nat
+  status : Status
+deriving DecidableEq, Repr
+
+structure Store where
+  active : Option Lease
+deriving DecidableEq, Repr
+
+/-- stop-pending.json / stop-unconfirmed.json の存在。 -/
+structure World where
+  store : Store
+  stopPending : Bool
+deriving DecidableEq, Repr
+
+inductive Op where
+  | claim
+  | activate
+  | release
+  | save
+  | quarantine
+deriving DecidableEq, Repr
+
+def startingFor (t : Nat) : World :=
+  { store := { active := some { token := t, status := .starting } }, stopPending := false }
+
+def activeFor (t : Nat) : World :=
+  { store := { active := some { token := t, status := .active } }, stopPending := false }
+
+/-- claim_run: どんな lease があっても新しい claim は拒否される。 -/
+def claim (w : World) (fresh : Nat) : Option World :=
+  match w.store.active with
+  | none =>
+      some { store := { active := some { token := fresh, status := .starting } },
+             stopPending := w.stopPending }
+  | some _ => none
+
+/-- activate_run: token と run id と status=Starting の 3 つを要求する。 -/
+def activate (w : World) (t : Nat) : Option World :=
+  match w.store.active with
+  | none => none
+  | some l =>
+      if l.token = t ∧ l.status = .starting then
+        some { store := { active := some { token := l.token, status := .active } },
+               stopPending := w.stopPending }
+      else none
+
+/-- release_run: token 一致、quarantined でない、stop-pending でない。 -/
+def release (w : World) (t : Nat) : Option World :=
+  match w.store.active with
+  | none => some w
+  | some l =>
+      if l.token = t ∧ l.status ≠ .quarantined ∧ w.stopPending = false then
+        some { store := { active := (none : Option Lease) }, stopPending := w.stopPending }
+      else none
+
+/-- ensure_snapshot_write_fence / save_xxx_for_run。 -/
+def save (w : World) (t : Nat) : Option World :=
+  match w.store.active with
+  | none => none
+  | some l =>
+      if l.token = t ∧ l.status ≠ .quarantined ∧ w.stopPending = false then some w
+      else none
+
+def quarantine (w : World) (t : Nat) : Option World :=
+  match w.store.active with
+  | none => none
+  | some l =>
+      if l.token = t then
+        some { store := { active := some { token := l.token, status := .quarantined } },
+               stopPending := w.stopPending }
+      else none
+
+def step (w : World) (op : Op) (t : Nat) : Option World :=
+  match op with
+  | .claim => claim w t
+  | .activate => activate w t
+  | .release => release w t
+  | .save => save w t
+  | .quarantine => quarantine w t
+
+/-- fence は健全: 他人の token では release できない。 -/
+theorem release_fences_by_token :
+    release (activeFor 1) 2 = none ∧
+    release (activeFor 1) 1 ≠ none := by
+  decide
+
+/-- quarantine 済みの Run は token を持っていても release できない。 -/
+theorem quarantined_cannot_be_released :
+    release { store := { active := some { token := 1, status := .quarantined } },
+              stopPending := false } 1 = none := by
+  decide
+
+/-- stop 未確認の marker がある間は release できない（finish_instance_stop の fence）。 -/
+theorem stop_pending_fences_release :
+    release { store := { active := some { token := 1, status := .active } },
+              stopPending := true } 1 = none := by
+  decide
+
+/-- 保存も同じ fence を通る。 -/
+theorem save_fences_by_token :
+    save (activeFor 1) 2 = none ∧ save (activeFor 1) 1 ≠ none := by
+  decide
+
+/-- activate は Starting のときだけ通る。二重 activate はできない。 -/
+theorem activate_only_from_starting :
+    activate (startingFor 1) 1 ≠ none ∧ activate (activeFor 1) 1 = none := by
+  decide
+
+/-- どんな lease があっても claim は拒否される。 -/
+theorem claim_blocked_by_any_lease (l : Lease) :
+    claim { store := { active := some l }, stopPending := false } 9 = none := by
+  cases l with
+  | mk token status => cases status <;> rfl
+
+/-- 主結果: token t を持つ Starting lease から出る道は、t を知っている操作だけ。
+    token を失う（CLI 親が claim 直後に死ぬ）と、instance は claim も release も
+    activate も save も quarantine もできない吸収状態になる。 -/
+theorem starting_lease_is_absorbing :
+    step (startingFor 1) .claim 0 = none ∧
+    step (startingFor 1) .release 2 = none ∧
+    step (startingFor 1) .activate 2 = none ∧
+    step (startingFor 1) .save 2 = none ∧
+    step (startingFor 1) .quarantine 2 = none := by
+  decide
+
+/-- 同じことは Active lease にも言える（B6 の Instance 版）。 -/
+theorem active_lease_is_absorbing :
+    step (activeFor 1) .claim 0 = none ∧
+    step (activeFor 1) .release 2 = none ∧
+    step (activeFor 1) .save 2 = none := by
+  decide
+
+/-- 逆向き: token さえ知っていれば Starting でも release できる
+    （release_run は status を Active に限定しない）。 -/
+theorem starting_release_allowed_with_token :
+    step (startingFor 1) .release 1 ≠ none := by
+  decide
+
+/-- したがって吸収状態からの唯一の脱出は token の保持。 -/
+theorem only_token_escapes :
+    (∃ w', step (startingFor 1) .release 1 = some w') ∧
+    step (startingFor 1) .release 2 = none := by
+  refine ⟨⟨{ store := { active := (none : Option Lease) }, stopPending := false }, by decide⟩,
+    by decide⟩
+
+/-- 利用者向けの唯一の停止経路 ato app stop の前提。status が Active で
+    ない Run は「still preparing and cannot be stopped」で拒否される。 -/
+def userStopAllowed (w : World) : Bool :=
+  match w.store.active with
+  | some l => l.status == .active
+  | none => false
+
+/-- したがって Starting lease は、利用者向けの 2 経路（claim と stop）の
+    両方から閉じている。token は active-run.json に残るが、それを release する
+    コマンドが無いことが吸収状態の理由である（秘密性ではない）。 -/
+theorem starting_lease_closed_to_user_commands :
+    userStopAllowed (startingFor 1) = false ∧ claim (startingFor 1) 0 = none := by
+  decide
+
+/-- 対照: Active なら stop の前提は満たす（さらに process identity の照合が要る）。 -/
+theorem active_lease_allows_user_stop :
+    userStopAllowed (activeFor 1) = true := by
+  decide
+
+end InstanceLease
+
+/-! ## 24. apps/portable-application/src/lib.rs :: stop identity check -/
+namespace StopIdentity
+
+structure Observed where
+  pid : Nat
+  processStart : Nat
+  bootSession : Nat
+deriving DecidableEq, Repr
+
+/-- OwnedProcessIdentity::matches_live_process。 -/
+def liveMatches (recorded live : Observed) : Bool :=
+  recorded.pid == live.pid &&
+  recorded.processStart == live.processStart &&
+  recorded.bootSession == live.bootSession
+
+/-- PID が再利用されても boot session が違えば stop しない。 -/
+theorem boot_session_fences_pid_reuse (recorded : Observed) (pid : Nat) :
+    recorded.bootSession ≠ 1 →
+    ∀ start, liveMatches recorded ⟨pid, start, 1⟩ = false := by
+  intro h start
+  simp [liveMatches, h]
+
+/-- 同じ boot でも start time が違えば stop しない。 -/
+theorem start_time_fences_restart (recorded : Observed) (start : Nat) :
+    recorded.processStart ≠ start →
+    liveMatches recorded ⟨recorded.pid, start, recorded.bootSession⟩ = false := by
+  intro h
+  simp [liveMatches, h]
+
+/-- 3 つ全て一致したときだけ stop が許される。 -/
+theorem stop_requires_all_three (recorded : Observed) :
+    liveMatches recorded recorded = true := by
+  simp [liveMatches]
+
+end StopIdentity
+
+/-! ## 25. apps/portable-application/src/local_instance.rs :: v4 snapshot restore evidence -/
+namespace SnapshotRestore
+
+structure Item where
+  slot : String
+  savedDigest : Nat
+  restoredDigest : Nat
+  sourceDigest : Option Nat
+  /-- Asset alias 再結合を受ける resource か（= filesystem 以外）。 -/
+  rebindable : Bool
+deriving DecidableEq, Repr
+
+/-- trace_restored_to_saved の 1 slot 分。 -/
+def traced (it : Item) : Bool :=
+  it.restoredDigest == it.savedDigest ||
+  (it.rebindable && it.sourceDigest == some it.savedDigest)
+
+/-- observe_restored_content の 1 slot 分。live は実 bytes の digest。 -/
+def accepted (it : Item) (live : Nat) : Bool :=
+  traced it && (live == it.restoredDigest)
+
+/-- 受理された slot は、実際に手元にある bytes の digest と一致している。 -/
+theorem accepted_implies_observed (it : Item) (live : Nat)
+    (h : accepted it live = true) : live = it.restoredDigest := by
+  simp [accepted, traced] at h
+  exact h.2
+
+/-- 反例: index（metadata）だけを見る判定は、Run が受け取っていない状態でも受理する。 -/
+theorem metadata_only_accepts_stale_BUG :
+    ∃ it live, traced it = true ∧ it.restoredDigest ≠ live := by
+  refine ⟨⟨"data", 1, 1, none, false⟩, 2, by decide, by decide⟩
+
+/-- さらに、live を観測しない実装は saved digest と違う restored でも通る
+    （restored_snapshot() 単体がこれに当たる。doc が metadata-only と明記）。 -/
+theorem traced_accepts_rebound_bytes :
+    ∃ it, traced it = true ∧ it.restoredDigest ≠ it.savedDigest := by
+  refine ⟨⟨"data", 1, 2, some 1, true⟩, by decide, by decide⟩
+
+/-- restore 全体の gate: 全 slot について traced と observed の両方。 -/
+def gate (items : List Item) (live : String → Nat) : Bool :=
+  items.all (fun it => accepted it (live it.slot))
+
+/-- gate が通れば、index に載る全 slot の実 bytes が観測済みである。 -/
+theorem gate_accepts_every_slot (items : List Item) (live : String → Nat)
+    (h : gate items live = true) :
+    ∀ it ∈ items, live it.slot = it.restoredDigest := by
+  intro it hmem
+  have hall : accepted it (live it.slot) = true := (List.all_eq_true.mp h) it hmem
+  exact accepted_implies_observed it (live it.slot) hall
+
+/-- index のみで判定する実装（= 反例側）は gate より弱い。 -/
+def indexOnlyGate (items : List Item) : Bool :=
+  items.all traced
+
+theorem index_only_gate_is_weaker :
+    indexOnlyGate [⟨"data", 1, 1, none, false⟩] = true ∧
+    gate [⟨"data", 1, 1, none, false⟩] (fun _ => 2) = false := by
+  decide
+
+/-- 空の要求集合は gate としては自明に true。呼び出し側（validate_snapshot /
+    attach_instance_snapshot）が「resource も asset も空なら拒否」を別途持つ。 -/
+theorem empty_gate_is_true : gate [] (fun _ => 0) = true := rfl
+
+end SnapshotRestore
+
+
+/-! ## 26. lib/objects/src/repository.rs :: active_run recovery, next_sequence -/
+namespace RecordRecovery
+
+/-- 1件の Record。`before` = head_before, `after` = head_after。 -/
+structure Rec where
+  seq : Nat
+  before : Nat
+  after : Nat
+  deriving DecidableEq, Repr
+
+/-- `h k` を計算 k の head とし、seq が k+1..k+n の連結した Record 列。 -/
+def heads (h : Nat → Nat) : Nat → Nat → List Rec
+  | _, 0 => []
+  | k, n + 1 => ⟨k + 1, h k, h (k + 1)⟩ :: heads h (k + 1) n
+
+/-- `active_run` の復旧ループ本体 (repository.rs:783-799)。seq が連続で
+    head_before が cursor の head と一致する限り head と seq を進める。 -/
+def recoverFrom (head seq : Nat) : List Rec → Option (Nat × Nat)
+  | [] => some (head, seq)
+  | r :: rest =>
+      if r.seq = seq + 1 then
+        if r.before = head then recoverFrom r.after r.seq rest else none
+      else none
+
+/-- `seq <= record_seq` の Record は読み飛ばされる (repository.rs:779-782)。 -/
+def afterCursor (seq : Nat) (records : List Rec) : List Rec :=
+  records.filter (fun r => decide (seq < r.seq))
+
+/-- 復旧後の (head, record_seq)。 -/
+def recover (cursorHead cursorSeq : Nat) (records : List Rec) : Option (Nat × Nat) :=
+  recoverFrom cursorHead cursorSeq (afterCursor cursorSeq records)
+
+/-- `next_sequence`: 既存 file 名の最大 seq + 1。欠番は埋めない (888-906)。 -/
+def nextSequence (records : List Rec) : Nat :=
+  records.foldl (fun acc r => max acc r.seq) 0 + 1
+
+/-- Record 列が anchor から head_before/head_after で連結しているか
+    (records_for_causal_branch の検査, repository.rs:744-756)。 -/
+def contiguousFrom (anchor : Nat) : List Rec → Bool
+  | [] => true
+  | r :: rest => (r.before = anchor) && contiguousFrom r.after rest
+
+/-- 復旧ループは、cursor の後ろに続く未反映 Record を最後まで吸収する。 -/
+theorem recoverFrom_heads (h : Nat → Nat) :
+    ∀ (k n : Nat), recoverFrom (h k) k (heads h k n) = some (h (k + n), k + n) := by
+  intro k n
+  induction n generalizing k with
+  | zero => simp [heads, recoverFrom]
+  | succ n ih =>
+      simp only [heads, recoverFrom]
+      simp only [ite_true]
+      rw [ih (k + 1)]
+      have hk : k + 1 + n = k + (n + 1) := by omega
+      rw [hk]
+
+/-- 復旧の吸収性: 1件の Record を書いた後に cursor を書き損じても
+    (crash しても)、復旧は head と seq の両方を新しい値へ進める。 -/
+theorem recovery_absorbs_unflushed_record (h : Nat → Nat) (n : Nat) :
+    recoverFrom (h n) n (heads h n 1) = some (h (n + 1), n + 1) :=
+  recoverFrom_heads h n 1
+
+/-- 欠番があると復旧はそこで止まる (nil を返し、呼び出し側は Sequence エラー)。 -/
+theorem recovery_stops_at_gap : recoverFrom 103 3 [⟨5, 104, 105⟩] = none := by decide
+
+/-- seq 2 の Record が durable にならなかった状況 (Record 1 だけが残る) で、
+    cursor は (head=102, seq=2) を指したまま。復旧は前進しないが失敗もしない。 -/
+def lostRecord : List Rec := [⟨1, 100, 101⟩]
+
+theorem lost_record_is_invisible_to_the_cursor :
+    recover 102 2 lostRecord = some (102, 2) := by decide
+
+/-- `next_sequence` は最大 seq + 1 なので、失われた seq 2 をそのまま再利用する。 -/
+theorem lost_record_sequence_is_reused : nextSequence lostRecord = 2 := by decide
+
+/-- 再利用後の列: Record 1 の after=101 に対し、Record 2 の before は cursor の 102。 -/
+def afterReuse : List Rec := [⟨1, 100, 101⟩, ⟨2, 102, 103⟩]
+
+theorem reuse_breaks_the_chain : contiguousFrom 100 afterReuse = false := by decide
+
+/-- 壊れた列でも cursor 経路 (`active_run`) は成功し続ける。 -/
+theorem reuse_is_invisible_to_the_cursor : recover 103 2 afterReuse = some (103, 2) := by decide
+
+/-- `record_seq` は狭義単調でない: 2件 commit した後も cursor は seq 2 のまま。 -/
+theorem record_seq_not_strictly_monotone :
+    recover 102 2 lostRecord = some (102, 2) ∧
+    recover 103 2 afterReuse = some (103, 2) := by decide
+
+/-! ### 2段階 commit の部分失敗 (cursor だけ書き損じる) -/
+
+/-- `commit_observation` の受理条件 (repository.rs:632)。token と stream の一致は前提。 -/
+def commitAccepted (cachedHead recoveredHead : Nat) : Bool := cachedHead = recoveredHead
+
+/-- sink の cached head は成功時しか更新されない (supervisor.rs:970-972)。 -/
+def sinkCachedAfter (cached committed : Nat) (ok : Bool) : Nat := if ok then committed else cached
+
+/-- Record 2 は durable だが cursor の書込みが失敗した状況。 -/
+def cursorWriteFailed : List Rec := [⟨1, 100, 101⟩, ⟨2, 101, 102⟩]
+
+/-- 復旧は新しい head 102 を返すのに、sink の cached head は 101 のままで、
+    以後の emit はすべて受理されない (再同期の経路が sink に無い)。 -/
+theorem cursor_write_failure_stalls_the_sink :
+    recover 101 1 cursorWriteFailed = some (102, 2) ∧
+    commitAccepted 101 102 = false ∧
+    commitAccepted (sinkCachedAfter 101 102 false) 102 = false := by decide
+
+/-- 明示的に cursor を読み直せば前進できる (sink にだけ無い経路)。 -/
+theorem resync_restores_progress : commitAccepted 102 102 = true := by decide
+
+end RecordRecovery
+
+/-! ## 27. lib/objects/src/repository.rs :: create_branch origin/head order -/
+namespace BranchOriginOrder
+
+structure State where
+  head : Option Nat
+  origin : Option Nat
+  deriving DecidableEq, Repr
+
+/-- `atomic_create`: 既存 file があれば AlreadyExists で失敗し、中身は変えない。 -/
+def atomicCreate (slot : Option Nat) (value : Nat) : Option Nat × Bool :=
+  match slot with
+  | none => (some value, true)
+  | some _ => (slot, false)
+
+/-- 実装の順序: ① origin ② head。head の書込みだけを失敗させる。 -/
+def createBranchCode (s : State) (origin : Option Nat) (head : Nat)
+    (headWriteFails : Bool) : State × Bool :=
+  if s.head.isSome then (s, false)
+  else
+    let written :=
+      match origin with
+      | none => (s.origin, true)
+      | some value => atomicCreate s.origin value
+    if !written.2 then (s, false)
+    else if headWriteFails then ({ s with origin := written.1 }, false)
+    else
+      let published := atomicCreate s.head head
+      ({ s with origin := written.1, head := published.1 }, published.2)
+
+/-- 修正案: ① head ② origin。origin の失敗では branch を残し、origin を残さない。 -/
+def createBranchFixed (s : State) (origin : Option Nat) (head : Nat)
+    (originWriteFails : Bool) : State × Bool :=
+  if s.head.isSome then (s, false)
+  else
+    let published := atomicCreate s.head head
+    if !published.2 then (s, false)
+    else if originWriteFails then ({ s with head := published.1 }, true)
+    else
+      let written :=
+        match origin with
+        | none => (s.origin, true)
+        | some value => atomicCreate s.origin value
+      ({ s with head := published.1, origin := written.1 }, true)
+
+/-! ### 実装の観測 -/
+
+/-- head の書込みが失敗すると、head の無い branch の origin だけが残る。 -/
+theorem partial_failure_leaves_an_orphan_origin :
+    (createBranchCode ⟨none, none⟩ (some 101) 101 true).1 = ⟨none, some 101⟩ := by decide
+
+/-- その状態は「branch が存在しないのに origin が返る」として観測できる。 -/
+theorem orphan_origin_is_observable :
+    (createBranchCode ⟨none, none⟩ (some 101) 101 true).1.head = none ∧
+    (createBranchCode ⟨none, none⟩ (some 101) 101 true).1.origin = some 101 := by decide
+
+/-- 同じ名前での再作成は、origin の atomic_create が AlreadyExists で失敗して通らない。 -/
+theorem orphan_origin_blocks_the_retry :
+    (createBranchCode ⟨none, some 101⟩ (some 101) 101 false).2 = false := by decide
+
+/-- origin を渡さない再作成は通るが、残った origin が古い anchor として残る。 -/
+theorem stale_origin_anchors_a_different_head :
+    (createBranchCode ⟨none, some 101⟩ none 102 false).1 = ⟨some 102, some 101⟩ := by decide
+
+/-- `records_for_causal_branch` は origin.computation を current の初期値にする
+    (repository.rs:744-747) ので、head と anchor が食い違うと先頭 Record で落ちる。 -/
+def causalAccepts (originAnchor : Option Nat) (firstBefore : Nat) : Bool :=
+  match originAnchor with
+  | none => true
+  | some anchor => anchor = firstBefore
+
+theorem stale_origin_breaks_the_first_record :
+    causalAccepts (some 101) 102 = false := by decide
+
+theorem branch_without_origin_replays_from_its_first_record (x : Nat) :
+    causalAccepts none x = true := rfl
+
+/-! ### 修正案の性質 -/
+
+/-- origin の書込みが失敗しても、orphan な origin は残らない。 -/
+theorem fixed_failure_leaves_no_orphan_origin :
+    (createBranchFixed ⟨none, none⟩ (some 101) 101 true).1 = ⟨some 101, none⟩ := by decide
+
+/-- 実装側の途中失敗では、branch は存在しない (名前だけが使えなくなる)。 -/
+theorem code_failure_publishes_no_branch :
+    (createBranchCode ⟨none, none⟩ (some 101) 101 true).1.head = none := by decide
+
+/-- 修正案の途中失敗では branch が存在するので、利用者はそのまま使える。 -/
+theorem fixed_failure_still_publishes_the_branch :
+    (createBranchFixed ⟨none, none⟩ (some 101) 101 true).1.head = some 101 := by decide
+
+/-- branch が存在するなら origin は再作成の対象にならない (origin 失敗は branch を
+    残さないので、作成済み branch の origin を後から壊す経路が無い)。 -/
+theorem fixed_success_publishes_both :
+    (createBranchFixed ⟨none, none⟩ (some 101) 101 false).1
+      = ⟨some 101, some 101⟩ := by decide
+
+end BranchOriginOrder
+
+/-! ## 28. services/netd/src/egress/gate.rs :: IPv4-embedded IPv6 deny ranges -/
+namespace EgressCidr
+
+inductive Fam where
+  | v4
+  | v6
+  deriving DecidableEq, Repr
+
+structure Addr where
+  fam : Fam
+  val : Nat
+  deriving DecidableEq, Repr
+
+structure VNet where
+  fam : Fam
+  base : Nat
+  size : Nat
+  deriving DecidableEq, Repr
+
+def VNet.contains (n : VNet) (a : Addr) : Bool :=
+  if n.fam = a.fam then
+    (if n.base ≤ a.val then (if a.val < n.base + n.size then true else false) else false)
+  else false
+
+theorem VNet.contains_of (n : VNet) (a : Addr) (hf : n.fam = a.fam)
+    (h1 : n.base ≤ a.val) (h2 : a.val < n.base + n.size) : n.contains a = true := by
+  simp [VNet.contains, hf, h1, h2]
+
+/-- gate.rs の DENIED_RANGES をそのまま区間へ展開したもの。 -/
+def denied : List VNet :=
+  [ ⟨.v4, 0, 2 ^ 24⟩                       -- 0.0.0.0/8
+  , ⟨.v4, 0x0A000000, 2 ^ 24⟩              -- 10.0.0.0/8
+  , ⟨.v4, 0x64400000, 2 ^ 22⟩              -- 100.64.0.0/10
+  , ⟨.v4, 0x7F000000, 2 ^ 24⟩              -- 127.0.0.0/8
+  , ⟨.v4, 0xA9FE0000, 2 ^ 16⟩              -- 169.254.0.0/16
+  , ⟨.v4, 0xAC100000, 2 ^ 20⟩              -- 172.16.0.0/12
+  , ⟨.v4, 0xC0000000, 2 ^ 8⟩               -- 192.0.0.0/24
+  , ⟨.v4, 0xC0000200, 2 ^ 8⟩               -- 192.0.2.0/24
+  , ⟨.v4, 0xC0A80000, 2 ^ 16⟩              -- 192.168.0.0/16
+  , ⟨.v4, 0xC6120000, 2 ^ 17⟩              -- 198.18.0.0/15
+  , ⟨.v4, 0xC6336400, 2 ^ 8⟩               -- 198.51.100.0/24
+  , ⟨.v4, 0xCB007100, 2 ^ 8⟩               -- 203.0.113.0/24
+  , ⟨.v4, 0xE0000000, 2 ^ 28⟩              -- 224.0.0.0/4
+  , ⟨.v4, 0xF0000000, 2 ^ 28⟩              -- 240.0.0.0/4
+  , ⟨.v6, 0, 1⟩                            -- ::/128
+  , ⟨.v6, 1, 1⟩                            -- ::1/128
+  , ⟨.v6, 0xFFFF * 2 ^ 32, 2 ^ 32⟩         -- ::ffff:0:0/96
+  , ⟨.v6, 0x64FF9B * 2 ^ 96, 2 ^ 32⟩       -- 64:ff9b::/96
+  , ⟨.v6, 0xFC00 * 2 ^ 112, 2 ^ 121⟩       -- fc00::/7
+  , ⟨.v6, 0xFE80 * 2 ^ 112, 2 ^ 118⟩       -- fe80::/10
+  , ⟨.v6, 0xFF00 * 2 ^ 112, 2 ^ 120⟩       -- ff00::/8
+  ]
+
+/-- deny が1つも当たらなければ許可 (check_addr の否定)。 -/
+def allowed (l : List VNet) (a : Addr) : Bool := !(l.any (fun n => n.contains a))
+
+/-! ### IPv4 を埋め込む IPv6 形式 -/
+
+/-- ::ffff:a.b.c.d (IPv4-mapped) -/
+def mapped (a : Nat) : Addr := ⟨.v6, 0xFFFF * 2 ^ 32 + a⟩
+
+/-- 2002:a.b.c.d:: (6to4, RFC 3056) -/
+def sixToFour (a : Nat) : Addr := ⟨.v6, 0x2002 * 2 ^ 112 + a * 2 ^ 80⟩
+
+/-- ::a.b.c.d (IPv4-compatible, RFC 4291 で廃止) -/
+def compat (a : Nat) : Addr := ⟨.v6, a⟩
+
+/-- 64:ff9b::a.b.c.d (well-known NAT64, RFC 6052) -/
+def nat64 (a : Nat) : Addr := ⟨.v6, 0x64FF9B * 2 ^ 96 + a⟩
+
+/-- 64:ff9b:1:::a.b.c.d 相当 (local-use NAT64, RFC 8215) -/
+def nat64Local (a : Nat) : Addr := ⟨.v6, 0x64FF9B0001 * 2 ^ 80 + a⟩
+
+/-! ### 観測 -/
+
+theorem v4_loopback_denied : allowed denied ⟨.v4, 0x7F000001⟩ = false := by decide
+
+/-- 既知の健全性: IPv4-mapped のループバックは拒否される。 -/
+theorem mapped_loopback_denied : allowed denied (mapped 0x7F000001) = false := by decide
+
+/-- 既知の健全性: well-known NAT64 は /96 全体が拒否される。 -/
+theorem wellknown_nat64_denied : allowed denied (nat64 0x7F000001) = false := by decide
+
+/-- IPv4-compatible 形式は ::/128 と ::1/128 の外側なので通る。 -/
+theorem compat_loopback_allowed_BUG : allowed denied (compat 0x7F000001) = true := by decide
+
+/-- 6to4 は 2002::/16 が deny list に無いので通る (127.0.0.1)。 -/
+theorem sixToFour_loopback_allowed_BUG : allowed denied (sixToFour 0x7F000001) = true := by decide
+
+/-- 6to4 経由の link-local (169.254.169.254)。 -/
+theorem sixToFour_linklocal_allowed_BUG : allowed denied (sixToFour 0xA9FEA9FE) = true := by decide
+
+/-- local-use NAT64 経由のループバック。 -/
+theorem nat64_local_loopback_allowed_BUG : allowed denied (nat64Local 0x7F000001) = true := by decide
+
+/-- 「IPv4 を埋め込む標準形式はすべて拒否する」という仕様。 -/
+def Spec (l : List VNet) : Prop :=
+  (∀ a, a < 2 ^ 32 → allowed l (compat a) = false) ∧
+  (∀ a, a < 2 ^ 32 → allowed l (sixToFour a) = false) ∧
+  (∀ a, a < 2 ^ 32 → allowed l (mapped a) = false) ∧
+  (∀ a, a < 2 ^ 32 → allowed l (nat64Local a) = false)
+
+/-- 出荷中の deny list はこの仕様を満たさない。 -/
+theorem spec_fails_for_shipped_list : ¬ Spec denied := by
+  intro h
+  have hc := h.1 0x7F000001 (by decide)
+  rw [compat_loopback_allowed_BUG] at hc
+  exact absurd hc (by decide)
+
+/-! ### 修正案: ::/96, 2002::/16, 64:ff9b:1::/48 を追加する -/
+
+def deniedFixed : List VNet :=
+  ⟨.v6, 0, 2 ^ 32⟩                    -- ::/96 (IPv4-compatible)
+  :: ⟨.v6, 0x2002 * 2 ^ 112, 2 ^ 112⟩ -- 2002::/16 (6to4)
+  :: ⟨.v6, 0x64FF9B0001 * 2 ^ 80, 2 ^ 80⟩ -- 64:ff9b:1::/48 (local-use NAT64)
+  :: denied
+
+theorem any_of_mem {p : VNet → Bool} {n : VNet} {l : List VNet}
+    (hm : n ∈ l) (hp : p n = true) : l.any p = true := by
+  induction l with
+  | nil => simp at hm
+  | cons x xs ih =>
+      rw [List.any_cons]
+      rcases List.mem_cons.mp hm with rfl | hmem
+      · simp [hp]
+      · have h := ih hmem
+        simp [h]
+
+theorem allowed_false_of_contains {n : VNet} {l : List VNet} (hm : n ∈ l) {a : Addr}
+    (hc : n.contains a = true) : allowed l a = false := by
+  have h : l.any (fun m => m.contains a) = true := any_of_mem hm hc
+  simp [allowed, h]
+
+theorem compat_contained (a : Nat) (h : a < 2 ^ 32) :
+    (⟨.v6, 0, 2 ^ 32⟩ : VNet).contains (compat a) = true := by
+  apply VNet.contains_of
+  · rfl
+  · simp
+  · simpa [compat] using h
+
+theorem sixToFour_contained (a : Nat) (h : a < 2 ^ 32) :
+    (⟨.v6, 0x2002 * 2 ^ 112, 2 ^ 112⟩ : VNet).contains (sixToFour a) = true := by
+  apply VNet.contains_of
+  · rfl
+  · simp [sixToFour]
+  · simp [sixToFour]; omega
+
+theorem mapped_contained (a : Nat) (h : a < 2 ^ 32) :
+    (⟨.v6, 0xFFFF * 2 ^ 32, 2 ^ 32⟩ : VNet).contains (mapped a) = true := by
+  apply VNet.contains_of
+  · rfl
+  · simp [mapped]
+  · simp [mapped]; omega
+
+theorem nat64Local_contained (a : Nat) (h : a < 2 ^ 32) :
+    (⟨.v6, 0x64FF9B0001 * 2 ^ 80, 2 ^ 80⟩ : VNet).contains (nat64Local a) = true := by
+  apply VNet.contains_of
+  · rfl
+  · simp [nat64Local]
+  · simp [nat64Local]; omega
+
+theorem fixed_compat_denied (a : Nat) (h : a < 2 ^ 32) :
+    allowed deniedFixed (compat a) = false :=
+  allowed_false_of_contains (by simp [deniedFixed, denied]) (compat_contained a h)
+
+theorem fixed_sixToFour_denied (a : Nat) (h : a < 2 ^ 32) :
+    allowed deniedFixed (sixToFour a) = false :=
+  allowed_false_of_contains (by simp [deniedFixed, denied]) (sixToFour_contained a h)
+
+theorem fixed_mapped_denied (a : Nat) (h : a < 2 ^ 32) :
+    allowed deniedFixed (mapped a) = false :=
+  allowed_false_of_contains (by simp [deniedFixed, denied]) (mapped_contained a h)
+
+theorem fixed_nat64_local_denied (a : Nat) (h : a < 2 ^ 32) :
+    allowed deniedFixed (nat64Local a) = false :=
+  allowed_false_of_contains (by simp [deniedFixed, denied]) (nat64Local_contained a h)
+
+/-- 修正案は仕様を満たす。 -/
+theorem fixed_spec : Spec deniedFixed :=
+  ⟨fixed_compat_denied, fixed_sixToFour_denied, fixed_mapped_denied, fixed_nat64_local_denied⟩
+
+end EgressCidr
+
+/-! ## 29. services/netd/src/egress/policy.rs :: interleaved budget consume -/
+namespace BudgetInterleave
+
+structure Budget where
+  used : Nat
+  exhausted : Bool
+  deriving DecidableEq, Repr
+
+/-- ① `fetch_update`: used を加算し、加算前の previous を返す。 -/
+def fetch (b : Budget) (bytes : Nat) : Budget × Nat :=
+  (⟨b.used + bytes, b.exhausted⟩, b.used)
+
+/-- ② 自分の加算が上限を超えたら flag を立てる。 -/
+def flag (limit : Nat) (b : Budget) (previous bytes : Nat) : Budget :=
+  if limit < previous + bytes then ⟨b.used, true⟩ else b
+
+/-- ③ `exhausted()` を読んで可否を返す。 -/
+def admit (b : Budget) : Bool := !b.exhausted
+
+/-- 他と競合しない consume。 -/
+def consume (limit : Nat) (b : Budget) (bytes : Nat) : Budget × Bool :=
+  let fetched := fetch b bytes
+  let flagged := flag limit fetched.1 fetched.2 bytes
+  (flagged, admit flagged)
+
+/-! ### 過剰許可は起きない (否定) -/
+
+/-- 自分が上限内で、他の接続がまだ flag を立てていなければ必ず受理される。 -/
+theorem consume_fits (limit : Nat) (b : Budget) (bytes : Nat)
+    (hflag : b.exhausted = false) (hfit : b.used + bytes ≤ limit) :
+    (consume limit b bytes).2 = true := by
+  have hnot : ¬ limit < b.used + bytes := Nat.not_lt.mpr hfit
+  simp [consume, fetch, flag, admit, hflag, hnot]
+
+/-- 自分の加算が上限を超えるなら flag が立ち、その consume は拒否される。 -/
+theorem over_limit_refused (limit : Nat) (b : Budget) (bytes : Nat)
+    (hover : limit < b.used + bytes) : (consume limit b bytes).2 = false := by
+  simp [consume, fetch, flag, admit, hover]
+
+/-- 受理された consume は加算後の used も上限内に収まる。 -/
+theorem admitted_stays_within_limit (limit : Nat) (b : Budget) (bytes : Nat)
+    (h : (consume limit b bytes).2 = true) : b.used + bytes ≤ limit := by
+  by_cases hlt : limit < b.used + bytes
+  · exact absurd (over_limit_refused limit b bytes hlt) (by simp [h])
+  · omega
+
+/-- used は単調。受理された consume の合計が上限を超えないのはこの性質による
+    (加算前の値が「それまでの全試行の累積」なので、受理された時点で累積 ≤ 上限)。 -/
+theorem used_monotone (limit : Nat) (b : Budget) (bytes : Nat) :
+    b.used ≤ (consume limit b bytes).1.used := by
+  have hused : (consume limit b bytes).1.used = b.used + bytes := by
+    by_cases h : limit < b.used + bytes
+    · simp [consume, fetch, flag, h]
+    · simp [consume, fetch, flag, h]
+  omega
+
+/-! ### 上限内の consume が他接続の flag で拒否される (候補) -/
+
+/-- used=9, limit=10 から始まる。 -/
+def b0 : Budget := ⟨9, false⟩
+
+/-- 単独なら 9+1=10 ≤ 10 で受理される。 -/
+theorem one_byte_alone_is_admitted : (consume 10 b0 1).2 = true := by decide
+
+/-- 5 バイトを先に consume した接続があると flag が立ち、同じ 1 バイトが拒否される。 -/
+theorem one_byte_after_a_larger_consume_is_refused :
+    (consume 10 b0 5).1.exhausted = true ∧
+    admit (flag 10 (consume 10 b0 5).1 9 1) = false := by decide
+
+/-- 同じ 1 バイトの読み取りが、実行順だけで受理/拒否に分かれる。 -/
+theorem same_consume_two_outcomes :
+    (consume 10 b0 1).2 = true ∧
+    admit (flag 10 (consume 10 b0 5).1 9 1) = false := by decide
+
+/-- 拒否された側の `used` も加算済みなので、累積は上限を超えたまま残る。 -/
+theorem refused_bytes_are_still_counted :
+    (consume 10 b0 5).1.used = 14 := by decide
+
+end BudgetInterleave
+
+
+/-! ## 30. lib/runtime-attempt/src/journal.rs :: attempt reserve / UNKNOWN barrier -/
+namespace HostedAttemptJournal
+
+inductive AttemptState where
+  | notStarted
+  | started
+  | finished
+  deriving DecidableEq, Repr
+
+structure Record where
+  attemptId : Nat
+  state : AttemptState
+  deriving DecidableEq, Repr
+
+abbrev Journal := List Record
+
+inductive Refusal where
+  | alreadyStarted (state : AttemptState)
+  | unknown (attemptId : Nat)
+  deriving DecidableEq, Repr
+
+def findAttempt : Journal → Nat → Option Record
+  | [], _ => none
+  | r :: rs, aid => if r.attemptId == aid then some r else findAttempt rs aid
+
+def findStarted : Journal → Option Record
+  | [] => none
+  | r :: rs => if r.state == AttemptState.started then some r else findStarted rs
+
+/-- The Rust reserve, error branches first. -/
+def reserve (j : Journal) (aid : Nat) : Except Refusal Journal :=
+  match findAttempt j aid, findStarted j with
+  | some r, _ => .error (.alreadyStarted r.state)
+  | none, some r => .error (.unknown r.attemptId)
+  | none, none => .ok (j ++ [⟨aid, AttemptState.notStarted⟩])
+
+theorem findAttempt_append_self (j : Journal) (aid : Nat) (st : AttemptState)
+    (h : findAttempt j aid = none) : findAttempt (j ++ [⟨aid, st⟩]) aid = some ⟨aid, st⟩ := by
+  induction j with
+  | nil => simp [findAttempt]
+  | cons r rs ih =>
+      by_cases hr : r.attemptId == aid
+      · simp [findAttempt, hr] at h
+      · have hrs : findAttempt rs aid = none := by simpa [findAttempt, hr] using h
+        simp [findAttempt, hr]
+        exact ih hrs
+
+theorem reserve_ok_appends (j : Journal) (aid : Nat) (j' : Journal)
+    (h : reserve j aid = .ok j') : j' = j ++ [⟨aid, AttemptState.notStarted⟩] := by
+  unfold reserve at h
+  repeat (split at h)
+  all_goals simp_all
+
+theorem started_blocks_every_attempt (j : Journal) (s : Record)
+    (hmem : findStarted j = some s) (aid : Nat) : ¬ ∃ j', reserve j aid = .ok j' := by
+  rintro ⟨j', hj⟩
+  unfold reserve at hj
+  repeat (split at hj)
+  all_goals simp_all
+
+theorem reserve_twice_is_refused (j : Journal) (aid : Nat) (j₁ : Journal)
+    (h : reserve j aid = .ok j₁) : ∃ e, reserve j₁ aid = .error e := by
+  have hnone : findAttempt j aid = none := by
+    unfold reserve at h
+    repeat (split at h) <;> simp_all
+  have h₁ := reserve_ok_appends j aid j₁ h
+  subst h₁
+  refine ⟨Refusal.alreadyStarted AttemptState.notStarted, ?_⟩
+  unfold reserve
+  rw [findAttempt_append_self j aid AttemptState.notStarted hnone]
+
+/-- The barrier's scope is one journal.  A delivery that lands on a fresh work
+  root (another Runner, or a wiped work root) consults no history, so the very
+  same attempt id starts again.  journal.rs:14-16 says "not a retry, not another
+  Derivation, not a redelivery", which is true per work root only. -/
+theorem fresh_journal_admits (aid : Nat) :
+    reserve [] aid = .ok [⟨aid, AttemptState.notStarted⟩] := by
+  unfold reserve findAttempt findStarted
+  simp
+
+theorem started_journal_refuses_same (aid : Nat) :
+    reserve [⟨aid, AttemptState.started⟩] aid
+      = .error (.alreadyStarted AttemptState.started) := by
+  unfold reserve findAttempt findStarted
+  simp
+
+theorem started_journal_refuses_other (aid other : Nat) (h : other ≠ aid) :
+    reserve [⟨aid, AttemptState.started⟩] other = .error (.unknown aid) := by
+  have h' : ¬(aid = other) := fun e => h e.symm
+  unfold reserve findAttempt findStarted
+  simp [findAttempt, h']
+
+end HostedAttemptJournal
+
+/-! ## 31. apps/connected-realization-worker/src/runtime_launch/lease.rs :: execution authorization -/
+namespace HostedExecutionAuthorization
+
+structure Auth where
+  /-- policy_generation: must not change across a renewal. -/
+  policyGen : Nat
+  /-- authorization_generation: must strictly advance. -/
+  authGen : Nat
+  /-- expires_at - server_time, in seconds. -/
+  ttl : Nat
+  /-- renew_after_secs. -/
+  renewAfter : Nat
+  deriving DecidableEq, Repr
+
+structure Monitor where
+  policyGen : Nat
+  authGen : Nat
+  deadline : Nat
+  renewAt : Nat
+  confirmed : Bool
+  deriving DecidableEq, Repr
+
+def maxTtl : Nat := 3600
+
+/-- authorization_window's accepted range. -/
+def windowOk (a : Auth) : Prop :=
+  a.ttl > 0 ∧ a.ttl ≤ maxTtl ∧ a.renewAfter > 0 ∧ a.renewAfter < a.ttl
+
+instance windowOkDecidable (a : Auth) : Decidable (windowOk a) := by
+  unfold windowOk
+  infer_instance
+
+def freshOk (a : Auth) : Prop := windowOk a ∧ a.policyGen > 0 ∧ a.authGen > 0
+
+instance freshOkDecidable (a : Auth) : Decidable (freshOk a) := by
+  unfold freshOk
+  infer_instance
+
+/-- ExecutionAuthorizationMonitor::new.  renew_at is "now", so the first
+  confirmation always runs before anything is materialized. -/
+def fresh (a : Auth) (now : Nat) : Option Monitor :=
+  if freshOk a then some ⟨a.policyGen, a.authGen, now + a.ttl, now, false⟩ else none
+
+/-- ExecutionAuthorizationMonitor::apply's acceptance condition. -/
+def applyOk (m : Monitor) (r : Auth) (s t : Nat) : Prop :=
+  s ≤ t ∧ t < m.deadline ∧ r.policyGen = m.policyGen ∧ r.authGen > m.authGen ∧ windowOk r
+
+instance applyOkDecidable (m : Monitor) (r : Auth) (s t : Nat) : Decidable (applyOk m r s t) := by
+  unfold applyOk
+  infer_instance
+
+/-- ExecutionAuthorizationMonitor::apply. -/
+def apply (m : Monitor) (r : Auth) (s t : Nat) : Option Monitor :=
+  if applyOk m r s t then
+    some ⟨r.policyGen, r.authGen, s + r.ttl, s + r.renewAfter, true⟩
+  else none
+
+/-- ExecutionAuthorizationMonitor::defer_retry, verbatim (min with the deadline). -/
+def deferRetry (m : Monitor) (now delay : Nat) : Monitor :=
+  { m with renewAt := if now + delay ≤ m.deadline then now + delay else m.deadline }
+
+/-- The gate refresh_execution_authorization checks first. -/
+def alive (m : Monitor) (now : Nat) : Prop := now < m.deadline
+
+theorem fresh_ttl_bounded (a : Auth) (now : Nat) (m : Monitor)
+    (h : fresh a now = some m) : m.deadline = now + a.ttl ∧ a.ttl ≤ maxTtl := by
+  unfold fresh at h
+  split at h
+  · rename_i hc
+    obtain ⟨hok, -, -⟩ := hc
+    obtain ⟨-, hle, -, -⟩ := hok
+    simp only [Option.some.injEq] at h
+    subst h
+    exact ⟨rfl, hle⟩
+  · simp at h
+
+theorem apply_advances_generation (m m' : Monitor) (r : Auth) (s t : Nat)
+    (h : apply m r s t = some m') : r.authGen > m.authGen ∧ m'.authGen = r.authGen := by
+  unfold apply at h
+  split at h
+  · rename_i hc
+    obtain ⟨-, -, -, hgen, -⟩ := hc
+    exact ⟨hgen, by simp only [Option.some.injEq] at h; subst h; rfl⟩
+  · simp at h
+
+theorem apply_keeps_policy (m m' : Monitor) (r : Auth) (s t : Nat)
+    (h : apply m r s t = some m') : m'.policyGen = m.policyGen := by
+  unfold apply at h
+  split at h
+  · rename_i hc
+    obtain ⟨-, -, hpol, -, -⟩ := hc
+    simp only [Option.some.injEq] at h
+    subst h
+    exact hpol
+  · simp at h
+
+/-- A renewal must arrive before the previous deadline: an expired window is
+  never extended by a late answer. -/
+theorem apply_requires_unexpired (m m' : Monitor) (r : Auth) (s t : Nat)
+    (h : apply m r s t = some m') : t < m.deadline := by
+  unfold apply at h
+  split at h
+  · rename_i hc
+    obtain ⟨-, hdl, -, -, -⟩ := hc
+    exact hdl
+  · simp at h
+
+/-- No local clock enters the new deadline: it is request start + the
+  Coordinator's ttl. -/
+theorem apply_no_local_clock (m m' : Monitor) (r : Auth) (s t : Nat)
+    (h : apply m r s t = some m') : m'.deadline = s + r.ttl := by
+  unfold apply at h
+  split at h
+  · simp only [Option.some.injEq] at h
+    subst h
+    rfl
+  · simp at h
+
+/-- A failed renewal grants no time. -/
+theorem defer_retry_never_extends (m : Monitor) (now delay : Nat) :
+    (deferRetry m now delay).deadline = m.deadline
+    ∧ (deferRetry m now delay).renewAt ≤ m.deadline := by
+  unfold deferRetry
+  split <;> simp_all <;> omega
+
+/-- Expiry is absorbing: no later renewal makes an expired monitor alive again,
+  because refresh checks alive before calling apply. -/
+theorem expiry_is_absorbing (m : Monitor) (t₁ t₂ : Nat)
+    (hle : t₁ ≤ t₂) (h : ¬ alive m t₁) : ¬ alive m t₂ := by
+  unfold alive at *
+  omega
+
+/-- A *successful* renewal can move the deadline backwards: the new window is
+  anchored at the request start, not at the previous deadline.  Fail-closed, so
+  this is a liveness note, not a safety bug. -/
+theorem renewal_can_shorten :
+    ∃ (m m' : Monitor) (r : Auth) (s t : Nat),
+      apply m r s t = some m' ∧ m'.deadline < m.deadline := by
+  refine ⟨⟨1, 1, 100, 0, true⟩, ⟨1, 2, 98, 96, true⟩, ⟨1, 2, 3, 1⟩, 95, 99, ?_, ?_⟩
+  · unfold apply applyOk windowOk
+    decide
+  · decide
+
+end HostedExecutionAuthorization
+
+/-! ## 32. apps/connected-realization-worker/src/runtime_launch/lease.rs :: lease lifetime -/
+namespace HostedLeaseLifetime
+
+structure Lease where
+  /-- expires_at - receipt time, in seconds. -/
+  expirySecs : Nat
+  maxDuration : Option Nat
+  /-- Whether an execution_authorization was attached. -/
+  authorization : Bool
+  deriving DecidableEq, Repr
+
+def defaultCap : Nat := 3600
+
+/-- lease.rs:800-809, verbatim control flow. -/
+def maximumLifetime (l : Lease) : Option Nat :=
+  match l.maxDuration, l.authorization with
+  | some s, _ => some s
+  | none, true => none
+  | none, false => some defaultCap
+
+/-- validate_lease: "lease expired before execution". -/
+def admitted (l : Lease) : Bool := l.expirySecs > 0
+
+/-- What the Run may consume, from the lease alone. -/
+def runsUpTo (l : Lease) (t : Nat) : Bool :=
+  match maximumLifetime l with
+  | none => true
+  | some s => t ≤ s
+
+/-- RUNTIME_LAUNCH_MAX_DURATION_SECS' doc (lease.rs:60-63): "omitting the field
+  preserves the ordinary one-hour safety cap".  True without an execution
+  authorization. -/
+theorem omitted_duration_keeps_cap (n : Nat) :
+    maximumLifetime ⟨n, none, false⟩ = some defaultCap := rfl
+
+/-- ... and false with one.  The const's doc sentence and the field's own doc
+  ("independent of an optional maximum-duration policy") disagree. -/
+theorem omitted_duration_drops_cap (n : Nat) :
+    maximumLifetime ⟨n, none, true⟩ = none := rfl
+
+theorem cap_omitted_BUG :
+    ∃ l : Lease, l.maxDuration = none ∧ maximumLifetime l ≠ some defaultCap :=
+  ⟨⟨1, none, true⟩, rfl, by decide⟩
+
+/-- expires_at bounds admission only.  A lease whose expires_at is one second
+  away still authorizes an hour of execution. -/
+theorem expiry_does_not_bound_the_run :
+    ∃ (l : Lease) (t : Nat),
+      admitted l = true ∧ runsUpTo l t = true ∧ l.expirySecs < t :=
+  ⟨⟨1, none, false⟩, 3600, by decide, by decide, by decide⟩
+
+theorem expired_lease_not_admitted : admitted ⟨0, none, false⟩ = false := by decide
+
+/-- The fix the two docs imply: the runnable window is the smaller of the
+  lease's own expiry and the lease-owned cap. -/
+def fixedLifetime (l : Lease) : Nat :=
+  match maximumLifetime l with
+  | none => if l.expirySecs < defaultCap then l.expirySecs else defaultCap
+  | some s => if l.expirySecs < s then l.expirySecs else s
+
+theorem fixed_bounded_by_expiry (l : Lease) : fixedLifetime l ≤ l.expirySecs := by
+  unfold fixedLifetime
+  split <;> split <;> omega
+
+end HostedLeaseLifetime
+
+/-! ## 33. apps/connected-realization-worker/src/lib.rs :: failure wire codes -/
+namespace HostedFailureCode
+
+inductive Cause where
+  | malformedLease
+  | specDigestMismatch
+  | leaseExpired
+  | runtimeAdmission
+  | executionFailure
+  | maxLifetimeElapsed
+  | stateCommitFailed
+  | authorizationEnded
+  deriving DecidableEq, Repr
+
+def realizationFailed : Nat := 1
+def authorizationEnded : Nat := 2
+
+/-- lib.rs:2215-2221: storage -> its own code, message containing
+  "execution authorization" -> authorization_ended, everything else ->
+  realization_failed. -/
+def wireCode : Cause → Nat
+  | .authorizationEnded => authorizationEnded
+  | _ => realizationFailed
+
+/-- What AGENTS.md asks: format invalid, admission failure, execution failure
+  and Contract failure must not be folded into one error. -/
+def specCode : Cause → Nat
+  | .malformedLease => 10
+  | .specDigestMismatch => 11
+  | .leaseExpired => 12
+  | .runtimeAdmission => 13
+  | .executionFailure => 14
+  | .maxLifetimeElapsed => 15
+  | .stateCommitFailed => 16
+  | .authorizationEnded => 17
+
+theorem format_folds_into_execution :
+    wireCode .malformedLease = wireCode .executionFailure := rfl
+
+theorem digest_mismatch_folds_into_execution :
+    wireCode .specDigestMismatch = wireCode .executionFailure := rfl
+
+theorem expiry_is_reported_as_a_failure :
+    wireCode .maxLifetimeElapsed = realizationFailed := rfl
+
+theorem commit_failure_folds_into_execution :
+    wireCode .stateCommitFailed = wireCode .executionFailure := rfl
+
+/-- The property AGENTS.md states, refuted. -/
+theorem distinct_causes_share_the_wire_code :
+    ∃ a b : Cause, a ≠ b ∧ wireCode a = wireCode b :=
+  ⟨.malformedLease, .executionFailure, by decide, rfl⟩
+
+/-- Only "authorization ended" is separable. -/
+theorem only_authorization_is_separable (c : Cause) (h : wireCode c ≠ realizationFailed) :
+    c = .authorizationEnded := by
+  cases c <;> simp_all [wireCode, realizationFailed, authorizationEnded]
+
+/-- The fix: one code per class. -/
+theorem spec_code_is_injective : Function.Injective specCode := by
+  intro a b h
+  cases a <;> cases b <;> simp_all [specCode]
+
+end HostedFailureCode
