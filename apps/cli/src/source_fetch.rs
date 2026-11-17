@@ -381,7 +381,7 @@ pub fn fetch_to(
         },
         "extracted": {
             "root": root.display().to_string(),
-            "relative_to_output": root.strip_prefix(&out).unwrap_or(&root).display().to_string(),
+            "relative_to_output": root.strip_prefix(out).unwrap_or(&root).display().to_string(),
         },
         "limits": {
             "max_archive_bytes": MAX_ARCHIVE_BYTES,

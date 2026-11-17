@@ -75,3 +75,38 @@ fn a_missing_path_is_refused_without_touching_the_library() {
     assert!(!output.status.success());
     assert!(!home.path().join("instances").join("linst_").exists());
 }
+
+#[test]
+#[ignore = "network: downloads a public GitHub repository and packs it"]
+fn a_github_url_becomes_a_durable_instance_with_a_pinned_snapshot() {
+    let home = tempfile::tempdir().unwrap();
+    let output = ato(home.path())
+        .args(["app", "add", "https://github.com/octocat/Spoon-Knife"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let instance: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(instance["schema"], "ato.local-instance/1");
+    assert!(
+        instance["contract_ref"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Commit: "), "no pinned commit: {stderr}");
+
+    // The snapshot and the packed Application are kept under ATO_HOME.
+    let mut capsules = Vec::new();
+    for entry in std::fs::read_dir(home.path().join("sources")).unwrap() {
+        let path = entry.unwrap().path().join("application.capsule");
+        if path.is_file() {
+            capsules.push(path);
+        }
+    }
+    assert_eq!(capsules.len(), 1, "expected exactly one packed Application");
+}

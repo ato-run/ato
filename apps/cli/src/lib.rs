@@ -1958,6 +1958,21 @@ fn local_application_store() -> Result<LocalApplicationStore> {
 /// compatibility alias.
 fn add_local_application(args: AppAddArgs) -> Result<()> {
     let home = ato_home()?;
+    if is_github_source(&args.input) {
+        let bytes = github_source_bundle(&args.input)?;
+        let approval = if args.approve_state_migration {
+            StateMigrationApproval::granted()
+        } else {
+            StateMigrationApproval::not_granted()
+        };
+        let instance = local_application_store()?.import_with_state_migration(
+            &bytes,
+            args.derivation.as_deref(),
+            approval,
+        )?;
+        println!("{}", serde_json::to_string_pretty(&instance)?);
+        return Ok(());
+    }
     let hub = hub_public::resolve_for_run(&args.input, &args.api_url, &home)?;
     let bytes = match &hub {
         Some(resolved) => {
@@ -1993,6 +2008,137 @@ fn add_local_application(args: AppAddArgs) -> Result<()> {
     )?;
     println!("{}", serde_json::to_string_pretty(&instance)?);
     Ok(())
+}
+
+fn is_github_source(input: &Path) -> bool {
+    input
+        .to_str()
+        .is_some_and(|value| value.starts_with("https://github.com/"))
+}
+
+/// Authoring input for a static directory: a frozen Contract that observes the
+/// entry document, and the route that serves it.
+///
+/// Only the response status is promised. A body digest is deliberately absent:
+/// the hosted profile cannot preserve one today, and a Contract this flow
+/// could not verify would be worse than a smaller one it can.
+fn static_route_authoring(title: &str, entry: &str) -> String {
+    format!(
+        r#"schema = "ato.capsule/2"
+
+[application]
+title = "{title}"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "entry"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/"
+status = 200
+
+[[derivation]]
+id = "static"
+use = "ato.browser@1"
+entry = "{entry}"
+runtimes = {{}}
+
+[effects]
+default = "pure"
+"#
+    )
+}
+
+fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+    fs::create_dir_all(to).with_context(|| format!("create {}", to.display()))?;
+    for entry in fs::read_dir(from).with_context(|| format!("read {}", from.display()))? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let target = to.join(entry.file_name());
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else if kind.is_file() {
+            fs::copy(entry.path(), &target)
+                .with_context(|| format!("copy {}", entry.path().display()))?;
+        } else {
+            bail!(
+                "unsupported-source: {} is not a regular file or directory",
+                entry.path().display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Turn a public GitHub URL into a packed portable Application.
+///
+/// The steps are the existing ones, in order: fetch the pinned snapshot
+/// (`ato source fetch`'s authority), detect the static entry, author the route
+/// next to a copy of the tree so the snapshot keeps exactly the bytes that were
+/// hashed, then compile with the same builder `ato pack` uses. Nothing here
+/// invents a second bundle writer or a second Contract.
+fn github_source_bundle(input: &Path) -> Result<Vec<u8>> {
+    const STATIC_ENTRIES: [&str; 2] = ["index.html", "index.htm"];
+    let home = ato_home()?;
+    let sources = home.join("sources");
+    fs::create_dir_all(&sources).with_context(|| format!("create {}", sources.display()))?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or_default();
+    let url = input
+        .to_str()
+        .context("the GitHub URL is not valid UTF-8")?
+        .to_owned();
+    let fetched =
+        source_fetch::fetch_to(&url, None, None, &sources.join(format!("fetch-{stamp}")))?;
+    let entry = STATIC_ENTRIES
+        .iter()
+        .map(|name| fetched.root.join(name))
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "unsupported-source: {} has no static entry document (index.html); this release forms static sites only",
+                url
+            )
+        })?;
+    let entry = entry
+        .file_name()
+        .context("the static entry has no file name")?
+        .to_string_lossy()
+        .into_owned();
+    let application_root = sources.join(format!("app-{stamp}"));
+    copy_tree(&fetched.root, &application_root)?;
+    let title = url
+        .trim_start_matches("https://github.com/")
+        .trim_end_matches('/');
+    fs::write(
+        application_root.join("capsule.toml"),
+        static_route_authoring(title, &entry),
+    )
+    .with_context(|| format!("write {}", application_root.join("capsule.toml").display()))?;
+    let (bytes, _bundle) = build_authored_bundle_v2(&application_root)
+        .with_context(|| format!("compile the Application from {url}"))?;
+    fs::write(application_root.join("application.capsule"), &bytes).with_context(|| {
+        format!(
+            "write {}",
+            application_root.join("application.capsule").display()
+        )
+    })?;
+    eprintln!("Source: {url}");
+    eprintln!("Commit: {}", fetched.commit);
+    eprintln!("Tree:   {}", fetched.tree_digest);
+    eprintln!("App:    {}", application_root.display());
+    Ok(bytes)
 }
 
 fn import_local_application(args: AppImportArgs) -> Result<()> {
