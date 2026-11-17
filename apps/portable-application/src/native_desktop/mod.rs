@@ -36,6 +36,8 @@ use crate::ValidatedNativePort;
 // Windows Adapter is fail-closed before extraction and will use the same code
 // once its mandatory policy is enforceable.
 #[cfg(target_os = "macos")]
+mod app_bundle;
+#[cfg(target_os = "macos")]
 pub(crate) mod artifact;
 #[cfg(target_os = "macos")]
 mod dmg;
@@ -115,6 +117,9 @@ pub(crate) enum NativeArtifactPayload {
     /// entry is already laid out inside it.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     BuiltTree(PathBuf),
+    /// A generated macOS wrapper around an unchanged verified source executable.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    WindowApp { root: PathBuf, entry: String },
 }
 
 /// Where one archive's bytes live.
@@ -356,14 +361,20 @@ pub(crate) fn acquire(
                 refusal(code, error.to_string())
             })?;
             Ok(AcquiredArtifact {
-                payload: NativeArtifactPayload::BuiltTree(if descriptor.local_window {
-                    // The build cache was verified above; keep its executable's
-                    // address stable when a GUI Instance is stopped and restarted.
-                    home.join(source_build::BUILD_CACHE_DIR)
-                        .join(built.cache_key.trim_start_matches("sha256:"))
+                payload: if descriptor.local_window {
+                    let (root, entry) =
+                        app_bundle::materialize(&built.entry, &built.output_digest, home).map_err(
+                            |error| {
+                                refusal(
+                                    "native_install_materialization_failed",
+                                    format!("{error:#}"),
+                                )
+                            },
+                        )?;
+                    NativeArtifactPayload::WindowApp { root, entry }
                 } else {
-                    built.root
-                }),
+                    NativeArtifactPayload::BuiltTree(built.root)
+                },
                 provenance: NativeProvenance {
                     kind: "source",
                     artifact_ref: built.output_digest,

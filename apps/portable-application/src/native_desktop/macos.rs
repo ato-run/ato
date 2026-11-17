@@ -416,16 +416,25 @@ pub(crate) fn prepare(
         NativeArtifactPayload::Archive(NativeArchiveSource::File(path)) => {
             extract_archive_file(path, request.descriptor.format, &artifact_root)
         }
-        NativeArtifactPayload::BuiltTree(root) => adopt_tree(root),
+        NativeArtifactPayload::BuiltTree(root) | NativeArtifactPayload::WindowApp { root, .. } => {
+            adopt_tree(root)
+        }
     }
     .map_err(super::artifact_refusal)?;
-    let entry = resolve_entry(&extracted.root, &request.descriptor.entry)?;
-    let signature = prepare_signature(
+    let physical_entry = match &request.payload {
+        NativeArtifactPayload::WindowApp { entry, .. } => entry.as_str(),
+        _ => &request.descriptor.entry,
+    };
+    let entry = resolve_entry(&extracted.root, physical_entry)?;
+    let mut signature = prepare_signature(
         request.descriptor,
         &extracted.root,
         &entry,
         request.local_override,
     )?;
+    if matches!(request.payload, NativeArtifactPayload::WindowApp { .. }) {
+        signature.target = physical_entry.to_owned();
+    }
     let scratch_root = native_root.join("runtime");
     fs::create_dir_all(scratch_root.join("tmp")).map_err(|error| NativeRefusal {
         code: "native_scratch_unavailable",
