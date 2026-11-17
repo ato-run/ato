@@ -376,3 +376,26 @@ all checks passed
 | #1908 | 生成プロバイダの接続先選択 | — |
 | #1907 | 本ドキュメントと受入スクリプト | docs |
 
+### 4d. 訂正: `ato app install <github-url>` は Formation 探索ではない（2026-11-18）
+
+PR #1880 の `github_source_bundle` を読み直した結果、**GitHub URL からの install は Formation 探索を行わない**。
+
+```rust
+// 実際の処理: 静的エントリを探し、capsule.toml を書いて束にするだけ
+let entry = STATIC_ENTRIES.iter().map(|name| fetched.root.join(name))
+    .find(|candidate| candidate.is_file())
+    .ok_or_else(|| anyhow!("unsupported-source: … has no static entry document (index.html); this release forms static sites only"))?;
+fs::write(application_root.join("capsule.toml"), static_route_authoring(title, &entry))?;
+let (bytes, _bundle) = build_authored_bundle_v2(&application_root)?;
+```
+
+- **探索（候補Dの列挙・試行）はしない**。`index.html` がある静的サイトだけを、固定の static route として束ねる。
+- したがって「GitHub URL → 実行」の**近道**ではあるが、受入条件4の「Formationを探索・生成」の証跡にはならない。
+- 受入条件4の「既知Dで実行できるOSS」の証跡は、**`ato form <dir>`**（候補Dを試行し receipt を出す）の実測（§4）である。
+- 「LLM生成D」は Runtime Network 上の生成経路のみで、staging runner token が必要（§4b/§4c）。
+
+**この訂正により、受入条件4の判定は次のとおり:**
+- 既知D: **PASS**（`ato form` の実測）
+- GitHub URL からの単一コマンド: **静的サイト限定の近道**（探索なし）
+- LLM生成D: **未測定**（runner token 待ち）
+
