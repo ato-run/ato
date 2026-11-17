@@ -261,10 +261,52 @@ pub enum SourceCommands {
     Fetch(SourceFetchArgs),
 }
 
+/// What one fetch produced, for callers that do not want its output printed.
+pub struct FetchedSource {
+    pub provenance: serde_json::Value,
+    pub root: PathBuf,
+    pub commit: String,
+    pub tree_digest: String,
+}
+
 pub fn fetch(args: SourceFetchArgs) -> Result<()> {
-    let source = GitHubSource::parse(&args.url)?;
-    let subpath = match (&args.path, source.subpath.as_str()) {
-        (Some(path), "") => path.clone(),
+    let fetched = fetch_to(
+        &args.url,
+        args.reference.as_deref(),
+        args.path.as_deref(),
+        &args.out,
+    )?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&fetched.provenance)?);
+    } else {
+        let source = &fetched.provenance["source"];
+        println!(
+            "Source: {}/{}",
+            source["owner"].as_str().unwrap_or("-"),
+            source["repository"].as_str().unwrap_or("-")
+        );
+        println!("Commit: {}", fetched.commit);
+        println!("Tree:   {}", fetched.tree_digest);
+        println!(
+            "Files:  {} ({} bytes)",
+            fetched.provenance["tree"]["file_count"], fetched.provenance["tree"]["expanded_bytes"]
+        );
+        println!("Root:   {}", fetched.root.display());
+        println!("Provenance: {}", args.out.join("provenance.json").display());
+    }
+    Ok(())
+}
+
+/// Fetch without printing: the caller owns the output.
+pub fn fetch_to(
+    url: &str,
+    reference: Option<&str>,
+    path: Option<&str>,
+    out: &Path,
+) -> Result<FetchedSource> {
+    let source = GitHubSource::parse(url)?;
+    let subpath = match (path, source.subpath.as_str()) {
+        (Some(path), "") => path.to_owned(),
         (None, subpath) => subpath.to_owned(),
         (Some(_), _) => bail!(
             "invalid-github-url: the URL already names a subdirectory; drop either the URL path or --path"
@@ -273,12 +315,11 @@ pub fn fetch(args: SourceFetchArgs) -> Result<()> {
     if !subpath.is_empty() {
         validate_subpath(&subpath)?;
     }
-    let requested = args.reference.as_deref().or(source.reference.as_deref());
+    let requested = reference.or(source.reference.as_deref());
     if let Some(reference) = requested {
         validate_ref(reference)?;
     }
-    let out = args.out;
-    prepare_output(&out)?;
+    prepare_output(out)?;
     let client = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .user_agent("ato-cli (source fetch)")
@@ -318,7 +359,7 @@ pub fn fetch(args: SourceFetchArgs) -> Result<()> {
         "schema": SOURCE_FETCH_SCHEMA,
         "source": {
             "host": "github.com",
-            "url": args.url,
+            "url": url,
             "owner": source.owner,
             "repository": source.repository,
             "requested_ref": requested,
@@ -354,17 +395,12 @@ pub fn fetch(args: SourceFetchArgs) -> Result<()> {
     std::fs::write(&provenance_path, serde_json::to_vec_pretty(&provenance)?)
         .with_context(|| format!("write {}", provenance_path.display()))?;
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&provenance)?);
-    } else {
-        println!("Source: {}/{}", source.owner, source.repository);
-        println!("Commit: {commit}");
-        println!("Tree:   {tree_digest}");
-        println!("Files:  {file_count} ({expanded_bytes} bytes)");
-        println!("Root:   {}", root.display());
-        println!("Provenance: {}", provenance_path.display());
-    }
-    Ok(())
+    Ok(FetchedSource {
+        provenance,
+        root,
+        commit,
+        tree_digest,
+    })
 }
 
 fn prepare_output(out: &Path) -> Result<()> {
