@@ -875,38 +875,28 @@ fn doctor(args: DoctorArgs) -> Result<()> {
         )),
     }
 
-    // A durable Instance start records the worker's process start time, and on
-    // macOS that goes through `ps`. A host that cannot run `ps` can still do
-    // ephemeral Runs but cannot manage Instances; say so before the user tries.
-    let pid = std::process::id().to_string();
-    match Command::new("ps")
-        .args(["-o", "lstart=", "-p", &pid])
-        .output()
-    {
-        Ok(output) if output.status.success() => {
-            let start = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            if start.is_empty() {
-                checks.push((
-                    "process-identity",
-                    "fail",
-                    "ps returned no process start time".to_owned(),
-                    Some("durable Instances cannot be started on this host".to_owned()),
-                ));
-            } else {
-                checks.push(("process-identity", "pass", start, None));
-            }
-        }
-        Ok(output) => checks.push((
+    // A durable Instance start records the worker's process start time, group and
+    // boot session. Probe exactly what the runtime probes: on macOS that is
+    // libproc, not `ps`, so a host where `ps` is restricted but libproc works must
+    // not be told it cannot manage Instances.
+    match OwnedProcessIdentity::current() {
+        Ok(identity) => checks.push((
             "process-identity",
-            "fail",
-            format!("ps exited with {}", output.status),
-            Some("durable Instances cannot be started on this host".to_owned()),
+            "pass",
+            format!(
+                "pid {} started {} (pgid {}, boot {})",
+                identity.pid,
+                identity.process_start_time,
+                identity.process_group,
+                identity.boot_session
+            ),
+            None,
         )),
         Err(error) => checks.push((
             "process-identity",
             "fail",
-            format!("ps is unavailable: {error}"),
-            Some("a restricted exec environment must allow /bin/ps".to_owned()),
+            format!("process identity is unavailable: {error}"),
+            Some("durable Instances cannot be started on this host".to_owned()),
         )),
     }
 
