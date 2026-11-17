@@ -136,6 +136,28 @@ receipt: fully_satisfied True
 
 ## 再現コマンド
 
+リリース成果物に対する受入チェックはスクリプト化してある（`.tmp/` 以外に書き込まない）:
+
+```bash
+cargo build --release -p ato-cli
+scripts/acceptance/macos-selfhost-e2e.sh                 # binary / canned capsule / model status
+scripts/acceptance/macos-selfhost-e2e.sh --hub           # + Hub 参照（ATO_API_URL / ATO_API_TOKEN が必要）
+scripts/acceptance/macos-selfhost-e2e.sh --github        # + GitHub source（source fetch を持つ binary のみ）
+```
+
+実測（2026-11-18, release binary）:
+
+```
+PASS  binary runs: ato 0.9.4-stg
+PASS  links only system libraries
+PASS  canned capsule: fully_satisfied
+PASS  model status: 12 pinned assets
+PASS  hub reference: fully_satisfied
+SKIP  github source (this binary has no 'source fetch')
+```
+
+## 再現コマンド（個別）
+
 ```bash
 # Kev の受入を再測定する
 ATO_KEV_TEST_PYTHON=<venv>/bin/python ATO_KEV_TEST_HOME=<ATO_HOME> \
