@@ -1032,3 +1032,23 @@ fn a_bundle_signature_target_is_carried_through_authoring_and_changes_only_its_o
             .all(|input| input.protocol == ato_formation::authoring::WORKSPACE_PROTOCOL)
     );
 }
+
+#[test]
+fn gui_routes_share_a_new_contract_and_require_a_persistent_home() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/solidcraft-gui");
+    let (_, bundle) = crate::build_authored_bundle_v2(&root).unwrap();
+    let routes = validate_all_derivations(&bundle).unwrap();
+    assert_eq!(routes.len(), 2);
+    assert_eq!(routes[0].contract_ref, routes[1].contract_ref);
+    assert_ne!(routes[0].derivation_ref, routes[1].derivation_ref);
+    for route in &routes {
+        assert!(route.native.as_ref().unwrap().descriptor.local_window);
+        assert_eq!(route.derivation.state.len(), 1);
+    }
+    let mut broken = routes
+        .iter()
+        .map(|r| r.derivation.clone())
+        .collect::<Vec<_>>();
+    broken[0].state.clear();
+    assert!(validate_bytes_all(&reseal(&bundle, broken, &[])).is_err());
+}

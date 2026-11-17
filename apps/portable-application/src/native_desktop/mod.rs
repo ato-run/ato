@@ -36,7 +36,11 @@ use crate::ValidatedNativePort;
 // Windows Adapter is fail-closed before extraction and will use the same code
 // once its mandatory policy is enforceable.
 #[cfg(target_os = "macos")]
+mod app_bundle;
+#[cfg(target_os = "macos")]
 pub(crate) mod artifact;
+#[cfg(target_os = "macos")]
+mod dmg;
 
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
@@ -113,6 +117,9 @@ pub(crate) enum NativeArtifactPayload {
     /// entry is already laid out inside it.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     BuiltTree(PathBuf),
+    /// A generated macOS wrapper around an unchanged verified source executable.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    WindowApp { root: PathBuf, entry: String },
 }
 
 /// Where one archive's bytes live.
@@ -155,12 +162,12 @@ impl NativeProvenance {
     pub fn materialization(&self) -> String {
         match self.kind {
             "remote" => format!(
-                "digest-pinned upstream reference fetched by this Run from {}; Ato did not \
+                "digest-pinned upstream artifact verified from cache or downloaded from {}; Ato did not \
                  redistribute the artifact",
                 self.fetched_from.as_deref().unwrap_or("(unnamed)")
             ),
             "source" => format!(
-                "built in this Run from commit {} with {} ({}), cache {}",
+                "source artifact from commit {} with {} ({}), build cache {}",
                 self.source_commit.as_deref().unwrap_or("(unknown)"),
                 self.toolchain.as_deref().unwrap_or("(unknown toolchain)"),
                 self.build_argv.as_deref().unwrap_or("(unknown command)"),
@@ -221,23 +228,44 @@ pub(crate) fn acquire(
             })
         }
         NativeArtifactSource::Remote(remote) => {
-            let destination = runtime_root.join("native-fetch").join("artifact");
             let transport = remote::ReqwestFetcher::default();
-            let fetched =
-                remote::fetch_to_file(remote, &destination, &transport).map_err(|error| {
-                    let code = match &error {
-                        remote::FetchFailure::NotFound(_) => "native_fetch_not_found",
-                        remote::FetchFailure::DigestMismatch { .. } => {
-                            "native_fetch_digest_mismatch"
-                        }
-                        remote::FetchFailure::SizeMismatch { .. } => "native_fetch_size_mismatch",
-                        remote::FetchFailure::UrlInvalid(_) => "native_fetch_url_invalid",
-                        remote::FetchFailure::Unavailable(_) => "native_fetch_unavailable",
-                    };
-                    refusal(code, error.to_string())
-                })?;
+            let fetched = remote::fetch_cached(
+                &remote.url,
+                &remote.sha256,
+                remote.bytes,
+                Some(remote.bytes),
+                &home.join("cache/native-artifacts"),
+                &transport,
+            )
+            .map_err(|error| {
+                let code = match &error {
+                    remote::FetchFailure::NotFound(_) => "native_fetch_not_found",
+                    remote::FetchFailure::DigestMismatch { .. } => "native_fetch_digest_mismatch",
+                    remote::FetchFailure::SizeMismatch { .. } => "native_fetch_size_mismatch",
+                    remote::FetchFailure::UrlInvalid(_) => "native_fetch_url_invalid",
+                    remote::FetchFailure::Unavailable(_) => "native_fetch_unavailable",
+                };
+                refusal(code, error.to_string())
+            })?;
             Ok(AcquiredArtifact {
-                payload: NativeArtifactPayload::Archive(NativeArchiveSource::File(fetched.path)),
+                payload: if descriptor.local_window {
+                    NativeArtifactPayload::BuiltTree(
+                        artifact::cached_archive_tree(
+                            &fetched.path,
+                            descriptor.format,
+                            &fetched.sha256,
+                            home,
+                        )
+                        .map_err(|error| {
+                            refusal(
+                                "native_install_materialization_failed",
+                                format!("{error:#}"),
+                            )
+                        })?,
+                    )
+                } else {
+                    NativeArtifactPayload::Archive(NativeArchiveSource::File(fetched.path))
+                },
                 provenance: NativeProvenance {
                     kind: "remote",
                     artifact_ref: fetched.sha256,
@@ -282,8 +310,15 @@ pub(crate) fn acquire(
                 };
                 refusal(code, error.to_string())
             })?;
-            let source_archive = runtime_root.join("native-source").join("source.tar.gz");
-            remote::fetch_source_archive(build, &source_archive, &transport).map_err(|error| {
+            let source_archive = remote::fetch_cached(
+                &build.url,
+                &build.sha256,
+                remote::MAX_NATIVE_SOURCE_BYTES,
+                None,
+                &home.join("cache/native-artifacts"),
+                &transport,
+            )
+            .map_err(|error| {
                 let code = match &error {
                     remote::FetchFailure::NotFound(_) => "native_fetch_not_found",
                     remote::FetchFailure::DigestMismatch { .. } => "native_fetch_digest_mismatch",
@@ -292,7 +327,8 @@ pub(crate) fn acquire(
                     remote::FetchFailure::Unavailable(_) => "native_fetch_unavailable",
                 };
                 refusal(code, error.to_string())
-            })?;
+            })?
+            .path;
             let built = source_build::build(
                 build,
                 &descriptor.entry,
@@ -324,8 +360,26 @@ pub(crate) fn acquire(
                 };
                 refusal(code, error.to_string())
             })?;
+            eprintln!(
+                "Native source build cache: {} ({})",
+                built.cache.as_str(),
+                built.cache_key
+            );
             Ok(AcquiredArtifact {
-                payload: NativeArtifactPayload::BuiltTree(built.root),
+                payload: if descriptor.local_window {
+                    let (root, entry) =
+                        app_bundle::materialize(&built.entry, &built.output_digest, home).map_err(
+                            |error| {
+                                refusal(
+                                    "native_install_materialization_failed",
+                                    format!("{error:#}"),
+                                )
+                            },
+                        )?;
+                    NativeArtifactPayload::WindowApp { root, entry }
+                } else {
+                    NativeArtifactPayload::BuiltTree(built.root)
+                },
                 provenance: NativeProvenance {
                     kind: "source",
                     artifact_ref: built.output_digest,
@@ -477,3 +531,6 @@ pub(crate) fn resolve_entry(artifact_root: &Path, entry: &str) -> Result<PathBuf
     }
     Ok(canonical)
 }
+
+#[cfg(target_os = "macos")]
+mod window;
