@@ -139,6 +139,14 @@ pub fn extract_tar_reader<R: Read>(archive: R, destination: &Path) -> Result<Ext
                     digest: format!("{:x}", hasher.finalize()),
                 });
             }
+            // Pax and GNU metadata headers describe the entry that follows.
+            // They carry no tree content of their own, and the tar reader
+            // applies the fields it understands to that entry. GitHub's
+            // codeload tarballs open with one of them.
+            tar::EntryType::XHeader
+            | tar::EntryType::XGlobalHeader
+            | tar::EntryType::GNULongName
+            | tar::EntryType::GNULongLink => {}
             other => bail!(
                 "native artifact entry `{}` is a {other:?}; only regular files and directories are materialized",
                 relative.display()
