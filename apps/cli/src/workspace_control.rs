@@ -130,9 +130,22 @@ fn answer(
     status: &Mutex<Option<(bool, String)>>,
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-    let mut request = [0u8; 4096];
-    let read = stream.read(&mut request)?;
-    let head = String::from_utf8_lossy(&request[..read]);
+    // One read() may return only part of the request line, and a short read made
+    // the action look empty: a valid request then got a 404. Read until the head
+    // is complete (or the peer closes) before deciding anything.
+    let mut request = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        let read = stream.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&buffer[..read]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") || request.len() >= 8192 {
+            break;
+        }
+    }
+    let head = String::from_utf8_lossy(&request);
     let action = head.split_whitespace().nth(1).unwrap_or_default();
     if action == status_path {
         let body = match status.lock().ok().and_then(|status| status.clone()) {
