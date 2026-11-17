@@ -276,3 +276,207 @@ fn escalation_is_a_finite_label_without_producer_payload() {
         serde_json::json!({"seq":0,"choice_id":"escalate","evidence":{}})
     );
 }
+
+// --- the local Kev provider (roadmap PR-6) --------------------------------
+
+/// A local Kev runtime answers the same contract. Its answer must stay named
+/// "kev": a local decision must never be recorded as a remote jev one.
+#[test]
+fn a_local_kev_answer_is_recorded_as_kev() {
+    let body = serde_json::json!({
+        "model": "kev-0.8b",
+        "answers": {"decision": {"type": "choice", "choice": "c2222222222222222",
+                                 "confidence": 0.77,
+                                 "probabilities": {"c1111111111111111": 0.2,
+                                                   "c2222222222222222": 0.77,
+                                                   "c3333333333333333": 0.02,
+                                                   "c4444444444444444": 0.01}}}
+    })
+    .to_string();
+    let (url, handle) = serve_once(200, body, Duration::from_millis(0));
+    let provider =
+        KevDecisionProvider::new(&url, None, "kev-0.8b", Duration::from_secs(5)).unwrap();
+    let answer = provider.decide(&point());
+    let ProviderAnswer::Choice {
+        choice_id,
+        evidence,
+    } = answer
+    else {
+        panic!("expected a choice from the local Kev runtime, got {answer:?}");
+    };
+    assert_eq!(choice_id, "c2222222222222222");
+    assert_eq!(evidence["provider"], "kev");
+    assert_eq!(evidence["model"], "kev-0.8b");
+    // An open local server must not receive credentials it never asked for.
+    let request = handle.join().unwrap();
+    assert!(
+        !request.to_ascii_lowercase().contains("authorization:"),
+        "an open local kev server must not receive an Authorization header: {request}"
+    );
+    assert!(request.contains("\"model\":\"kev-0.8b\""));
+}
+
+/// A jev-family answer to the kev provider is invalid, not relabelled: otherwise
+/// the record would claim a local model produced a remote model's decision.
+#[test]
+fn a_jev_answer_is_invalid_for_the_kev_provider() {
+    let (url, handle) = serve_once(
+        200,
+        answer("c2222222222222222", serde_json::json!({})),
+        Duration::from_millis(0),
+    );
+    let provider =
+        KevDecisionProvider::new(&url, None, "kev-0.8b", Duration::from_secs(5)).unwrap();
+    let answer = provider.decide(&point());
+    assert!(
+        matches!(answer, ProviderAnswer::Fallback { reason: "invalid" }),
+        "a jev-family answer must not become a kev choice: {answer:?}"
+    );
+    handle.join().unwrap();
+}
+
+/// A configured key is sent when the local server was started with one.
+#[test]
+fn a_configured_kev_key_is_sent() {
+    let body = serde_json::json!({
+        "model": "kev-0.8b",
+        "answers": {"decision": {"type": "choice", "choice": "c1111111111111111",
+                                 "confidence": 0.6,
+                                 "probabilities": {"c1111111111111111": 0.6,
+                                                   "c2222222222222222": 0.2,
+                                                   "c3333333333333333": 0.1,
+                                                   "c4444444444444444": 0.1}}}
+    })
+    .to_string();
+    let (url, handle) = serve_once(200, body, Duration::from_millis(0));
+    let provider = KevDecisionProvider::new(
+        &url,
+        Some("local-kev-key-0123456789"),
+        "kev-0.8b",
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    assert!(matches!(
+        provider.decide(&point()),
+        ProviderAnswer::Choice { .. }
+    ));
+    let request = handle.join().unwrap().to_ascii_lowercase();
+    assert!(
+        request.contains("authorization: bearer local-kev-key-0123456789"),
+        "a configured key must be sent: {request}"
+    );
+}
+
+/// An open request to a remote host would send the search state off this machine,
+/// so it is refused before anything is sent.
+#[test]
+fn a_remote_kev_provider_without_a_key_is_refused() {
+    let error = KevDecisionProvider::new(
+        "https://kev.example.com",
+        None,
+        "kev-0.8b",
+        Duration::from_secs(5),
+    )
+    .expect_err("a remote provider without a key must be refused");
+    assert!(
+        error.to_string().contains("ATO_DECISION_KEV_API_KEY"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        KevDecisionProvider::new(
+            "https://kev.example.com",
+            Some("key"),
+            "kev-0.8b",
+            Duration::from_secs(5)
+        )
+        .is_ok()
+    );
+}
+
+/// The model family is part of the provider's identity.
+#[test]
+fn a_kev_provider_refuses_a_foreign_model_family() {
+    let error = KevDecisionProvider::new(
+        "http://127.0.0.1:8008",
+        None,
+        "jev-1.13.0",
+        Duration::from_secs(5),
+    )
+    .expect_err("a jev model on the kev provider must be refused");
+    assert!(
+        error.to_string().contains("kev-"),
+        "unexpected error: {error}"
+    );
+}
+
+/// Transport failures remain fallbacks, never choices.
+#[test]
+fn kev_transport_failures_are_fallbacks() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let provider =
+        KevDecisionProvider::new(&url, None, "kev-0.8b", Duration::from_millis(500)).unwrap();
+    assert!(matches!(
+        provider.decide(&point()),
+        ProviderAnswer::Fallback { .. }
+    ));
+}
+
+/// The options the local server was asked about, so the captured response below
+/// can be checked against a point that actually offers those labels.
+fn point_over(labels: &[&str]) -> DecisionPoint {
+    let choices: Vec<serde_json::Value> = labels
+        .iter()
+        .map(|label| {
+            serde_json::json!({
+                "choice_id": label,
+                "action": {"kind": "attempt", "candidate_id": format!("cand-{label}"),
+                           "derivation_ref": format!("sha256:{label}"),
+                           "runtime_id": "rt", "environment_id": "native"}
+            })
+        })
+        .collect();
+    serde_json::from_value(serde_json::json!({
+        "seq": 7,
+        "default_choice_id": labels[labels.len() - 1],
+        "expires_at": "2026-11-18T00:00:30.000Z",
+        "choices": choices,
+        "evidence": []
+    }))
+    .unwrap()
+}
+
+/// The response this machine's local Kev-0.8B server returned through
+/// "ato model serve" (captured verbatim). This is the cross-module contract: the
+/// CLI serves it and the provider must accept it as a kev Choice.
+#[test]
+fn the_local_server_response_is_accepted_as_a_kev_choice() {
+    let body = serde_json::json!({
+        "answers": {"decision": {"choice": "c3", "confidence": 0.4281,
+                                 "probabilities": {"c1": 0.1975, "c2": 0.1838, "c3": 0.6187},
+                                 "type": "choice"}},
+        "checkpoint": {"base": "Qwen/Qwen3.5-0.8B-Base",
+                       "base_revision": "dc7cdfe2ee4154fa7e30f5b51ca41bfa40174e68",
+                       "head_dim": 256, "temperature": 2.3510958125672174, "weights": "lora"},
+        "model": "kev-0.8b",
+        "runtime": {"backend": "mlx", "device": "mps", "inference_ms": 2243.0,
+                    "load_seconds": 2.971, "mlx": "0.32.4", "mlx_lm": "0.31.3",
+                    "python": "3.12.4"}
+    });
+    let (url, handle) = serve_once(200, body.to_string(), Duration::from_millis(0));
+    let provider =
+        KevDecisionProvider::new(&url, None, "kev-0.8b", Duration::from_secs(30)).unwrap();
+    let answer = provider.decide(&point_over(&["c1", "c2", "c3"]));
+    let ProviderAnswer::Choice {
+        choice_id,
+        evidence,
+    } = answer
+    else {
+        panic!("the local server's answer must be accepted, got {answer:?}");
+    };
+    assert_eq!(choice_id, "c3");
+    assert_eq!(evidence["provider"], "kev");
+    assert_eq!(evidence["model"], "kev-0.8b");
+    handle.join().unwrap();
+}
