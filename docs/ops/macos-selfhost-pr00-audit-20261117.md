@@ -314,3 +314,31 @@ fully_satisfied: true
 - ただしこの検証は「展開済みファイルの実行」であり、**quarantine 属性が付いたダウンロード経路（ブラウザ経由）は対象外**。Homebrew は quarantine を付けないため Formula 経路は問題にならない。`xattr` 削除や Gatekeeper 無効化は行っていない。
 - `brew install` 自体はこの DSH サンドボックスでは実行できない（`~/.homebrew/trust.json.lock` への書き込み拒否）。手順は `macos-selfhost-install-check.md` に分離した。
 - `ato doctor` は本セッションの PR（#1876）で追加されたため、v0.9.3 には含まれない。次回リリースで配布物に載る。
+
+### 9.11 セッション引き継ぎ（2026-11-17 時点）
+
+実装済み（すべて Draft PR・本番デプロイなし）:
+
+| PR | ブランチ | 内容 | 実測 |
+|---|---|---|---|
+| #1871 | docs/macos-selfhost-pr00 | 監査・実測ログ・インストール runbook | §9.1〜9.10 |
+| #1876 | feat/cli-app-lifecycle | app list/open/remove + doctor + libproc + `ato ui` | 6/6 + 2 テスト、実機 lifecycle |
+| #1877 | feat/app-add-hub | app add（file / Hub 参照） | 3/3 |
+| #1878 | feat/source-fetch | source fetch（commit 固定 + provenance） | 6/6 + 実 GitHub |
+| #1880 | feat/app-add-github | app add <github-url>（静的サイト） | E2E `fully_satisfied: true` |
+| (検証) | test/selfhost-integration | 4 PR の合成確認 | 9 tests pass |
+
+実機で確定した事実:
+1. durable Instance の start/stop/再起動は `libproc` 統合後に動作（`ps` 非依存）。
+2. 配布 v0.9.3（adhoc・未公証）バイナリでも既製 Capsule の実行と Receipt は成立。
+3. GitHub URL → commit 固定 → Formation（既知 static D）→ 実行 → `fully_satisfied: true`。
+4. `ato ui` で一覧・起動・停止・open・登録解除（API）が動作。
+
+次に必要な作業（コード変更・要レビュー）:
+- `ato ui` 画面への open/remove ボタン追加
+- Kev: `kev` provider の identity 分離と `ATO_KEV_*`、head.pt attestation 要求
+- LLM 生成 D: 401/403/409/422/429、`unsatisfied`/`exhausted` の非 409 表現、送信同意
+- Hub staging 登録（`capsules/ato/hello`）
+- 公開ゲート（署名・公証・production は最終承認待ち）
+
+注意: このセッションの実行環境では `brew install` と macOS process sandbox が使えない。前者は Terminal 用 runbook、後者は既知の環境要因として記録済み。
