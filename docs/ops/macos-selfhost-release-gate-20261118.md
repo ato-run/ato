@@ -1,0 +1,110 @@
+# macOS self-host release gate — 2026-11-18
+
+Status: Current (measured) / Draft (pending decisions)
+
+この文書は macOS self-host リリースの公開ゲート判定を、**実測値と阻害要因**で
+1か所にまとめたものである。受入条件は指示書の5項目。PASS は「実機で動作し、
+Verifier/Receipt を得た」場合だけ記す。未測定・環境要因・承認待ちは明示する。
+
+## 判定サマリ
+
+| # | 機能 | 判定 | 根拠 / 阻害要因 |
+|---|---|---|---|
+| 1 | CLIインストール（Homebrew） | **BLOCKED（ユーザー操作）** | 手順書 `docs/ops/macos-selfhost-install-check.md` は完成。`brew install ato-run/ato/ato-cli` はサンドボックスが `~/.homebrew` への書き込みを拒否するため、ユーザーの Terminal 実行が必要 |
+| 2 | Kev-0.8B（任意DL + ローカル推論） | **PASS** | 12 asset / 1,835,330,682 bytes を sha256 固定で導入し、実推論を実測。再現テスト `apps/cli/tests/model_inference.rs` |
+| 3 | Capsule取り込み（.capsule + Hub参照） | **PARTIAL** | `.capsule` の durable lifecycle は PR #1876 で実測。Hub参照→検証→実行は dev で PASS（receipt `fully_satisfied: true`）。Hub参照→durable import は PR #1877 待ち |
+| 4 | ソースから実行（GitHub → Formation） | **PARTIAL** | 既知D経路は実測済み（Spoon-Knife: fetch→form→pack→run→receipt）。LLM生成Dは**公式API権限が無く未測定** |
+| 5 | ローカル管理（CLI + Desktop UI） | **PARTIAL** | CLI は PR #1876 で実測。Desktop UI は別repo（ato-desktop）で未着手 |
+
+## 2. Kev-0.8B の実測（PASS）
+
+### 導入
+```
+$ ato model install kev-0.8b --home <ATO_HOME>
+kev-0.8b: 1835327775 of 1835330682 bytes downloaded into <ATO_HOME>/models/kev-0.8b
+$ ato model status --verify --json
+installed True bytes 1835330682 / 1835330682
+all verified True
+```
+- 上流: `jaredpalmer/kev-0.8b@bf75a6a8`（adapter/head/tokenizer）+ `Qwen/Qwen3.5-0.8B-Base@dc7cdfe2`
+- 中断→再実行で `resuming base/model.safetensors at 243038328 bytes` から Range 再開
+- 独立照合: `head.pt f400bd12…920b6`、`adapter_model.safetensors 9b908623…885a`（model card の Released weights と一致）
+
+### 推論
+```
+$ ato model score --home <ATO_HOME> --python <venv>/bin/python --request '<json>' --json
+answers.team   = {choice: billing, confidence: 0.7764, probabilities: {billing 0.8509, returns 0.1302, shipping 0.0189}}
+answers.urgent = {noul: 0.449}
+runtime        = {backend: mlx, device: mps, mlx: 0.32.4, mlx_lm: 0.31.3, python: 3.12.4, load_seconds: 3.27, inference_ms: 2254.5}
+checkpoint     = {weights: lora, base_revision: dc7cdfe2…, head_dim: 256, temperature: 2.3510958125672174}
+```
+- 3回連続で確率が完全一致（決定的）
+- `temperature 2.3511` は model card の T=2.35 と一致
+- **ネットワークアクセスなし**: 参照ランタイムが Hub id で解決する Qwen base を検証済みローカルディレクトリへ差し替え
+
+### ローカル決定サーバ
+```
+$ ato model serve --home <ATO_HOME> --python <venv>/bin/python --port 8202
+$ curl -X POST .../v1/systemone -d '<decision_request>'
+{"answers":{"decision":{"choice":"c3","confidence":0.4281,...}},"model":"kev-0.8b",...}
+```
+常駐ワーカー化によるレイテンシ実測（同一入力3回）:
+
+| # | 実時間 | load_seconds | inference_ms |
+|---|---|---|---|
+| 1 | 8.64 s | 3.861 | 2167.4 |
+| 2 | 0.12 s | 3.861 | 107.5 |
+| 3 | 0.19 s | 3.861 | 168.5 |
+
+`load_seconds` が同一 = 1回だけロードしている証拠。
+
+### Formation への接続
+- `kev` decision provider を `jev` から identity 分離（base URL / model接頭辞 / evidence `provider`）
+- jev系応答は kev provider で invalid（relabelしない）
+- 非loopback URL に鍵が無い場合は送信前に拒否
+- `ato form --decision-provider kev` で選択可能。**実E2Eは Runtime Network（ato-api）が必要で未測定**
+
+### 上流 attestation の所見
+- `provenance.json` の `head_sha256` は `bc77488a…` だが公開 LFS 実体は `f400bd12…`
+- `source_hashes` 30件のうち tag `kev-1.0`(=6b719c3c) の実ファイルと照合した5件がすべて不一致
+- → **モデルリポジトリの provenance は実行時ソースの attestation に使えない**。Ato は公開 LFS digest と git tag で固定する
+
+## 3. Hub参照の実測（PARTIAL）
+
+```
+$ ATO_API_URL=https://staging.api.ato.run ato run capsules/koh0920/interop-static --no-open --verification-receipt r.json
+Resolved capsules/koh0920/interop-static [tag=latest] -> sha256:95b837f4…bdd813
+Capsule: sha256:b565e9d7…b741db   Route: sha256:87a0ac84…b7a3cb   Runtime: static web
+receipt: fully_satisfied True
+```
+- ローカル sample と同一の K/D。Hub から取得した束でも Contract 検証が通る
+- `ato app import capsules/…` は **ローカルファイルのみ**（`error: accepts only a portable .capsule file`）→ PR #1877 待ち
+- dev の `ato app start` は `worker process start time is unavailable`（サンドボックスが `/bin/ps` を拒否）→ PR #1876 の libproc で解消済み
+
+## 4. ソースから実行の阻害要因（要判断）
+
+- 既知D経路は実測済み（GitHub URL → source fetch → form → pack → run → receipt）
+- **LLM生成D経路は未測定**。CLI の生成プロバイダは `jev`（TypeSafe API）のみで、
+  `ATO_GENERATION_JEV_API_KEY` が必要。Ato 公式API経路は CLI に未実装。
+- 指示書の「デフォルトはAto公式API」を満たすには、次のいずれかの判断が必要:
+  1. 公式API（ato-api）の生成エンドポイント契約を確定し、CLI に `ato` 生成プロバイダを実装する
+  2. 外部API（Jev）の鍵を用意し、`--generation-provider jev` で測定する
+  3. ローカルLLM経路を実装する（本ホストには mlx-lm 0.31.3 と Kev ランタイムがある）
+- いずれも**権限・契約の判断**が必要で、エージェントが回避してはならない領域
+
+## 5. 未着手 / 別repo
+
+- Desktop UI（受入条件5の後半）: `ato-desktop` は別repo。ローカル管理UIは PR #1876 の `ato ui`（loopback + PWA再利用）で代替中
+- 署名・公証: 初期リリースは Homebrew Formula 経由で**公証不要**と判断済み。Tauri `.app` の署名は保留
+- 本番 Hub 登録: 最終承認まで保留（staging のみ）
+
+## 再現コマンド
+
+```bash
+# Kev の受入を再測定する
+ATO_KEV_TEST_PYTHON=<venv>/bin/python ATO_KEV_TEST_HOME=<ATO_HOME> \
+  cargo test -p ato-cli --test model_inference -- --ignored --nocapture
+
+# Hub 参照の実行
+ATO_API_URL=https://staging.api.ato.run ato run capsules/koh0920/interop-static --no-open
+```
