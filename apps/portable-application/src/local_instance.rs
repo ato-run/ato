@@ -31,6 +31,8 @@ use crate::{bundle_sha256, validate_bundle_for_derivation};
 pub const LOCAL_APPLICATION_SCHEMA: &str = "ato.local-application/1";
 pub const LOCAL_INSTANCE_SCHEMA: &str = "ato.local-instance/1";
 pub const LOCAL_INSTANCE_RUN_SCHEMA: &str = "ato.local-instance-run/1";
+pub const LOCAL_INSTANCE_LIST_SCHEMA: &str = "ato.local-instance-list/1";
+pub const LOCAL_INSTANCE_REMOVAL_SCHEMA: &str = "ato.local-instance-removal/1";
 pub const LOCAL_RESTORED_SNAPSHOT_SCHEMA: &str = "ato.local-restored-instance-snapshot/1";
 
 static LOCAL_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -254,6 +256,19 @@ pub struct LocalInstanceRun {
     pub created_at: String,
 }
 
+/// What one removal did with the Instance's saved data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalInstanceRemoval {
+    pub schema: String,
+    pub instance_id: String,
+    /// False only when `--purge-data` deleted the saved data.
+    pub data_retained: bool,
+    /// Where the retained registration and data live, when they were kept.
+    pub retained_path: Option<String>,
+    pub removed_at: String,
+}
+
 pub struct LocalRunActivation<'a> {
     pub pid: u32,
     pub process_start_time: String,
@@ -454,6 +469,128 @@ impl LocalApplicationStore {
             )));
         }
         Ok(instance)
+    }
+
+    /// Every registered Instance, oldest first.
+    ///
+    /// A directory that holds no `instance.json` is not a registration: it is
+    /// either retained data from `remove` or a half-written import, so it stays
+    /// out of the listing rather than becoming a fabricated Instance.
+    pub fn list(&self) -> Result<Vec<LocalInstanceMetadata>, LocalInstanceError> {
+        let directory = self.root.join("instances");
+        let entries = fs::read_dir(&directory).map_err(|source| LocalInstanceError::Io {
+            path: directory.clone(),
+            source,
+        })?;
+        let mut instances = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| LocalInstanceError::Io {
+                path: directory.clone(),
+                source,
+            })?;
+            if !entry
+                .file_type()
+                .map_err(|source| LocalInstanceError::Io {
+                    path: entry.path(),
+                    source,
+                })?
+                .is_dir()
+            {
+                continue;
+            }
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if !name.starts_with("linst_") {
+                continue;
+            }
+            if !entry.path().join("instance.json").is_file() {
+                continue;
+            }
+            instances.push(self.instance(name)?);
+        }
+        instances.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.instance_id.cmp(&right.instance_id))
+        });
+        Ok(instances)
+    }
+
+    /// Remove the registration, keeping or deleting its saved data.
+    ///
+    /// The Instance must not have an active Run: a removal that could not prove
+    /// the workload stopped is refused instead of leaking a process. Keeping the
+    /// data moves the whole Instance directory to `removed/`, so the saved
+    /// filesystem state stays where recovery can find it and no later import
+    /// silently adopts it.
+    pub fn remove(
+        &self,
+        instance_id: &str,
+        purge_data: bool,
+    ) -> Result<LocalInstanceRemoval, LocalInstanceError> {
+        let instance_root = self.instance_root(instance_id)?;
+        let retained_root = self.retained_root(instance_id)?;
+        let registered = instance_root.join("instance.json").is_file();
+        let removed_at = observed_at();
+        if !registered {
+            return match (purge_data, retained_root.is_dir()) {
+                (true, true) => {
+                    fs::remove_dir_all(&retained_root).map_err(|source| {
+                        LocalInstanceError::Io {
+                            path: retained_root.clone(),
+                            source,
+                        }
+                    })?;
+                    Ok(LocalInstanceRemoval {
+                        schema: LOCAL_INSTANCE_REMOVAL_SCHEMA.to_owned(),
+                        instance_id: instance_id.to_owned(),
+                        data_retained: false,
+                        retained_path: None,
+                        removed_at,
+                    })
+                }
+                _ => Err(LocalInstanceError::UnknownInstance(instance_id.to_owned())),
+            };
+        }
+        let _ = self.instance(instance_id)?;
+        if let Some(active) = self.active_run(instance_id)? {
+            return Err(LocalInstanceError::ActiveRunConflict {
+                instance_id: instance_id.to_owned(),
+                run_id: active.run_id,
+                status: active.status.as_str().to_owned(),
+            });
+        }
+        if purge_data {
+            fs::remove_dir_all(&instance_root).map_err(|source| LocalInstanceError::Io {
+                path: instance_root.clone(),
+                source,
+            })?;
+            return Ok(LocalInstanceRemoval {
+                schema: LOCAL_INSTANCE_REMOVAL_SCHEMA.to_owned(),
+                instance_id: instance_id.to_owned(),
+                data_retained: false,
+                retained_path: None,
+                removed_at,
+            });
+        }
+        if retained_root.exists() {
+            return Err(LocalInstanceError::InvalidState(format!(
+                "retained data for `{instance_id}` already exists at {}",
+                retained_root.display()
+            )));
+        }
+        create_dir_all(&self.root.join("removed"))?;
+        fs::rename(&instance_root, &retained_root).map_err(|source| LocalInstanceError::Io {
+            path: instance_root.clone(),
+            source,
+        })?;
+        Ok(LocalInstanceRemoval {
+            schema: LOCAL_INSTANCE_REMOVAL_SCHEMA.to_owned(),
+            instance_id: instance_id.to_owned(),
+            data_retained: true,
+            retained_path: Some(retained_root.display().to_string()),
+            removed_at,
+        })
     }
 
     pub fn bundle_bytes(
@@ -1232,6 +1369,11 @@ impl LocalApplicationStore {
     fn instance_root(&self, instance_id: &str) -> Result<PathBuf, LocalInstanceError> {
         validate_id(instance_id)?;
         Ok(self.root.join("instances").join(instance_id))
+    }
+
+    fn retained_root(&self, instance_id: &str) -> Result<PathBuf, LocalInstanceError> {
+        validate_id(instance_id)?;
+        Ok(self.root.join("removed").join(instance_id))
     }
 
     fn active_run_path(&self, instance_id: &str) -> Result<PathBuf, LocalInstanceError> {
