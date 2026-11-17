@@ -185,6 +185,7 @@ fn handle(request: &Request) -> (String, &'static str, Vec<u8>) {
             let result = match action {
                 "start" => run_ato(&["app", "start", instance_id, "--no-open"]),
                 "stop" => run_ato(&["app", "stop", instance_id]),
+                "open" => run_ato(&["app", "open", instance_id]),
                 "remove" => run_ato(&["app", "remove", instance_id]),
                 _ => {
                     return (
