@@ -64,7 +64,13 @@ function row(entry) {
   const stop = document.createElement('button');
   stop.textContent = '停止'; stop.disabled = state !== 'running' && state !== 'starting';
   stop.onclick = async () => { try { log(await call('/api/instances/' + i.instance_id + '/stop', 'POST')); } catch (e) { log('失敗: ' + e.message); } refresh(); };
-  div.append(start, stop);
+  const open = document.createElement('button');
+  open.textContent = '開く'; open.disabled = state !== 'running';
+  open.onclick = async () => { try { log(await call('/api/instances/' + i.instance_id + '/open', 'POST')); } catch (e) { log('失敗: ' + e.message); } };
+  const remove = document.createElement('button');
+  remove.textContent = '登録解除';
+  remove.onclick = async () => { if (!confirm('登録を解除します（データは保持されます）')) return; try { log(await call('/api/instances/' + i.instance_id + '/remove', 'POST')); } catch (e) { log('失敗: ' + e.message); } refresh(); };
+  div.append(start, stop, open, remove);
   return div;
 }
 async function refresh() {
