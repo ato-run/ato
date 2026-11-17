@@ -37,6 +37,8 @@ use crate::ValidatedNativePort;
 // once its mandatory policy is enforceable.
 #[cfg(target_os = "macos")]
 pub(crate) mod artifact;
+#[cfg(target_os = "macos")]
+mod dmg;
 
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
