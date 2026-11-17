@@ -214,3 +214,31 @@ ato run <ATO_HOME>/sources/app-*/application.capsule --no-open --verification-re
 
 すべて Draft。CI の macOS `cli` は pass、ubuntu/windows/workspace の赤は dev 既存赤（`ato-adapter-pty` の Windows 非対応、`workspace_control`/`derivation_selection`）。
 
+
+### 9.5 PR の合成確認（2026-11-17）
+
+`test/selfhost-integration`（`455b9df93`）で #1876 / #1878 / #1880 をマージした。衝突は `apps/cli/src/lib.rs` の2箇所（`Commands` enum と dispatch）のみで、両側のコマンドを残して解消。統合バイナリで以下が通ることを確認した。
+
+| # | 操作 | 結果 |
+|---|---|---|
+| 1 | `ato doctor` | target/ato-home/docker pass、process-identity fail（`ps` 不可を正しく申告） |
+| 2 | `ato app add https://github.com/octocat/Spoon-Knife` | commit `d0dd1f61…` / tree `5b70fb33…` / Instance 生成 |
+| 3 | `ato app list` | `stopped` / K `2132c2ee…` |
+| 4 | `ato app add samples/interop-static.capsule` | 2件目 |
+| 5 | `ato app list --json` | `ato.local-instance-list/1` に2件 |
+| 6 | `ato app remove <id>` | データは `removed/<id>/` に保持 |
+| 7 | `ato app list` | 1件 |
+| 8 | `ato run <取込済み app>` | `fully_satisfied: true` |
+| 9 | `ato app start <id>` | `process-identity-unavailable`（sandbox 制約を明示） |
+| 10 | `ato app add https://github.com/ato-run/ato` | `unsupported-source`（静的 entry 無し。実行を装わない） |
+
+### 9.6 Homebrew の実測（PR-01 の前提）
+
+```
+$ brew info ato-run/ato/ato-cli
+Error: Refusing to load formula ato-run/ato/ato-cli from untrusted tap ato-run/ato.
+Run `brew trust --formula ato-run/ato/ato-cli` or `brew trust ato-run/ato` to trust it.
+```
+
+formula 自体は実在し v0.9.3 の arm64 sha256 がリリース tarball と一致するが、**Homebrew は第三者 tap を信頼しないと読み込まない**。公開手順・初回案内には `brew trust ato-run/ato` を明記する必要がある（システム変更を伴うため実機インストールは未実施）。
+
