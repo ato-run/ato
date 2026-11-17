@@ -23,7 +23,7 @@ jobs:
         run: python3 scripts/docs-audit.py --allow-historical-from scripts/docs-audit-baseline/link-audit.json --output .tmp/docs-ci-links.json
       - name: Check the README first example
         run: |
-          grep -F 'ato run samples/interop-static.capsule --no-open' README.md
+          grep -F 'ato workspace open workspace.toml --local-data --checkpoint-out workspace.checkpoint.toml' README.md README.ja.md
           if grep -F 'ato pack samples/interop-static-k' README.md; then
             echo "README still contains the retired ato.capsule/1 example"
             exit 1
