@@ -651,9 +651,11 @@ struct FormArgs {
     max_stored_bytes: u64,
     /// Let a decision provider pick the next attempt among those the search
     /// offers (Stage 5a). `jev` reads ATO_DECISION_JEV_API_KEY (never the
-    /// browser judge's key). Without a usable answer the search takes its
-    /// deterministic default. Frozen with the search.
-    #[arg(long, value_parser = ["jev"], requires = "runtime_network")]
+    /// browser judge's key); `kev` reads ATO_DECISION_KEV_BASE_URL /
+    /// ATO_DECISION_KEV_MODEL and defaults to the local Kev runtime that
+    /// `ato model install kev-0.8b` installs. Without a usable answer the search
+    /// takes its deterministic default. Frozen with the search.
+    #[arg(long, value_parser = ["jev", "kev"], requires = "runtime_network")]
     decision_provider: Option<String>,
     /// Decision points the provider may answer over the whole search (1–64).
     #[arg(long, default_value_t = 8, requires = "decision_provider")]
@@ -1287,14 +1289,20 @@ fn form_on_runtime_network(args: FormArgs) -> Result<()> {
         })?;
     }
     // The provider must answer before the Coordinator's deadline for the point.
-    let provider = match &decision_policy {
-        Some(policy) => Some(
-            ato_formation_worker::decision_provider::JevDecisionProvider::from_env(
-                std::time::Duration::from_millis(policy.decision_timeout_ms * 3 / 4),
-            )?,
-        ),
-        None => None,
-    };
+    let provider: Option<Box<dyn ato_formation_worker::decision_provider::DecisionProvider>> =
+        match (&decision_policy, args.decision_provider.as_deref()) {
+            (Some(policy), Some("kev")) => Some(Box::new(
+                ato_formation_worker::decision_provider::KevDecisionProvider::from_env(
+                    std::time::Duration::from_millis(policy.decision_timeout_ms * 3 / 4),
+                )?,
+            )),
+            (Some(policy), _) => Some(Box::new(
+                ato_formation_worker::decision_provider::JevDecisionProvider::from_env(
+                    std::time::Duration::from_millis(policy.decision_timeout_ms * 3 / 4),
+                )?,
+            )),
+            (None, _) => None,
+        };
     let mut answered = std::collections::BTreeSet::new();
     let mut submission = prepare_submission(
         &args.path,
@@ -1377,7 +1385,7 @@ fn form_on_runtime_network(args: FormArgs) -> Result<()> {
                 &client,
                 &id,
                 &status,
-                provider,
+                provider.as_ref(),
                 &mut answered,
             );
         }

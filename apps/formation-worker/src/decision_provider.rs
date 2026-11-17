@@ -15,6 +15,12 @@ use serde::Deserialize;
 /// Pinned so a decision can be reproduced; override with ATO_DECISION_JEV_MODEL.
 pub const DEFAULT_DECISION_MODEL: &str = "jev-1.13.0";
 pub const JEV_BASE_URL: &str = "https://api.typesafe.ai";
+/// The local Kev runtime Ato installs with `ato model install kev-0.8b` serves the
+/// same `POST /v1/systemone` contract on loopback, and it is open by default.
+pub const KEV_PROVIDER: &str = "kev";
+pub const KEV_BASE_URL: &str = "http://127.0.0.1:8008";
+pub const DEFAULT_KEV_MODEL: &str = "kev-0.8b";
+const KEV_MODEL_PREFIX: &str = "kev-";
 /// The largest request sent to the provider (Jev's budget is 32k tokens).
 pub const MAX_REQUEST_BYTES: usize = 48 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024;
@@ -209,13 +215,31 @@ pub fn decision_request(model: &str, point: &DecisionPoint) -> serde_json::Value
 
 /// Accept only a well-formed Choice answer over exactly the offered labels.
 pub fn validate_response(point: &DecisionPoint, raw: &serde_json::Value) -> ProviderAnswer {
+    validate_response_as("jev", "jev-", point, raw)
+}
+
+/// Accept only a well-formed Choice answer over exactly the offered labels and
+/// only from the named provider's model family.
+///
+/// The model prefix is a provenance check, not decoration: relabelling a remote
+/// answer as a local Kev decision (or the reverse) would put a model that never
+/// ran on this host into the record, so a mismatched family is `invalid`.
+pub fn validate_response_as(
+    provider: &'static str,
+    model_prefix: &str,
+    point: &DecisionPoint,
+    raw: &serde_json::Value,
+) -> ProviderAnswer {
     let invalid = ProviderAnswer::Fallback { reason: "invalid" };
     let labels: Vec<&str> = point.choices.iter().map(|c| c.choice_id.as_str()).collect();
     let probability = |v: &serde_json::Value| {
         v.as_f64()
             .is_some_and(|p| p.is_finite() && (0.0..=1.0).contains(&p))
     };
-    let Some(model) = raw["model"].as_str().filter(|m| m.starts_with("jev-")) else {
+    let Some(model) = raw["model"]
+        .as_str()
+        .filter(|m| m.starts_with(model_prefix))
+    else {
         return invalid;
     };
     let answer = &raw["answers"]["decision"];
@@ -238,7 +262,7 @@ pub fn validate_response(point: &DecisionPoint, raw: &serde_json::Value) -> Prov
     ProviderAnswer::Choice {
         choice_id: choice.to_owned(),
         evidence: serde_json::json!({
-            "provider": "jev",
+            "provider": provider,
             "model": model,
             "confidence": answer["confidence"],
             "probabilities": distribution,
@@ -325,6 +349,112 @@ impl DecisionProvider for JevDecisionProvider {
     fn decide(&self, point: &DecisionPoint) -> ProviderAnswer {
         match self.evaluate(&decision_request(&self.model, point)) {
             Ok(raw) => validate_response(point, &raw),
+            Err(reason) => ProviderAnswer::Fallback { reason },
+        }
+    }
+}
+
+/// The local Kev DecisionProvider (roadmap PR-6).
+///
+/// Kev-0.8B is not a text model: it returns a calibrated distribution over the
+/// options it is given, which is exactly the Choice the Coordinator offers. It
+/// runs on this host, so the default base URL is loopback and no credentials are
+/// required. A non-loopback base URL must be authenticated: an open request to a
+/// remote host would send the search state off this machine unauthenticated.
+#[derive(Debug)]
+pub struct KevDecisionProvider {
+    base_url: String,
+    api_key: Option<String>,
+    model: String,
+    http: reqwest::blocking::Client,
+}
+
+impl KevDecisionProvider {
+    /// ATO_DECISION_KEV_BASE_URL (default http://127.0.0.1:8008),
+    /// ATO_DECISION_KEV_MODEL (default kev-0.8b) and the optional
+    /// ATO_DECISION_KEV_API_KEY for a Kev server started with KEV_API_KEY.
+    pub fn from_env(timeout: Duration) -> Result<Self> {
+        let base_url =
+            std::env::var("ATO_DECISION_KEV_BASE_URL").unwrap_or_else(|_| KEV_BASE_URL.to_owned());
+        let model = std::env::var("ATO_DECISION_KEV_MODEL")
+            .unwrap_or_else(|_| DEFAULT_KEV_MODEL.to_owned());
+        let api_key = std::env::var("ATO_DECISION_KEV_API_KEY")
+            .ok()
+            .filter(|key| !key.trim().is_empty());
+        Self::new(&base_url, api_key.as_deref(), &model, timeout)
+    }
+
+    pub fn new(
+        base_url: &str,
+        api_key: Option<&str>,
+        model: &str,
+        timeout: Duration,
+    ) -> Result<Self> {
+        if !model.starts_with(KEV_MODEL_PREFIX) {
+            bail!("a kev decision model must start with kev- (got {model})");
+        }
+        let base_url = base_url.trim_end_matches('/').to_owned();
+        let loopback = base_url.starts_with("http://127.0.0.1:")
+            || base_url.starts_with("http://localhost:")
+            || base_url.starts_with("http://[::1]:");
+        if !loopback && api_key.is_none() {
+            bail!(
+                "a non-loopback kev provider needs ATO_DECISION_KEV_API_KEY: \
+                 an unauthenticated request would send the search state off this machine"
+            );
+        }
+        Ok(Self {
+            base_url,
+            api_key: api_key.map(|key| key.trim().to_owned()),
+            model: model.to_owned(),
+            http: reqwest::blocking::Client::builder()
+                .timeout(timeout)
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
+                .no_proxy()
+                .build()?,
+        })
+    }
+
+    pub(crate) fn evaluate(
+        &self,
+        request: &serde_json::Value,
+    ) -> Result<serde_json::Value, &'static str> {
+        let body = serde_json::to_vec(request).map_err(|_| "invalid")?;
+        if body.len() > MAX_REQUEST_BYTES {
+            return Err("invalid");
+        }
+        let mut builder = self
+            .http
+            .post(format!("{}/v1/systemone", self.base_url))
+            .header(reqwest::header::CONTENT_TYPE, "application/json");
+        if let Some(key) = &self.api_key {
+            builder = builder.bearer_auth(key);
+        }
+        let response = match builder.body(body).send() {
+            Ok(r) if r.status().is_success() => r,
+            Ok(_) => return Err("provider_error"),
+            Err(e) if e.is_timeout() => return Err("timeout"),
+            Err(_) => return Err("provider_error"),
+        };
+        use std::io::Read as _;
+        let mut bytes = Vec::new();
+        if response
+            .take(MAX_RESPONSE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || bytes.len() as u64 > MAX_RESPONSE_BYTES
+        {
+            return Err("invalid");
+        }
+        serde_json::from_slice(&bytes).map_err(|_| "invalid")
+    }
+}
+
+impl DecisionProvider for KevDecisionProvider {
+    fn decide(&self, point: &DecisionPoint) -> ProviderAnswer {
+        match self.evaluate(&decision_request(&self.model, point)) {
+            Ok(raw) => validate_response_as(KEV_PROVIDER, KEV_MODEL_PREFIX, point, &raw),
             Err(reason) => ProviderAnswer::Fallback { reason },
         }
     }
