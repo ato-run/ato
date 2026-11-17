@@ -12,6 +12,7 @@ mod formation_verify;
 mod hub;
 mod hub_public;
 mod hub_transfer;
+mod llm_serve;
 mod mcp_stdio;
 mod model_cache;
 mod object_transport;
@@ -141,6 +142,11 @@ enum Commands {
         #[command(subcommand)]
         command: model_cache::ModelSetCommands,
     },
+    /// Serve a local MLX model as the System One generation endpoint.
+    Llm {
+        #[command(subcommand)]
+        command: LlmCommands,
+    },
     /// Import and operate a durable local portable Application Instance.
     App {
         #[command(subcommand)]
@@ -269,6 +275,12 @@ struct SourceOciBuildArgs {
     /// New output directory.
     #[arg(long)]
     out: PathBuf,
+}
+
+#[derive(Subcommand)]
+enum LlmCommands {
+    /// Serve a local MLX model as the System One generation endpoint.
+    Serve(llm_serve::ServeArgs),
 }
 
 #[derive(Subcommand)]
@@ -813,6 +825,9 @@ pub fn run() -> Result<()> {
         Commands::Run(args) => run_capsule(args),
         Commands::Reform(args) => run_reform(args),
         Commands::ModelSet { command } => model_cache::execute(command),
+        Commands::Llm { command } => match command {
+            LlmCommands::Serve(args) => llm_serve::serve(&args),
+        },
         Commands::App { command } => match command {
             AppCommands::Install(args) => install_local_application(args),
             AppCommands::Import(args) => import_local_application(args),
