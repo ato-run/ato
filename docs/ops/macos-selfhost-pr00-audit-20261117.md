@@ -252,3 +252,40 @@ $ curl -s https://api.ato.run/v1/hub/capsules
 
 公開 Capsule Hub は**現在0件**。したがって `capsules/ato/hello` が 404 なのは個別の欠落ではなく、参照先そのものが空である。CAP-02 の Hub 経路（取り込み成功 E2E）は、誰かが公開するまで実データで検証できない。初期ユーザーの価値は、ローカル `.capsule` と GitHub URL の2経路で成立させるのが現実的。
 
+
+### 9.8 CAP-01 / APP-01 の判定（libproc 統合後・2026-11-17）
+
+**方針変更（ユーザー決定）**: `libproc` 等の安全な Rust クレートの追加を許可。`ato-local-execution` の `#![forbid(unsafe_code)]` は維持し、`/bin/ps` 依存を廃止。PID だけでなく開始時刻を記録して PID 再利用による誤停止を防ぐ。
+
+実装:
+- `lib/local-execution/Cargo.toml`: macOS 限定で `libproc = "0.14"`（crate の Cargo.toml で license MIT を確認）
+- `process_start_time`: `libproc::proc_pid::pidinfo::<libproc::libproc::bsd_info::BSDInfo>` の `pbi_start_tvsec/pbi_start_tvusec` を `{sec}.{usec}` で安定化
+- `current_process_group`: 同じ `BSDInfo.pbi_pgid`
+- `boot_session_identity` は `sysctl -n kern.boottime`（`ps` ではない）
+
+実測（macOS arm64, `ATO_HOME` は作業ツリー内）:
+
+```
+app import                   -> linst_263bef44…
+app start <id> --no-open     -> Run lrun_7b25ff02…, URL http://127.0.0.1:49986
+app inspect <id>             -> state active, pid 26896, url 127.0.0.1:49986
+curl <endpoint>/             -> http=200
+app stop <id>                -> Stopped Run lrun_7b25ff02…
+app start <id> --no-open     -> 新しい Run lrun_d597fbb2…, URL http://127.0.0.1:50081（再起動）
+app stop <id>                -> Stopped
+app inspect <id>             -> active_run: null
+```
+
+既存回帰 `cargo test -p ato-cli --test portable_application`: **13 passed / 5 failed**（以前は 10/8）。
+残る5件はすべて **macOS process sandbox の初期化が `Operation not permitted`** で落ちるもので、`~/.ato/cache` への書き込みと `sandbox_init` がこの実行環境で禁止されているため。`ps` に依存していた3件（`a_static_run_is_owned_by_its_run_until_stopped`, `imported_local_instance_can_stop_and_restart_without_reimporting`, `snapshot_bundle_start_records_the_installed_snapshot_in_its_receipt`）は **PASS に転じた**。
+
+未検証: クラッシュ後の孤児回収、macOS 再起動をまたぐ状態復元（実行環境の再起動が必要）。
+
+### 9.9 REL-01 の完了条件変更（ユーザー決定）
+
+- 初期公開は **macOS arm64 CLI**。Homebrew Formula が正式な配布経路。
+- **Developer ID 署名・Apple 公証は初期公開の必須条件から外す**（Tauri の `.app` 直接配布は後続タスク）。
+- クリーンな Mac で **OS のセキュリティ設定を変更せずに** インストール・実行できることを実測する。
+- SHA256 検証・リリースの出所確認・アンインストールは受入条件として残す。
+- `xattr` による隔離属性の強制削除や Gatekeeper の無効化を手順に含めない。
+- 管理 UI は `ato ui`（既存 PWA 画面の再利用）を将来の入口として検討し、Tauri 配布を待たない。
