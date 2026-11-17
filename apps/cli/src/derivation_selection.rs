@@ -997,12 +997,22 @@ mod tests {
         });
         let lines = candidate_capability_lines(windows);
         assert_eq!(lines.len(), 2, "{lines:?}");
+        // The connector is a host fact: a Linux host with a container runtime
+        // reports "direct" where a Mac reports "none". The vocabulary is what this
+        // test pins, so the connector is checked for shape, not for one host's value.
+        let prefix = format!(
+            "capability derivation_ref={} route=Native Desktop platform=windows/x86_64 connector=",
+            windows.derivation_ref
+        );
+        let suffix = " runnable=no state=Unavailable";
+        assert!(lines[0].starts_with(&prefix), "{lines:?}");
+        assert!(lines[0].ends_with(suffix), "{lines:?}");
+        let connector = lines[0]
+            .trim_start_matches(&prefix)
+            .trim_end_matches(suffix);
         assert!(
-            lines[0].starts_with(&format!(
-                "capability derivation_ref={} route=Native Desktop platform=windows/x86_64 connector=none runnable=no state=Unavailable",
-                windows.derivation_ref
-            )),
-            "{lines:?}"
+            ["none", "direct", "process", "not-applicable"].contains(&connector),
+            "unexpected connector {connector:?} in {lines:?}"
         );
         assert!(
             lines[1].starts_with("capability reason=native_platform_mismatch message="),
