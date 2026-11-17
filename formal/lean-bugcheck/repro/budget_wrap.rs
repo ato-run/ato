@@ -6,5 +6,6 @@ fn main() {
     assert!(b.consume(5));
     let ok = b.consume(u64::MAX - 2); // real total = 2^64+2 > limit
     println!("consume(u64::MAX-2) -> {ok}, used={} exhausted={}", b.used(), b.exhausted());
-    assert!(ok, "bug not reproduced");
+    assert!(!ok);
+    assert_eq!(b.used(), u64::MAX);
 }

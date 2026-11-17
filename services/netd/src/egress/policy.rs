@@ -37,8 +37,10 @@ impl TransferBudget {
 
     /// Account `bytes`; false once the total would exceed the limit.
     pub fn consume(&self, bytes: u64) -> bool {
-        let total = self.used.fetch_add(bytes, Ordering::AcqRel) + bytes;
-        if total > self.limit {
+        let previous = self.used.fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+            Some(used.saturating_add(bytes))
+        }).expect("saturating update always succeeds");
+        if previous.checked_add(bytes).is_none_or(|total| total > self.limit) {
             self.exhausted.store(true, Ordering::Release);
         }
         !self.exhausted()
@@ -283,6 +285,15 @@ mod tests {
         assert!(!budget.consume(1));
         assert!(budget.exhausted());
         assert_eq!(budget.used(), 11);
+    }
+
+    #[test]
+    fn transfer_budget_rejects_arithmetic_overflow() {
+        let budget = TransferBudget::new(u64::MAX);
+        assert!(budget.consume(5));
+        assert!(!budget.consume(u64::MAX - 2));
+        assert_eq!(budget.used(), u64::MAX);
+        assert!(!budget.consume(0));
     }
 
     #[test]
