@@ -61,5 +61,10 @@ serde_jcs = "0.1"
 serde_json = "1"
 toml = "0.8"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Reading a process's kernel record (start time, process group) without spawning
+# `ps`: the crate is a safe wrapper, so this crate keeps #![forbid(unsafe_code)].
+libproc = "0.14"
+
 [dev-dependencies]
 tempfile = "3"
