@@ -13,6 +13,7 @@ Status: Current（2026-11-17 時点の実測記録。ロードマップの追跡
 | CPU / RAM | Apple M1 (arm64) / 16 GiB |
 | ato バイナリ | `apps/ato/target/debug/ato` = 0.9.3, commit 32e3b4cb…, dirty（local nightly 由来） |
 | ローカル ato checkout | branch `nightly` @ `65cec62b7`、`origin/dev` と 6875 ahead / 7247 behind → **作業基準にしない** |
+| ローカル ato-api checkout | branch `codex/public-install-invites` @ `e7b39a98`、`origin/dev`(`50cf3929`) より **1718 behind**（local router 254行 vs dev 1319行）→ 監査は dev 基準 |
 | 配布版 | GitHub Release v0.9.3 (2026-11-16) |
 | DSH sandbox | full enforcement。`/bin/ps` 実行不可（後述 §6） |
 
@@ -50,8 +51,8 @@ G7. **Kev-0.8B は実在し、arm64/MLX 対応**（`.tmp/pr00/kev-audit.md`）: 
 | CAP-01 | RED（環境遮断） | `ato app start linst_…` → `error: local Instance worker exited before becoming active`、worker log = `worker process start time is unavailable`（原因は §6）。`app list` 不在 | 環境遮断 + 未実装 |
 | CAP-02 | RED | Hub `capsules/ato/hello` → `hub-not-found … (not_found)`（api.ato.run）。`ato app import` は拡張子 `.capsule` のローカルファイル限定（`accepts only a portable .capsule file`） | 未実装 + 参照欠落 |
 | SRC-01 | RED | `ato form <dir>` のみ。GitHub URL を受ける CLI 経路なし（G6 はサーバ側） | 未実装 |
-| SRC-02 | RED | LLM 候補生成の CLI 経路は `form-session` と `form --runtime-network` のみ。provider は `jev` 固定・鍵必須 | 未実装 |
-| SRC-03 | RED | API 失敗/予算超過/K 不一致の統一 UX と `--json` 失敗契約が無い | 未実装 |
+| SRC-02 | RED | LLM 候補生成の CLI 経路は `form-session` と `form --runtime-network` のみ。provider は `jev` 固定・鍵必須。API 側は**未認証の Formation/generation 経路が 1 本も無い**（全経路 401） | 未実装 |
+| SRC-03 | RED | 予算/期限の拒否は **409**（`budget_mismatch`/`deadline`/`exhausted`）で 429/402/Retry-After は無し。per-account 検索上限も無し。CLI 側の統一失敗 UX と `--json` 契約も無い | 未実装 |
 | MOD-01 | RED | `ato model install/status` 不在（`model-set import` は既存ディレクトリ取込のみ）。Kev→Ato 接続は `JEV_BASE_URL` 定数固定で不可、`model` 接頭辞 `jev-` 必須 | 未実装 |
 | MOD-02 | RED | モデル未導入時の fallback を検証する E2E/fixture が無い | 未実装 |
 | APP-01 | RED | `app list / open / remove` 不在。start は §6 で検証不能 | 未実装 + 環境遮断 |
@@ -94,6 +95,28 @@ G7. **Kev-0.8B は実在し、arm64/MLX 対応**（`.tmp/pr00/kev-audit.md`）: 
 
 CLI 名は `app add|list|remove|open` を新設し、`app import` は互換エイリアスとして残す（意味論は変えない）。
 
+## 5b. Formation API（ato-api）実測契約
+
+基準: `origin/dev` `50cf3929`（runtime-network ツリーは stg/main と同一）。詳細は `.tmp/pr00/api-audit.md`。
+
+| 面 | 実測 |
+|---|---|
+| マウント | `src/routes/runtime_network.ts`（1319 行）を `index.ts:996` |
+| runner 側 | `PUT /runtimes/self`, `POST /runtimes/self/availability`, `POST /attempts/claim`（204 か ticket、`operation_id` で再送冪等）, `GET /attempts/:id/source`, `POST /attempts/:id/result` |
+| requester 側 | `POST /satisfy`（48 MiB）, `GET /satisfy/:id`, `GET /verified-routes`, `GET /runtimes`, `POST /sources{,...}`, `POST /sources/from-formation`, `hosted-exploration/{preview,confirm,cancel,promotion}` |
+| search | **`/searches` は存在しない**。opaque `search_id` を `/satisfy/:id` と `/exploration/:searchId/*` で読む |
+| 認証 | bearer `ato_rnr_` runner token か session。runner 登録は session 必須。`optionalAuth("apps:read|write")` は OAuth token のみに作用し runner token は scope を迂回 |
+| 制限 | per-search budget（`protocol.ts:189-238`）。拒否は 409。429/402/Retry-After は 0 件、per-account 上限も無し。coordinator timeout 30 分、claim は非ブロッキング |
+| 同意 | hosted exploration は preview → confirm で `sha256(frozen_json)` を束縛（`hosted_exploration_consent.ts:40-90`）。ただし staging の feature flag 配下のみ |
+| テスト | service-level 108 ブロック（HTTP なし）。HTTP テストがあるのは owner/promotion routes と formation-source-runtime-intake のみ。**claim/source/result は HTTP 未テスト** |
+| 運用証跡 | branch protection なし（private/free）、environment 0、直近 stg Deploy 15/15 は GitHub Actions 課金アノテーションで job 未起動。`/health` は version のみ |
+
+P0 への含意:
+- 「アカウント無しで手元 .capsule の import/run 管理」は **API 非依存のローカル経路だけ**で成立させる（現状の `ato run` / `app import` は API 不要で動く）。
+- 公式 API 既定の Formation は account 必須のままでよいが、**429/402 を新設するか 409 語彙のまま CLI で写像するか**は契約判断（既存 consumer を壊さないため、まず CLI 側で `retryable=false`/`reason` へ写像するのを推奨）。
+- rate limit / quota / 監査は PR-05 の前提として未実装。公開 API にするなら別 PR で versioned endpoint + 制限を足す。
+- staging が課金でデプロイできていないため「stg で検証済み」は現時点で主張できない（ローカル実測のみ）。
+
 ## 6. 環境遮断（この DSH セッション固有・製品不具合と混同しない）
 
 - `/bin/ps` の実行が拒否される（`Operation not permitted`, exit 126）。workspace にコピーした `ps` も SIGKILL。
@@ -116,4 +139,5 @@ CLI 名は `app add|list|remove|open` を新設し、`app import` は互換エ�
 1. **署名/公証**: Apple Developer ID 証明書と notarization 資格情報の有無（無ければ clean Mac の Gatekeeper gate は通せない）
 2. **公式 API**: 認証方式・quota/budget・送信同意のプロダクト判断（価格・データ送信）
 3. **Kev の位置づけ**: P0 gate に含めるか、optional demonstration に留めるか（MOD-01 の PASS 定義が変わる）
+3b. **API の失敗契約**: 409 語彙のまま CLI で写像する（推奨・互換）か、429/402 + Retry-After を versioned endpoint で新設するか
 4. **実機 E2E の実行場所**: この sandbox では `ps` 不可。Terminal.app 実行を許容するか、exec 制限のない環境を用意するか
