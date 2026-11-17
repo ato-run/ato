@@ -999,13 +999,18 @@ mod tests {
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(
             lines[0].starts_with(&format!(
-                "capability derivation_ref={} route=Native Desktop platform=windows/x86_64 connector=none runnable=no state=Unavailable",
-                windows.derivation_ref
+                "capability derivation_ref={} route=Native Desktop platform=windows/x86_64 connector={} runnable=no state=Unavailable",
+                windows.derivation_ref, windows.admission.as_ref().expect("host verdict").connector
             )),
             "{lines:?}"
         );
+        let reason = if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+            "native_windows_containment_unavailable"
+        } else {
+            "native_platform_mismatch"
+        };
         assert!(
-            lines[1].starts_with("capability reason=native_platform_mismatch message="),
+            lines[1].starts_with(&format!("capability reason={reason} message=")),
             "{lines:?}"
         );
         let refusal = capability_unavailable(windows, "fixture.capsule");

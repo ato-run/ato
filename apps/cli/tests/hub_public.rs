@@ -368,7 +368,10 @@ impl StubApi {
             let stop = Arc::clone(&stop);
             thread::spawn(move || {
                 for response in responses {
-                    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                    // The CLI may validate/hash the large bundle between requests.
+                    // Keep the stub alive for the same bound as ato(), including
+                    // debug builds on a loaded host. Drop still stops it promptly.
+                    let deadline = std::time::Instant::now() + Duration::from_secs(120);
                     let stream = loop {
                         if stop.load(Ordering::Relaxed) {
                             return;
