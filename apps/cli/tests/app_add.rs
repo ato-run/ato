@@ -1,4 +1,4 @@
-//! `ato app add`: one entry point for a local `.capsule` file and a Hub
+//! `ato app install`: one entry point for a local `.capsule` file and a Hub
 //! reference, both producing the same durable Instance.
 
 use std::path::{Path, PathBuf};
@@ -23,20 +23,28 @@ fn fixture() -> PathBuf {
 fn a_local_capsule_is_added_as_an_instance() {
     let home = tempfile::tempdir().unwrap();
     let output = ato(home.path())
-        .args(["app", "add"])
+        .args(["app", "install"])
         .arg(fixture())
         .output()
         .unwrap();
     assert!(
         output.status.success(),
-        "add failed: {}",
+        "install failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let instance: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(instance["schema"], "ato.local-instance/1");
-    let instance_id = instance["instance_id"].as_str().unwrap();
+    // The install prints what it did for a human; the library is the record.
+    let listed = ato(home.path())
+        .args(["app", "list", "--json"])
+        .output()
+        .unwrap();
+    assert!(listed.status.success());
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let instances = listed["instances"].as_array().unwrap();
+    assert_eq!(instances.len(), 1, "{listed}");
+    let instance_id = instances[0]["instance"]["instance_id"].as_str().unwrap();
+    assert_eq!(instances[0]["instance"]["schema"], "ato.local-instance/1");
 
-    // `add` registers the same object `inspect` reads back.
+    // The same object is what `inspect` reads back.
     let inspected = ato(home.path())
         .args(["app", "inspect", instance_id])
         .output()
@@ -46,7 +54,7 @@ fn a_local_capsule_is_added_as_an_instance() {
     assert_eq!(inspected["instance"]["instance_id"], instance_id);
     assert_eq!(
         inspected["instance"]["contract_ref"],
-        instance["contract_ref"]
+        instances[0]["instance"]["contract_ref"]
     );
 }
 
@@ -54,13 +62,13 @@ fn a_local_capsule_is_added_as_an_instance() {
 fn a_path_that_is_not_a_capsule_is_refused() {
     let home = tempfile::tempdir().unwrap();
     let output = ato(home.path())
-        .args(["app", "add", "Cargo.toml"])
+        .args(["app", "install", "Cargo.toml"])
         .output()
         .unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("local .capsule file or a Hub reference"),
+        stderr.contains("bundle") || stderr.contains("local .capsule file or a Hub reference"),
         "unexpected stderr: {stderr}"
     );
 }
@@ -69,7 +77,7 @@ fn a_path_that_is_not_a_capsule_is_refused() {
 fn a_missing_path_is_refused_without_touching_the_library() {
     let home = tempfile::tempdir().unwrap();
     let output = ato(home.path())
-        .args(["app", "add", "does-not-exist.capsule"])
+        .args(["app", "install", "does-not-exist.capsule"])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -81,12 +89,12 @@ fn a_missing_path_is_refused_without_touching_the_library() {
 fn a_github_url_becomes_a_durable_instance_with_a_pinned_snapshot() {
     let home = tempfile::tempdir().unwrap();
     let output = ato(home.path())
-        .args(["app", "add", "https://github.com/octocat/Spoon-Knife"])
+        .args(["app", "install", "https://github.com/octocat/Spoon-Knife"])
         .output()
         .unwrap();
     assert!(
         output.status.success(),
-        "add failed: {}",
+        "install failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let instance: Value = serde_json::from_slice(&output.stdout).unwrap();
