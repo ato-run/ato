@@ -1,6 +1,7 @@
-# 引き継ぎ: Capsule Hub M2 — SolidCraft 2D の実機検証（2026-11-17 14:20 JST）
+# 引き継ぎ: Capsule Hub M2 — SolidCraft 2D の実機検証（2026-11-17 更新）
 
-Status: Draft（引き継ぎ用。作業途中の状態をそのまま記録）
+Status: Current（M1 実機 D1/D2・二回目 cache hit・staging 公開/Run 報告/PWA 表示まで完了。本番は未実施）
+パスは特記がなければ ato-run workspace root 基準。14:20 時点の旧手順は以下の現状で置き換える。
 親 Issue: ato-run/ato #1819（重複 Issue を作らない）
 実装契約: `docs/rfcs/draft/capsule-hub-m2-native.md`
 受け入れサマリ: `apps/ato/docs/ops/capsule-hub-m2-acceptance-20261116.md`
@@ -46,7 +47,7 @@ Status: Draft（引き継ぎ用。作業途中の状態をそのまま記録）
 | ato-pwa | #1006/#1007 | Hub 詳細ペインの「実行方法」一覧 |
 | ato-pwa | #1012/#1013 | staging デプロイ証跡 |
 
-### staging の実測（完了済み）
+### 引き継ぎ前の staging 実測（履歴）
 - 大容量 publish: `scripts/staging/capsule_hub_m2_large_publish_e2e.sh` が **11/11 pass**
 - `capsules/ato/solidcraft` 公開済み: digest `sha256:1f1895ec…`、2 derivations、`native_terminal`、`macos/aarch64`、
   `verification=experimental / 0 runs`
@@ -54,70 +55,49 @@ Status: Draft（引き継ぎ用。作業途中の状態をそのまま記録）
   （Worker `ato-pwa-staging` / version `7f4a720c-cad9-4098-a43d-1985348c2816`、source `origin/stg`）
 - D1 は M1 実機で **成功**（`ok: pre-built Derivation ran`）
 
-## 3. いま詰まっている問題（ここが引き継ぎ対象）
+## 3. 引き継ぎ後に解消した問題
 
-### 症状（D2）
-```
-[formation] attempt failed: native_build_failed: cargo exited with exit status: 101:
-    Updating crates.io index
-warning: spurious network error (3 tries remaining): [6] Couldn't resolve host name (Could not resolve host: index.crates.io)
-error: failed to get web-time as a dependency of package solidcraft-doc ...
-Caused by: [6] Couldn't resolve host name (Could not resolve host: index.crates.io)
-```
+| 問題 | 対応 | dev / stg PR |
+| --- | --- | --- |
+| Cargo の DNS 失敗 | TCP/443 の既存 grant を維持し、mDNSResponder socket、resolver parent metadata、literal hosts/resolv.conf read を追加 | ato #1879 / #1881 |
+| D2 が上流 Developer ID を要求 | ユーザーの明示承認により D2 のみ `require-valid-or-local-override`。実行時にも `--allow-unsigned-native` を明示 | ato #1882 / #1883 |
+| 最終リンクで clang の一時ファイル作成失敗 | ビルド前に Run 専用 HOME/TMPDIR を作成。新たな host write grant は追加しない | ato #1884 / #1885 |
+| 再実行の成功だけで cache hit と表示 | 二回目の実行成果物・cache manifest の digest 一致、source tree と build profile が未作成であることを検査 | ato #1882 / #1883 |
 
-### 原因の理解
-- source build は Seatbelt 内で `cargo build --locked --release` を実行する（`apps/portable-application/src/native_desktop/source_build.rs` の `SandboxedCargo`）。
-- `SandboxPolicy` は `allow_tcp_connect([443])` を使っており、SBPL レンダラは接続先を **loopback 限定**で出力していた
-  → 外向き HTTPS が通らない。
-- #1869 で `allowed_connect_remote_tcp_ports`（port スコープの remote grant）を追加し、
-  `(allow network-outbound (remote tcp "*:443"))` と resolver（udp/tcp 53）を出すようにしたが、**DNS はまだ通らない**。
-- macOS の名前解決は mDNSResponder との **Unix socket**（`/var/run/mDNSResponder`）経由で、
-  port スコープの grant ではこの socket 接続が許可されないため。
+未コミットの `with_network(true)` 試行は採用しなかった。実測では socket 許可だけでも不足し、
+`/etc`・`/var` の symlink metadata と resolver config の read が必要だった。
+修正前 HTTPS は curl exit 6、修正後は exit 0、HTTP/80 は exit 7 で拒否。
 
-### 未コミットの試行（worktree `apps/ato/.worktrees/m2-terminal`、`git status` に残っている差分）
-`git status` の差分:
-- `lib/sandbox/src/macos.rs`: remote grant があるとき resolver socket の literal 許可と `/private/var/run` の metadata 許可を追加
-- `apps/portable-application/src/native_desktop/source_build.rs`: build policy を `.with_network(true)` に変更
-  （Seatbelt では host 名フィルタ不可のため、**ビルドだけ** network を開ける。ファイル/状態/プロセスの封じ込めは維持）
-- `lib/formation/src/capsule_toml_v2.rs`: **無関係な rustfmt 差分**（コミットしないこと。`git checkout --` で戻す）
+その後の full build は依存取得・コンパイルを通過し、未作成 TMPDIR により最終リンクで失敗した。
+同じ Seatbelt profile の C リンクはディレクトリ作成前に exit 1、作成後に exit 0。
+元の長い Cargo stderr は CLI の先頭 2,000 文字制限に隠れたため、fingerprint diagnostics から回収した。
 
-ビルドとテストは通っている:
-- `cargo test -p ato-sandbox` → 26 passed（新規 `a_build_egress_grant_renders_the_port_and_the_resolver` 含む）
-- `cargo test -p ato-portable-application --lib native_desktop` → 76 passed
+## 4. 現在のコードと実行
 
-**まだ PR 化・マージ・CLI 再ビルドをしていない。**
+- runtime code: dev `bdd62dace9b6c1c295ad3a3baa3563d18e239139`、stg `dc1a1356cb5cef89d12f84a925cca1b4f4e8e328`。
+- 作業 worktree: `apps/ato/.worktrees/m2-terminal`。
+- ユーザー用 CLI: `apps/ato/.worktrees/m2-streaming/target/debug/ato`（上記 dev から再ビルド）。
+- 修正後の再検証: `.tmp/solidcraft-verify-scratch-20261117-1530/`（m2-terminal 内）。
+  D1・D2・D2 再実行は全件 `fully_satisfied=true`、二回目の cache hit も検証済み（16:01:28 JST 終了、exit 0）。
+- managed toolchain / Cargo registry の carry-over は `ATO_TEST_REUSE_ENV_ROOT=1` と
+  `ATO_TEST_ENV_ROOT` で明示。Run の source/target は新規作成している。
+- 初回失敗のビルド成果物は cache に登録されていない。元の失敗した target は診断保存後に削除。
+- 調査ログ: 同 worktree の `.tmp/resolver-fix/`。`acceptance-approved.log`、
+  `approved-run-metadata.json`、`initial-linker-diagnostics.json`、`linker-scratch-probe.json` を参照。
 
-## 4. 次にやること（順番）
+bundle と refs:
 
-1. 未コミット差分を整理する
-   ```sh
-   cd ~/Ekoh/projects/ato-run/apps/ato/.worktrees/m2-terminal
-   git checkout -- lib/formation/src/capsule_toml_v2.rs   # 無関係な fmt 差分
-   git add lib/sandbox/src/macos.rs apps/portable-application/src/native_desktop/source_build.rs
-   git commit -m "fix(sandbox): open the host resolver to a source build"
-   ```
-2. **方式の判断**（重要。どちらかを選ぶ）
-   - (A) 今回の差分どおり **build sandbox に network を許可**（シンプル・確実。ただし host 名フィルタ無しを Audit に明記）
-   - (B) **依存取得とビルドを分離**: ホスト側で `cargo fetch --locked`（network あり・書き込みは Ato 管理の CARGO_HOME のみ）→
-     Seatbelt 内で `--offline` ビルド。封じ込めは強いが実装量が多い
-3. マージ手順（dev → stg、本番はしない）
-   ```sh
-   git push -u origin fix/build-egress-and-resolver
-   gh pr create --base dev --head fix/build-egress-and-resolver --body-file <body>
-   gh pr merge <n> --merge --admin --delete-branch=false
-   gh pr create --base stg --head dev --title "release: promote dev to staging (...)"
-   gh pr merge <n> --merge --admin --delete-branch=false
-   ```
-4. CLI 再ビルド（ユーザーの検証スクリプトが使うバイナリ）
-   ```sh
-   cd ~/Ekoh/projects/ato-run/apps/ato/.worktrees/m2-streaming
-   CARGO_TARGET_DIR=$PWD/target git fetch origin --quiet && git switch --detach origin/dev
-   CARGO_TARGET_DIR=$PWD/target cargo build -p ato-cli --bin ato
-   ```
-5. ユーザーに実機で再実行してもらう（下記 §5）
-6. 成功したら受け入れ記録を更新（§6）し、本番公開の可否を相談
+| 項目 | 値 |
+| --- | --- |
+| bundle | `sha256:35f940038bc66cec78eb53485738bf029d4ce68d619993a024f8a3a10c10c7e3` |
+| Contract | `sha256:34d52388678111292fa890603110c23b47ce51220f452a28c233a2259e174c98` |
+| D1 | `sha256:f58cdca4697158f519a9a24d7bc36a7deb00a531b913fce3859deccbb46551e9` |
+| D2 | `sha256:382f1474eb77e0c18820f65a4d96edebfeddda6cc6b2b1cb5f4834bb9462406d` |
 
-## 5. 実機検証（ユーザーの Mac、Seatbelt が使える端末）
+署名方針の変更前と同じ K・D1 を確認済み。README は D の input tree に含まれるため、
+今回の sample README は変更していない。Hub 表示用 README は bundle 外の metadata として更新できる。
+
+## 5. 再現コマンド
 
 ```sh
 cd ~/Ekoh/projects/ato-run/apps/ato/.worktrees/m2-terminal
@@ -125,49 +105,50 @@ ATO=/Users/egamikohsuke/Ekoh/projects/ato-run/apps/ato/.worktrees/m2-streaming/t
   scripts/acceptance/verify-solidcraft-native.sh
 ```
 
-- スクリプトは pack → `--list-derivations` から prebuilt/source を自動判別 → D1 → D2 → D2 再実行（cache）→ receipt 検査。
-- 出力は `.tmp/solidcraft-verify/`（`d1.log`, `d2.log`, `d2-second.log`, `*-receipt.json`）。
-- 失敗時はユーザーに `.tmp/solidcraft-verify/d2.log` を貼ってもらう。
-- 注: D1 の成功時点で `d1-receipt.json` ができている。
+既定では新しい `.tmp/solidcraft-verify-<UTC時刻>-<PID>/` と ATO_HOME を使う。
+pack → list → D1 → D2（source build と local signature override を明示）→ D2 再実行 → receipt/cache 検査。
+D1 には署名 override を渡さない。全成功時に三つの receipt と `cache-evidence.json` を保存する。
 
-## 6. 成功後の作業
+## 6. 受け入れ完了と次の境界
 
-1. 両 receipt の確認: 同一 `contract_ref` / 別 `derivation_ref` / `fully_satisfied: true` / schema `/5` /
-   evidence に `path`・`body_sha256`・`captured_bytes` / D2 は `build_network` と 2 回目 cache hit
-2. `apps/ato/docs/ops/capsule-hub-m2-acceptance-20261116.md` に実機結果を追記
-3. Hub の run_count と検証状態（experimental → verified）を確認
-4. 見つかった制約を `docs/rfcs/draft/native-desktop-adapter-audit.md` に追記
-   （build sandbox の network grant、host 名フィルタ不可、resolver socket）
-5. 本番デプロイ・本番公開は**別承認**（現時点で未実施）
+- 同一 bundle・K、別 D、三つの異なる attempt、全 observation の `satisfied` と
+  `fully_satisfied: true` を確認。D2 の成果物は 191,193,936 bytes、artifact 上限は変更なし。
+- `/5` receipt 自体には `build_cache` / `build_network` がないため、`cache-evidence.json` で
+  receipt hash/attempt・artifact digest・cache manifest・再ビルドなしを別途確認した。
+- 検証した同じ bundle bytes を共有 lease 下で staging の既存 `ato/solidcraft` に公開し、
+  三つの実測 receipt を通常の Run 報告 API へ送信。**verified / run_count=3** を確認した。
+  receipt の再送は `counted=false`、count は増えていない。
+- API `fcb9b553-6768-4226-9580-9c5d2a0de5e9` と PWA `4229ab0f-823f-42d1-baa2-d852dc8461d0` は
+  検証前後で同一。lease 手順は exit 0、解放済み。API/PWA 配備・migration・flag は変更していない。
+- ブラウザーでも「確認済み・3 件の成功した実行」、新 D1/D2 の実行方法 2 行、D2 override コマンドを確認。
+- 詳細と receipt hash は `apps/ato/docs/ops/capsule-hub-m2-acceptance-20261116.md` と
+  `apps/ato/docs/ops/evidence/solidcraft-native-20261117.json`。Adapter audit も実測結果へ更新済み。
+- **残る別判断は本番公開・本番デプロイ。今回の許可から推定しない。** 未実装事項は §7 と audit を参照。
 
-## 7. 想定される次の関門
+## 7. 現在の制約
 
-- **toolchain 取得**: `static.rust-lang.org` から rustup-init（SHA-256 検証）→ `$ATO_HOME/toolchains/rust/1.95.0-aarch64-apple-darwin`。
-  ここはホストプロセスが取得する（sandbox 外）ため通る見込みだが、初回は時間がかかる。
-- **ビルド時間**: solidcraft は大規模。`build_argv` は `cargo build --locked --release -p solidcraft-cli`。
-- **成果物採用**: `macos.rs` の `NativeArtifactPayload::BuiltTree` → `artifact::adopt_tree` は **artifact 上限（512MiB）**を使う。
-  ビルド成果物の staging dir が大きいと `the built tree is larger than 536870912 bytes` で落ちる。その場合は source と同様に上限分離が必要。
-- **receipt / launch**: 起動後に `initialize` exchange（input は 59 bytes の JSON-RPC、delimiter は `serverInfo`）が成立するか。
-- **cache**: 2 回目実行で `build_cache: hit` になるか（key は recipe/source digest/commit/lock/toolchain/target/argv/entry）。
+- 初回 full source build は大規模。toolchain の取得と source archive 217,936,976 bytes の取得も必要。
+- cache lookup より先に source archive を取得するため、cache hit でも archive の再取得が発生する。
+- build egress の hostname フィルタは未実装。実際の制限は TCP/443 と resolver 通信。
+- `/5` receipt の build cache/network evidence 不足は上記の別証跡で扱う。
+- CLI executable の Gatekeeper verdict は `rejected (the code is valid but does not seem to be an app)`。
+  D1 の Developer ID / codesign 検査成功と区別し、notarization・stapling・revocation 検証済みとはしない。
+- pixel surface、hosted native execution、Windows native containment などは Adapter audit の未実装一覧を維持。
 
-## 8. 環境の癖（必読）
+## 8. 環境・検証の注意
 
-- **このエージェント環境では native 実行ができない**: sandbox が macOS Seatbelt の適用を拒否する
-  （`sandbox-exec: sandbox_apply: Operation not permitted`）。実機検証はユーザーの端末でしかできない。
-- **worktree は独立**: 共有 `CARGO_TARGET_DIR` を使うと別 worktree の rmeta が混線する。検証は worktree ごとの `target/`。
-  現在の役割:
-  - `apps/ato/.worktrees/m2-terminal` … 今回の修正作業（dev 起点）
-  - `apps/ato/.worktrees/m2-streaming` … ユーザーが使う CLI バイナリ（`target/debug/ato`、dev からビルド）
-  - `apps/ato/.worktrees/m2-solidcraft` … サンプル（既に dev にマージ済み）
-- **ato の主チェックアウトは nightly**: `apps/ato/scripts/acceptance/verify-solidcraft-native.sh` は**存在しない**。
-  dev ベースの worktree から実行すること。
-- **Cloudflare**: `.tmp/cf_token`（0600、IP 制限あり）を `CLOUDFLARE_API_TOKEN` に入れ、
-  `NODE_OPTIONS=--dns-result-order=ipv4first` を併用。IP 不一致（`9109`）や D1 権限不足（`7403`）のときは
-  `tailscale set --exit-node=100.86.119.10` で egress を合わせる。
-- **staging 共有 lease**: `ato-api/scripts/staging-deploy-locked.mjs`。失敗すると lease が残る。
-  自分が取得した行だけを D1 から削除して復旧する（他者の lease は触らない）。
-- `wrangler` は sandbox で `~/Library/Preferences/.wrangler/logs` に書けず EPERM を出すことがある。
-  HOME を workspace 内に置くと回避できる。
+- このセッションでは native Seatbelt を適用できる。以前のエージェント環境の拒否を現在の制約としない。
+- worktree ごとに `CARGO_TARGET_DIR=$PWD/target` を使う。`apps/ato` 主 checkout の nightly は変更しない。
+- Unix socket のテストは長い TMPDIR/cwd で失敗する。今回の短い test root は workspace `.tmp/m2t`。
+- sandbox 27、native 76、追加負例を含む source-build 11、checker fixture 7、Clippy、arch-check は成功。
+  full workspace 初回失敗分は短い path と逐次実行で全件再検証済み。元の全体コマンド成功とは表現しない。
+- CI の formation 整形・README first-example・Linux PTY lint・Windows Unix API は base にもある失敗。
+  課金エラーではなく、成功済みとも扱わない。
+- staging origin は `https://staging.api.ato.run`。credential は origin に対応するものだけを使い、値をログに出さない。
+- staging lease は `apps/ato-api/.tmp/hub-mvp/ato-api/scripts/staging-deploy-locked.mjs` で取得・解放する。
+  他者の lease を削除しない。配備や feature flag の変更は今回不要。
+- Node の Cloudflare 接続が特定の解決 IP で timeout した。今回だけの DNS preload を `.tmp/resolver-fix/`
+  に置き、到達を確認した現在の DNS answer を使った。system DNS・exit node は変更していない。
 
 ## 9. 参照
 
