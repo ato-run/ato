@@ -1,0 +1,767 @@
+{
+  "schema": "ato.ops.solidcraft-gui-staging-acceptance/1",
+  "status": "passed",
+  "recorded_at": "2026-11-17T17:15:20.435288+00:00",
+  "scope": "macOS arm64; fresh HOME, ATO_HOME, Cargo/Rustup and XDG directories on the existing M1 host. OS and Xcode CLT were not reinstalled. CLI-local GUI, not hosted or Windows acceptance.",
+  "installed_cli": {
+    "cli": {
+      "version": "0.9.5-stg",
+      "git_commit": "8e35343f34eabdc9defbaf94f44e5901b643cf3d",
+      "git_dirty": "false",
+      "profile": "release"
+    },
+    "binary_sha256": "sha256:bc588fb23505357dd4ba4e297e70223bbb126a8de00d38cb4a5b90a0bef78a54",
+    "installer_sha256": "sha256:c4cd9e61f0820eaaf0a6350d4162738109488c1fc38f10c71efbd61532cd7827",
+    "archive_sha256": "sha256:b800eeeb131c0ee6a685b74cbc81954f1593fb237a96ec40cbd34d497964ca45"
+  },
+  "installation": {
+    "exit_code": 0,
+    "elapsed_seconds": 7.174
+  },
+  "release": {
+    "tag_name": "v0.9.5-stg",
+    "html_url": "https://github.com/ato-run/ato/releases/tag/v0.9.5-stg",
+    "prerelease": true,
+    "published_at": "2026-11-17T16:18:47Z"
+  },
+  "deployment": {
+    "plan": {
+      "ato": "8e35343f34eabdc9defbaf94f44e5901b643cf3d",
+      "pwa": "933c756740715d48b793ca182df3cc36edc0b54e",
+      "api_deployed_source": "62aeca4e8445769d7d3861697883d18c0eca0ab1"
+    },
+    "worker_versions": {
+      "api": "ddaefe5c-86f6-4d45-9a87-4adee10b83df",
+      "pwa": "d1c99ec8-5fd7-447f-924c-3c439a0ab055"
+    }
+  },
+  "served_assets": [
+    {
+      "path": "/assets/main-BOtYRxC8.css",
+      "sha256": "sha256:05156ed88b6c94a4067ec17faca98c13d934601474aa089121ec87033a65c12f",
+      "bytes": 431000,
+      "staging_api_marker": false
+    },
+    {
+      "path": "/assets/main-CM67ALyj.js",
+      "sha256": "sha256:ce8845c60f1d3fe159c4108c4659b857628a6f800e289f0434cb80cbffc6abd4",
+      "bytes": 562527,
+      "staging_api_marker": true
+    }
+  ],
+  "fresh_directories": {
+    "home": [],
+    "ato-home": [],
+    "cargo": [],
+    "rustup": [],
+    "cache": []
+  },
+  "environment_projection": {
+    "HOME": "<isolated-root>/home",
+    "ATO_HOME": "<isolated-root>/ato-home",
+    "XDG_CONFIG_HOME": "<isolated-root>/config",
+    "XDG_CACHE_HOME": "<isolated-root>/cache",
+    "CARGO_HOME": "<isolated-root>/cargo",
+    "RUSTUP_HOME": "<isolated-root>/rustup",
+    "TMPDIR": "<isolated-root>/tmp",
+    "PATH": "<isolated-root>/home/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+    "LANG": "en_US.UTF-8",
+    "TERM": "dumb",
+    "SHELL": "/bin/zsh",
+    "ATO_API_URL": "https://staging.api.ato.run",
+    "ATO_SKIP_CARGO_FALLBACK": "1"
+  },
+  "runs": [
+    {
+      "label": "d1",
+      "result": {
+        "exit_code": 0,
+        "elapsed_seconds": 270.308,
+        "label": "d1",
+        "instance_id": "linst_9968d1d89fbd1a236633f25cc08cce11c295877af903bc83414e656fecf20e14",
+        "contract_ref": "sha256:d4248fefc073c7a81333238d2c8a8e4803ed9bc4128b22ddc8acd11ca89e8fa5",
+        "derivation_ref": "sha256:9f66b8b9a95a45f070c6c3fb6148a5b8ccd34eb2cd7a069dc743048c9eb40cfa",
+        "receipt_sha256": "sha256:dbc2c305249f57a48731e6dd32d17b7629f302dd79fdf8eff8da5334d5ff9f9b",
+        "state_home": "<isolated-root>/d1/ato-home/instances/linst_9968d1d89fbd1a236633f25cc08cce11c295877af903bc83414e656fecf20e14/state/home",
+        "runtime_executable": "<isolated-root>/d1/ato-home/cache/native-installed-v1/dmg/0e9870f868c7b73c2b610d9ddbbcca91a63163d86743bcafe7c4cda75ea4bad2/tree/SolidCraft.app/Contents/MacOS/SolidCraft",
+        "run_id": "lrun_a2fe0a9599de05fd3f23dc114ff258fcb60fc5e521d64bea6d0cc6611d9d309b",
+        "platform": {
+          "os": "Darwin",
+          "release": "24.6.0",
+          "machine": "arm64"
+        }
+      },
+      "receipt_path_projection": {
+        "bundle_sha256": "sha256:bd9ede29c27274ff2dd1d1cd8d5c08b251672cd8f8fffe4fda99b0129e495d47",
+        "contract_ref": "sha256:d4248fefc073c7a81333238d2c8a8e4803ed9bc4128b22ddc8acd11ca89e8fa5",
+        "derivation_ref": "sha256:9f66b8b9a95a45f070c6c3fb6148a5b8ccd34eb2cd7a069dc743048c9eb40cfa",
+        "execution": {
+          "attempt_id": "lrun_a2fe0a9599de05fd3f23dc114ff258fcb60fc5e521d64bea6d0cc6611d9d309b",
+          "endpoint": "http://127.0.0.1:55694",
+          "native": {
+            "artifact_ref": "sha256:0e9870f868c7b73c2b610d9ddbbcca91a63163d86743bcafe7c4cda75ea4bad2",
+            "codesign_verify": "valid",
+            "enforced_inbound_ports": [],
+            "enforced_read_only": [
+              "<isolated-root>/d1/ato-home/cache/native-installed-v1/dmg/0e9870f868c7b73c2b610d9ddbbcca91a63163d86743bcafe7c4cda75ea4bad2/tree",
+              "<isolated-root>/d1/ato-home/instances/linst_9968d1d89fbd1a236633f25cc08cce11c295877af903bc83414e656fecf20e14/runs/lrun_a2fe0a9599de05fd3f23dc114ff258fcb60fc5e521d64bea6d0cc6611d9d309b/workspace",
+              "/usr",
+              "/System",
+              "/Library",
+              "/bin",
+              "/sbin",
+              "/opt",
+              "/usr/local",
+              "/private/etc",
+              "/private/var/db",
+              "/dev"
+            ],
+            "enforced_read_write": [
+              "<isolated-root>/d1/ato-home/instances/linst_9968d1d89fbd1a236633f25cc08cce11c295877af903bc83414e656fecf20e14/runs/lrun_a2fe0a9599de05fd3f23dc114ff258fcb60fc5e521d64bea6d0cc6611d9d309b/native/runtime",
+              "<isolated-root>/d1/ato-home/instances/linst_9968d1d89fbd1a236633f25cc08cce11c295877af903bc83414e656fecf20e14/state/home"
+            ],
+            "entry": "SolidCraft.app/Contents/MacOS/SolidCraft",
+            "gatekeeper": "accepted",
+            "local_override": false,
+            "materialized_tree_digest": "sha256:12f3a7998c5527857940fb6841db62d6836490192eb311729d938a0aa0cad634",
+            "process_group": 3233,
+            "sandbox": "seatbelt",
+            "signature_kind": "developer_id",
+            "signature_policy": "require-valid",
+            "signature_target": "bundle",
+            "verified_target": "SolidCraft.app",
+            "window_containment": "shared macOS display; owned on-screen window observed; bounded Metal/IOSurface user clients"
+          },
+          "pid": 3233,
+          "realization": "native_desktop",
+          "request_id": "lrun_a2fe0a9599de05fd3f23dc114ff258fcb60fc5e521d64bea6d0cc6611d9d309b",
+          "run_id": "lrun_a2fe0a9599de05fd3f23dc114ff258fcb60fc5e521d64bea6d0cc6611d9d309b",
+          "runtime_executable": "<isolated-root>/d1/ato-home/cache/native-installed-v1/dmg/0e9870f868c7b73c2b610d9ddbbcca91a63163d86743bcafe7c4cda75ea4bad2/tree/SolidCraft.app/Contents/MacOS/SolidCraft"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:f770ef86d1833460dbf0a2f1d327f94c1f4d83246ebc4ea52fcd89b9dbe10a30",
+              "method": "GET",
+              "path": "/ready",
+              "status": 200
+            },
+            "id": "gui-window",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/5",
+        "target": {
+          "kind": "cli-local"
+        }
+      },
+      "worker_log_sha256": "sha256:cbcd1deb1f4705f1e9429187e86002aa06fc2d76f86d650a92cfe294c19a83bd"
+    },
+    {
+      "label": "d1-restart",
+      "result": {
+        "exit_code": 0,
+        "elapsed_seconds": 38.658,
+        "label": "d1-restart",
+        "instance_id": "linst_9968d1d89fbd1a236633f25cc08cce11c295877af903bc83414e656fecf20e14",
+        "contract_ref": "sha256:4abf3cc46c18b9bb56c305b73296dfa018b13d636a4ffdcb2ee5453f9860c006",
+        "derivation_ref": "sha256:9f66b8b9a95a45f070c6c3fb6148a5b8ccd34eb2cd7a069dc743048c9eb40cfa",
+        "receipt_sha256": "sha256:22f9939164b5997a0cb323ef31a13b5b1ab4fe4a3bea6fee716bb48b36b091cc",
+        "state_home": "<isolated-root>/d1/ato-home/instances/linst_9968d1d89fbd1a236633f25cc08cce11c295877af903bc83414e656fecf20e14/state/home",
+        "runtime_executable": "<isolated-root>/d1/ato-home/cache/native-installed-v1/dmg/0e9870f868c7b73c2b610d9ddbbcca91a63163d86743bcafe7c4cda75ea4bad2/tree/SolidCraft.app/Contents/MacOS/SolidCraft",
+        "run_id": "lrun_7cca55b9366ee5cd3ffaf336c061722c1a0dab560c9eb8b1947cad8a940118e8",
+        "platform": {
+          "os": "Darwin",
+          "release": "24.6.0",
+          "machine": "arm64"
+        }
+      },
+      "receipt_path_projection": {
+        "bundle_sha256": "sha256:f6e9f0753f9040cf1b245fd5e96b54e7c9655ec7c7dc1b5c8895014cf285ad97",
+        "contract_ref": "sha256:4abf3cc46c18b9bb56c305b73296dfa018b13d636a4ffdcb2ee5453f9860c006",
+        "derivation_ref": "sha256:9f66b8b9a95a45f070c6c3fb6148a5b8ccd34eb2cd7a069dc743048c9eb40cfa",
+        "execution": {
+          "attempt_id": "lrun_7cca55b9366ee5cd3ffaf336c061722c1a0dab560c9eb8b1947cad8a940118e8",
+          "endpoint": "http://127.0.0.1:56021",
+          "native": {
+            "artifact_ref": "sha256:0e9870f868c7b73c2b610d9ddbbcca91a63163d86743bcafe7c4cda75ea4bad2",
+            "codesign_verify": "valid",
+            "enforced_inbound_ports": [],
+            "enforced_read_only": [
+              "<isolated-root>/d1/ato-home/cache/native-installed-v1/dmg/0e9870f868c7b73c2b610d9ddbbcca91a63163d86743bcafe7c4cda75ea4bad2/tree",
+              "<isolated-root>/d1/ato-home/instances/linst_9968d1d89fbd1a236633f25cc08cce11c295877af903bc83414e656fecf20e14/runs/lrun_7cca55b9366ee5cd3ffaf336c061722c1a0dab560c9eb8b1947cad8a940118e8/workspace",
+              "/usr",
+              "/System",
+              "/Library",
+              "/bin",
+              "/sbin",
+              "/opt",
+              "/usr/local",
+              "/private/etc",
+              "/private/var/db",
+              "/dev"
+            ],
+            "enforced_read_write": [
+              "<isolated-root>/d1/ato-home/instances/linst_9968d1d89fbd1a236633f25cc08cce11c295877af903bc83414e656fecf20e14/runs/lrun_7cca55b9366ee5cd3ffaf336c061722c1a0dab560c9eb8b1947cad8a940118e8/native/runtime",
+              "<isolated-root>/d1/ato-home/instances/linst_9968d1d89fbd1a236633f25cc08cce11c295877af903bc83414e656fecf20e14/state/home"
+            ],
+            "entry": "SolidCraft.app/Contents/MacOS/SolidCraft",
+            "gatekeeper": "accepted",
+            "local_override": false,
+            "materialized_tree_digest": "sha256:12f3a7998c5527857940fb6841db62d6836490192eb311729d938a0aa0cad634",
+            "process_group": 4697,
+            "sandbox": "seatbelt",
+            "signature_kind": "developer_id",
+            "signature_policy": "require-valid",
+            "signature_target": "bundle",
+            "verified_target": "SolidCraft.app",
+            "window_containment": "shared macOS display; owned on-screen window observed; bounded Metal/IOSurface user clients"
+          },
+          "pid": 4697,
+          "portability_profile": "cached",
+          "realization": "native_desktop",
+          "request_id": "lrun_7cca55b9366ee5cd3ffaf336c061722c1a0dab560c9eb8b1947cad8a940118e8",
+          "run_id": "lrun_7cca55b9366ee5cd3ffaf336c061722c1a0dab560c9eb8b1947cad8a940118e8",
+          "runtime_executable": "<isolated-root>/d1/ato-home/cache/native-installed-v1/dmg/0e9870f868c7b73c2b610d9ddbbcca91a63163d86743bcafe7c4cda75ea4bad2/tree/SolidCraft.app/Contents/MacOS/SolidCraft"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:f770ef86d1833460dbf0a2f1d327f94c1f4d83246ebc4ea52fcd89b9dbe10a30",
+              "method": "GET",
+              "path": "/ready",
+              "status": 200
+            },
+            "id": "gui-window",
+            "outcome": "satisfied"
+          },
+          {
+            "evidence": {
+              "digest": "sha256:2677086398bf63e893e6420c58abf275ac5aedcff00fac6520aad5b24446fec5"
+            },
+            "id": "instance-snapshot",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/5",
+        "target": {
+          "kind": "cli-local"
+        }
+      },
+      "worker_log_sha256": "sha256:abd615a4d9fb3985bacd7cc7582ab4eb4de6ea398b7c5609a64c7c2c45c7d935"
+    },
+    {
+      "label": "d2",
+      "result": {
+        "exit_code": 0,
+        "elapsed_seconds": 2613.751,
+        "label": "d2",
+        "instance_id": "linst_68695154650845da0ae1246d3bbbcd27dbe2237346f476c06f3674f98492f8a4",
+        "contract_ref": "sha256:d4248fefc073c7a81333238d2c8a8e4803ed9bc4128b22ddc8acd11ca89e8fa5",
+        "derivation_ref": "sha256:d3e816f10e6faddf99e7d151b9e4185fafece30cc6481734f9e9cc1c82d09115",
+        "receipt_sha256": "sha256:9f5454c6fdde2cc3e0302de8560820b88ac805b2454a1b5e9b19773c9bf2d4d2",
+        "state_home": "<isolated-root>/d2/ato-home/instances/linst_68695154650845da0ae1246d3bbbcd27dbe2237346f476c06f3674f98492f8a4/state/home",
+        "runtime_executable": "<isolated-root>/d2/ato-home/cache/native-window-app-v2/9bc8e0b8cbe424a244e57990c822a209a758bd73d24b041fc0e3f4b01011e045/tree/solidcraft.app/Contents/MacOS/solidcraft",
+        "run_id": "lrun_de7688d5ea35e47d9ded03dd241b62c5eb21783d85f6526c58b060461da19591",
+        "build_cache": "miss",
+        "build_cache_key": "sha256:3f0ac09c9e473a5b30ff6f6371c2c2a6d44f2228385e51041e64a5f39c3e6d20",
+        "platform": {
+          "os": "Darwin",
+          "release": "24.6.0",
+          "machine": "arm64"
+        }
+      },
+      "receipt_path_projection": {
+        "bundle_sha256": "sha256:bd9ede29c27274ff2dd1d1cd8d5c08b251672cd8f8fffe4fda99b0129e495d47",
+        "contract_ref": "sha256:d4248fefc073c7a81333238d2c8a8e4803ed9bc4128b22ddc8acd11ca89e8fa5",
+        "derivation_ref": "sha256:d3e816f10e6faddf99e7d151b9e4185fafece30cc6481734f9e9cc1c82d09115",
+        "execution": {
+          "attempt_id": "lrun_de7688d5ea35e47d9ded03dd241b62c5eb21783d85f6526c58b060461da19591",
+          "endpoint": "http://127.0.0.1:57463",
+          "native": {
+            "artifact_ref": "sha256:95e5ec0a23b7b322627bfebf014b8e32ddd9e9bd6fcf5a8884e9a9a4b14d9044",
+            "codesign_verify": "valid",
+            "enforced_inbound_ports": [],
+            "enforced_read_only": [
+              "<isolated-root>/d2/ato-home/cache/native-window-app-v2/9bc8e0b8cbe424a244e57990c822a209a758bd73d24b041fc0e3f4b01011e045/tree",
+              "<isolated-root>/d2/ato-home/instances/linst_68695154650845da0ae1246d3bbbcd27dbe2237346f476c06f3674f98492f8a4/runs/lrun_de7688d5ea35e47d9ded03dd241b62c5eb21783d85f6526c58b060461da19591/workspace",
+              "/usr",
+              "/System",
+              "/Library",
+              "/bin",
+              "/sbin",
+              "/opt",
+              "/usr/local",
+              "/private/etc",
+              "/private/var/db",
+              "/dev"
+            ],
+            "enforced_read_write": [
+              "<isolated-root>/d2/ato-home/instances/linst_68695154650845da0ae1246d3bbbcd27dbe2237346f476c06f3674f98492f8a4/runs/lrun_de7688d5ea35e47d9ded03dd241b62c5eb21783d85f6526c58b060461da19591/native/runtime",
+              "<isolated-root>/d2/ato-home/instances/linst_68695154650845da0ae1246d3bbbcd27dbe2237346f476c06f3674f98492f8a4/state/home"
+            ],
+            "entry": "solidcraft.app/Contents/MacOS/solidcraft",
+            "gatekeeper": "rejected",
+            "gatekeeper_detail": "<isolated-root>/d2/ato-home/cache/native-window-app-v2/9bc8e0b8cbe424a244e57990c822a209a758bd73d24b041fc0e3f4b01011e045/tree/solidcraft.app/Contents/MacOS/solidcraft: rejected",
+            "local_override": true,
+            "materialized_tree_digest": "sha256:30d36c7906414b6505220524278083372660866da04bb0e128e4aae89525cdda",
+            "process_group": 10327,
+            "sandbox": "seatbelt",
+            "signature_kind": "adhoc",
+            "signature_policy": "require-valid-or-local-override",
+            "signature_target": "executable",
+            "verified_target": "solidcraft.app/Contents/MacOS/solidcraft",
+            "window_containment": "shared macOS display; owned on-screen window observed; bounded Metal/IOSurface user clients"
+          },
+          "pid": 10327,
+          "realization": "native_desktop",
+          "request_id": "lrun_de7688d5ea35e47d9ded03dd241b62c5eb21783d85f6526c58b060461da19591",
+          "run_id": "lrun_de7688d5ea35e47d9ded03dd241b62c5eb21783d85f6526c58b060461da19591",
+          "runtime_executable": "<isolated-root>/d2/ato-home/cache/native-window-app-v2/9bc8e0b8cbe424a244e57990c822a209a758bd73d24b041fc0e3f4b01011e045/tree/solidcraft.app/Contents/MacOS/solidcraft"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:f770ef86d1833460dbf0a2f1d327f94c1f4d83246ebc4ea52fcd89b9dbe10a30",
+              "method": "GET",
+              "path": "/ready",
+              "status": 200
+            },
+            "id": "gui-window",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/5",
+        "target": {
+          "kind": "cli-local"
+        }
+      },
+      "worker_log_sha256": "sha256:22f014c58136cb88fa57ea7cc7a48136d971f7bd0f2b3f97f9ee23f8d6affde8",
+      "build_profile_created": true
+    },
+    {
+      "label": "d2-restart",
+      "result": {
+        "exit_code": 0,
+        "elapsed_seconds": 10.508,
+        "label": "d2-restart",
+        "instance_id": "linst_68695154650845da0ae1246d3bbbcd27dbe2237346f476c06f3674f98492f8a4",
+        "contract_ref": "sha256:c3e712f70517aeffe66cfddb620e3156308ead1dd2352ef142cddef05791252e",
+        "derivation_ref": "sha256:d3e816f10e6faddf99e7d151b9e4185fafece30cc6481734f9e9cc1c82d09115",
+        "receipt_sha256": "sha256:5ddfb9b2bef50d07fb8e8785c29613bfa1d0ca0bbeab3a58f6357fd0534c3f25",
+        "state_home": "<isolated-root>/d2/ato-home/instances/linst_68695154650845da0ae1246d3bbbcd27dbe2237346f476c06f3674f98492f8a4/state/home",
+        "runtime_executable": "<isolated-root>/d2/ato-home/cache/native-window-app-v2/9bc8e0b8cbe424a244e57990c822a209a758bd73d24b041fc0e3f4b01011e045/tree/solidcraft.app/Contents/MacOS/solidcraft",
+        "run_id": "lrun_2b2c056ee4bda1eb0804a041ce03f138ea325b3ec4d7bb783d3e597a55973dcd",
+        "build_cache": "hit",
+        "build_cache_key": "sha256:3f0ac09c9e473a5b30ff6f6371c2c2a6d44f2228385e51041e64a5f39c3e6d20",
+        "platform": {
+          "os": "Darwin",
+          "release": "24.6.0",
+          "machine": "arm64"
+        }
+      },
+      "receipt_path_projection": {
+        "bundle_sha256": "sha256:d5495a457f7335cd5497478dc435d43a9d5e959b8379049e8b228c827265d64b",
+        "contract_ref": "sha256:c3e712f70517aeffe66cfddb620e3156308ead1dd2352ef142cddef05791252e",
+        "derivation_ref": "sha256:d3e816f10e6faddf99e7d151b9e4185fafece30cc6481734f9e9cc1c82d09115",
+        "execution": {
+          "attempt_id": "lrun_2b2c056ee4bda1eb0804a041ce03f138ea325b3ec4d7bb783d3e597a55973dcd",
+          "endpoint": "http://127.0.0.1:57730",
+          "native": {
+            "artifact_ref": "sha256:95e5ec0a23b7b322627bfebf014b8e32ddd9e9bd6fcf5a8884e9a9a4b14d9044",
+            "codesign_verify": "valid",
+            "enforced_inbound_ports": [],
+            "enforced_read_only": [
+              "<isolated-root>/d2/ato-home/cache/native-window-app-v2/9bc8e0b8cbe424a244e57990c822a209a758bd73d24b041fc0e3f4b01011e045/tree",
+              "<isolated-root>/d2/ato-home/instances/linst_68695154650845da0ae1246d3bbbcd27dbe2237346f476c06f3674f98492f8a4/runs/lrun_2b2c056ee4bda1eb0804a041ce03f138ea325b3ec4d7bb783d3e597a55973dcd/workspace",
+              "/usr",
+              "/System",
+              "/Library",
+              "/bin",
+              "/sbin",
+              "/opt",
+              "/usr/local",
+              "/private/etc",
+              "/private/var/db",
+              "/dev"
+            ],
+            "enforced_read_write": [
+              "<isolated-root>/d2/ato-home/instances/linst_68695154650845da0ae1246d3bbbcd27dbe2237346f476c06f3674f98492f8a4/runs/lrun_2b2c056ee4bda1eb0804a041ce03f138ea325b3ec4d7bb783d3e597a55973dcd/native/runtime",
+              "<isolated-root>/d2/ato-home/instances/linst_68695154650845da0ae1246d3bbbcd27dbe2237346f476c06f3674f98492f8a4/state/home"
+            ],
+            "entry": "solidcraft.app/Contents/MacOS/solidcraft",
+            "gatekeeper": "rejected",
+            "gatekeeper_detail": "<isolated-root>/d2/ato-home/cache/native-window-app-v2/9bc8e0b8cbe424a244e57990c822a209a758bd73d24b041fc0e3f4b01011e045/tree/solidcraft.app/Contents/MacOS/solidcraft: rejected",
+            "local_override": true,
+            "materialized_tree_digest": "sha256:30d36c7906414b6505220524278083372660866da04bb0e128e4aae89525cdda",
+            "process_group": 10921,
+            "sandbox": "seatbelt",
+            "signature_kind": "adhoc",
+            "signature_policy": "require-valid-or-local-override",
+            "signature_target": "executable",
+            "verified_target": "solidcraft.app/Contents/MacOS/solidcraft",
+            "window_containment": "shared macOS display; owned on-screen window observed; bounded Metal/IOSurface user clients"
+          },
+          "pid": 10921,
+          "portability_profile": "cached",
+          "realization": "native_desktop",
+          "request_id": "lrun_2b2c056ee4bda1eb0804a041ce03f138ea325b3ec4d7bb783d3e597a55973dcd",
+          "run_id": "lrun_2b2c056ee4bda1eb0804a041ce03f138ea325b3ec4d7bb783d3e597a55973dcd",
+          "runtime_executable": "<isolated-root>/d2/ato-home/cache/native-window-app-v2/9bc8e0b8cbe424a244e57990c822a209a758bd73d24b041fc0e3f4b01011e045/tree/solidcraft.app/Contents/MacOS/solidcraft"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:f770ef86d1833460dbf0a2f1d327f94c1f4d83246ebc4ea52fcd89b9dbe10a30",
+              "method": "GET",
+              "path": "/ready",
+              "status": 200
+            },
+            "id": "gui-window",
+            "outcome": "satisfied"
+          },
+          {
+            "evidence": {
+              "digest": "sha256:81b07b3499ccfda0de9b9d402a68c4e41f7ff759daaba7804629691e6e704c19"
+            },
+            "id": "instance-snapshot",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/5",
+        "target": {
+          "kind": "cli-local"
+        }
+      },
+      "worker_log_sha256": "sha256:4e8df4e7b80a23752a333cc959a64db59fcf42077d1131dcb211b054b5dbd91d",
+      "build_profile_created": false
+    },
+    {
+      "label": "d2-cache",
+      "result": {
+        "exit_code": 0,
+        "elapsed_seconds": 17.73,
+        "label": "d2-cache",
+        "instance_id": "linst_cf4734f17b450ebb4fd01504036d86fc04ccc29228b7e215714ddd4791517675",
+        "contract_ref": "sha256:d4248fefc073c7a81333238d2c8a8e4803ed9bc4128b22ddc8acd11ca89e8fa5",
+        "derivation_ref": "sha256:d3e816f10e6faddf99e7d151b9e4185fafece30cc6481734f9e9cc1c82d09115",
+        "receipt_sha256": "sha256:53d386d6e6da3e672dfb88d68bbbc97bf1ffa51f00a517765f01b21646c5addf",
+        "state_home": "<isolated-root>/d2/ato-home/instances/linst_cf4734f17b450ebb4fd01504036d86fc04ccc29228b7e215714ddd4791517675/state/home",
+        "runtime_executable": "<isolated-root>/d2/ato-home/cache/native-window-app-v2/9bc8e0b8cbe424a244e57990c822a209a758bd73d24b041fc0e3f4b01011e045/tree/solidcraft.app/Contents/MacOS/solidcraft",
+        "run_id": "lrun_139f6148c904f59a146a6ab4cffa7a9b89a72bcd0c5007aed462a6fd828b9469",
+        "build_cache": "hit",
+        "build_cache_key": "sha256:3f0ac09c9e473a5b30ff6f6371c2c2a6d44f2228385e51041e64a5f39c3e6d20",
+        "platform": {
+          "os": "Darwin",
+          "release": "24.6.0",
+          "machine": "arm64"
+        }
+      },
+      "receipt_path_projection": {
+        "bundle_sha256": "sha256:bd9ede29c27274ff2dd1d1cd8d5c08b251672cd8f8fffe4fda99b0129e495d47",
+        "contract_ref": "sha256:d4248fefc073c7a81333238d2c8a8e4803ed9bc4128b22ddc8acd11ca89e8fa5",
+        "derivation_ref": "sha256:d3e816f10e6faddf99e7d151b9e4185fafece30cc6481734f9e9cc1c82d09115",
+        "execution": {
+          "attempt_id": "lrun_139f6148c904f59a146a6ab4cffa7a9b89a72bcd0c5007aed462a6fd828b9469",
+          "endpoint": "http://127.0.0.1:57678",
+          "native": {
+            "artifact_ref": "sha256:95e5ec0a23b7b322627bfebf014b8e32ddd9e9bd6fcf5a8884e9a9a4b14d9044",
+            "codesign_verify": "valid",
+            "enforced_inbound_ports": [],
+            "enforced_read_only": [
+              "<isolated-root>/d2/ato-home/cache/native-window-app-v2/9bc8e0b8cbe424a244e57990c822a209a758bd73d24b041fc0e3f4b01011e045/tree",
+              "<isolated-root>/d2/ato-home/instances/linst_cf4734f17b450ebb4fd01504036d86fc04ccc29228b7e215714ddd4791517675/runs/lrun_139f6148c904f59a146a6ab4cffa7a9b89a72bcd0c5007aed462a6fd828b9469/workspace",
+              "/usr",
+              "/System",
+              "/Library",
+              "/bin",
+              "/sbin",
+              "/opt",
+              "/usr/local",
+              "/private/etc",
+              "/private/var/db",
+              "/dev"
+            ],
+            "enforced_read_write": [
+              "<isolated-root>/d2/ato-home/instances/linst_cf4734f17b450ebb4fd01504036d86fc04ccc29228b7e215714ddd4791517675/runs/lrun_139f6148c904f59a146a6ab4cffa7a9b89a72bcd0c5007aed462a6fd828b9469/native/runtime",
+              "<isolated-root>/d2/ato-home/instances/linst_cf4734f17b450ebb4fd01504036d86fc04ccc29228b7e215714ddd4791517675/state/home"
+            ],
+            "entry": "solidcraft.app/Contents/MacOS/solidcraft",
+            "gatekeeper": "rejected",
+            "gatekeeper_detail": "<isolated-root>/d2/ato-home/cache/native-window-app-v2/9bc8e0b8cbe424a244e57990c822a209a758bd73d24b041fc0e3f4b01011e045/tree/solidcraft.app/Contents/MacOS/solidcraft: rejected",
+            "local_override": true,
+            "materialized_tree_digest": "sha256:30d36c7906414b6505220524278083372660866da04bb0e128e4aae89525cdda",
+            "process_group": 10745,
+            "sandbox": "seatbelt",
+            "signature_kind": "adhoc",
+            "signature_policy": "require-valid-or-local-override",
+            "signature_target": "executable",
+            "verified_target": "solidcraft.app/Contents/MacOS/solidcraft",
+            "window_containment": "shared macOS display; owned on-screen window observed; bounded Metal/IOSurface user clients"
+          },
+          "pid": 10745,
+          "realization": "native_desktop",
+          "request_id": "lrun_139f6148c904f59a146a6ab4cffa7a9b89a72bcd0c5007aed462a6fd828b9469",
+          "run_id": "lrun_139f6148c904f59a146a6ab4cffa7a9b89a72bcd0c5007aed462a6fd828b9469",
+          "runtime_executable": "<isolated-root>/d2/ato-home/cache/native-window-app-v2/9bc8e0b8cbe424a244e57990c822a209a758bd73d24b041fc0e3f4b01011e045/tree/solidcraft.app/Contents/MacOS/solidcraft"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:f770ef86d1833460dbf0a2f1d327f94c1f4d83246ebc4ea52fcd89b9dbe10a30",
+              "method": "GET",
+              "path": "/ready",
+              "status": 200
+            },
+            "id": "gui-window",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/5",
+        "target": {
+          "kind": "cli-local"
+        }
+      },
+      "worker_log_sha256": "sha256:dade1f81a232f4b85c6ff44adedcc92c7290d14891de7b5c02b25b7d6c57eb49",
+      "build_profile_created": false
+    }
+  ],
+  "cad_ui_acceptance": {
+    "d1": {
+      "status": "passed",
+      "recorded_at": "2026-11-17T16:36:54.552727+00:00",
+      "actions": [
+        "created 40 x 30 x 10 mm box",
+        "changed length to 50 mm and committed with Enter",
+        "saved in Instance home",
+        "normal quit",
+        "ato app start",
+        "reopened saved model; parameters 50 x 30 x 10 mm"
+      ],
+      "model_file": "<isolated-root>/d1/ato-home/instances/linst_9968d1d89fbd1a236633f25cc08cce11c295877af903bc83414e656fecf20e14/state/home/cad-50x30x10.sc",
+      "model_bytes": 10079,
+      "model_sha256": "sha256:8702dd24fc0ec8e02a0c72c7e14f647ab623ca3c82c43c3563f1be7b3b92bcd8",
+      "reopened_screenshot": "<isolated-root>/d1/cad-reopened.png",
+      "screenshot_sha256": "sha256:0d06e9461b5d0c82909c3de110fbd6534bdd0a228ab83739a116d7acd969f35a"
+    },
+    "d2": {
+      "status": "passed",
+      "recorded_at": "2026-11-17T17:13:08.407559+00:00",
+      "actions": [
+        "created 40 x 30 x 10 mm box",
+        "changed length to 50 mm and committed with Enter",
+        "saved in Instance home",
+        "normal quit",
+        "second fresh Instance proved cache hit and was closed",
+        "ato app start of saved Instance",
+        "reopened saved model; parameters 50 x 30 x 10 mm"
+      ],
+      "model_file": "<isolated-root>/d2/ato-home/instances/linst_68695154650845da0ae1246d3bbbcd27dbe2237346f476c06f3674f98492f8a4/state/home/cad-50x30x10.sc",
+      "model_bytes": 9982,
+      "model_sha256": "sha256:a831ef60b6e378258ad9a673bea084f9b3717725a952a2cde180cf17012e9066",
+      "reopened_screenshot": "<isolated-root>/d2/cad-reopened.png",
+      "screenshot_sha256": "sha256:516df922dff02d663419d8473827855d5bf4c5bad1bd43947f860ea70acd9e67",
+      "left_open": true
+    }
+  },
+  "build_cache": {
+    "key": "sha256:3f0ac09c9e473a5b30ff6f6371c2c2a6d44f2228385e51041e64a5f39c3e6d20",
+    "original_output_sha256": "sha256:95e5ec0a23b7b322627bfebf014b8e32ddd9e9bd6fcf5a8884e9a9a4b14d9044",
+    "original_output_bytes": 281524392,
+    "manifest": "sha256:3f0ac09c9e473a5b30ff6f6371c2c2a6d44f2228385e51041e64a5f39c3e6d20\nsha256:95e5ec0a23b7b322627bfebf014b8e32ddd9e9bd6fcf5a8884e9a9a4b14d9044\nrust:1.95.0\ncargo build --locked --release -p solidcraft\n",
+    "receipt_artifact_refs_match_original_output": true,
+    "signed_wrapper_tree_equal_across_runs": true
+  },
+  "guidance": {
+    "d1": {
+      "derivation_ref": "sha256:9f66b8b9a95a45f070c6c3fb6148a5b8ccd34eb2cd7a069dc743048c9eb40cfa",
+      "digest": "sha256:bd9ede29c27274ff2dd1d1cd8d5c08b251672cd8f8fffe4fda99b0129e495d47",
+      "info": {
+        "dependencies": [
+          {
+            "name": "macOS (Apple Silicon)",
+            "provisioning": "host",
+            "purpose": "run",
+            "version": null
+          },
+          {
+            "name": "SolidCraft official GUI DMG (381 MiB)",
+            "provisioning": "download",
+            "purpose": "run",
+            "version": "0.43.0"
+          }
+        ],
+        "estimate_environment": "Apple M1 / macOS 15.8.1 / ato-cli 0.9.5-stg; stg clean-install measurement; D1/D2 cold preparation overlapped",
+        "estimated_cached_run_seconds": 39,
+        "estimated_first_run_seconds": 271,
+        "label": "D1: 公式 GUI を取得",
+        "notes": "CAD GUI で直方体を作成し、長さを 40 mm から 50 mm に編集、保存・終了・再起動後の 50 × 30 × 10 mm を確認。時間はこの検証環境での実測を基にした目安で、機材・回線で変わります。設計ファイルは表示された Saved data (home) 内に保存してください。"
+      },
+      "revision": 1,
+      "source": "publisher",
+      "updated_at": "2026-11-17 17:13:16"
+    },
+    "d2": {
+      "derivation_ref": "sha256:d3e816f10e6faddf99e7d151b9e4185fafece30cc6481734f9e9cc1c82d09115",
+      "digest": "sha256:bd9ede29c27274ff2dd1d1cd8d5c08b251672cd8f8fffe4fda99b0129e495d47",
+      "info": {
+        "dependencies": [
+          {
+            "name": "macOS (Apple Silicon)",
+            "provisioning": "host",
+            "purpose": "run",
+            "version": null
+          },
+          {
+            "name": "Xcode Command Line Tools (clang/linker)",
+            "provisioning": "host",
+            "purpose": "build",
+            "version": null
+          },
+          {
+            "name": "Rust",
+            "provisioning": "managed",
+            "purpose": "build",
+            "version": "1.95.0"
+          },
+          {
+            "name": "SolidCraft source archive and locked Cargo dependencies",
+            "provisioning": "download",
+            "purpose": "build",
+            "version": "8ba46e9e2181396a9b5903b98031399aef61cf26"
+          }
+        ],
+        "estimate_environment": "Apple M1 / macOS 15.8.1 / ato-cli 0.9.5-stg; stg clean-install measurement; D1/D2 cold preparation overlapped",
+        "estimated_cached_run_seconds": 11,
+        "estimated_first_run_seconds": 2614,
+        "label": "D2: ソースから GUI をビルド",
+        "notes": "CAD GUI で直方体を作成し、長さを 40 mm から 50 mm に編集、保存・終了・再起動後の 50 × 30 × 10 mm を確認。時間はこの検証環境での実測を基にした目安で、機材・回線で変わります。設計ファイルは表示された Saved data (home) 内に保存してください。 D2 は --allow-native-source-build --allow-unsigned-native が必要です。再実行時の build cache hit を確認。"
+      },
+      "revision": 1,
+      "source": "publisher",
+      "updated_at": "2026-11-17 17:13:23"
+    }
+  },
+  "hub_before": {
+    "run_count": 14,
+    "verification": {
+      "state": "verified",
+      "successful_runs": 14,
+      "last_run_at": "2026-11-17 13:54:11"
+    }
+  },
+  "hub_after": {
+    "run_count": 17,
+    "verification": {
+      "state": "verified",
+      "successful_runs": 17,
+      "last_run_at": "2026-11-17 17:11:27"
+    }
+  },
+  "stable_latest_unchanged": "v0.9.4",
+  "production_installer_unchanged_sha256": "sha256:267d41659d68b867fca2df52913589faaf6904412a45c4ad423b5ebf2f162923",
+  "evidence_note": "Receipt hashes refer to original bytes. Embedded receipts only replace isolated absolute paths; no receipt is reissued. Window receipt and manual CAD create/edit/save/reopen are separate evidence. Normal exit captures saved state into a successor Contract; initial D1, D2 and second fresh D2 share the original Contract.",
+  "raw_evidence_workspace_relative": ".tmp/gui095-e2lerkry",
+  "staging_lease": {
+    "owner": "solidcraft-gui-095-20261118",
+    "release": "solidcraft-gui-095-stg",
+    "versions_unchanged": true,
+    "released": true
+  },
+  "ci": {
+    "rust": {
+      "run_id": 44122815194,
+      "source": "8e35343f34eabdc9defbaf94f44e5901b643cf3d",
+      "jobs": [
+        {
+          "id": 134200067929,
+          "name": "workspace (macos-latest)",
+          "status": "completed",
+          "conclusion": "cancelled"
+        },
+        {
+          "id": 134200068019,
+          "name": "workspace (windows-latest)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "id": 134200070781,
+          "name": "workspace (ubuntu-24.04)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "id": 134200157459,
+          "name": "relay binaries (rebuilt from source)",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ],
+      "initial_failure": {
+        "test": "tests::q92_a_loopback_only_runner_serves_without_an_assertion_key",
+        "reason": "ConnectionReset (54) in unchanged apps/connected-realization-worker/src/lib.rs; isolated local rerun passed",
+        "local_log": ".tmp/solidcraft-gui/q92-retry.log"
+      },
+      "retries": [
+        {
+          "job": 134188366867,
+          "result": "cancelled before runner acquisition",
+          "reason": "hosted macOS arm64 capacity constraints"
+        },
+        {
+          "job": 134200067929,
+          "result": "cancelled before runner acquisition",
+          "reason": "hosted macOS arm64 capacity constraints"
+        }
+      ]
+    },
+    "cli": {
+      "run_id": 44122814953,
+      "jobs": [
+        {
+          "id": 134178467829,
+          "name": "cli (windows-latest)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "id": 134178468231,
+          "name": "cli (macos-latest)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "id": 134178468337,
+          "name": "cli (ubuntu-latest)",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ]
+    },
+    "local": {
+      "native_desktop_tests": 88,
+      "rust_fmt": "passed",
+      "rust_check": "passed",
+      "rust_clippy": "passed",
+      "pwa_unit_tests": 2944,
+      "pwa_typecheck": "passed",
+      "pwa_staging_build": "passed"
+    },
+    "pwa_auto_deploy": {
+      "run_id": 44124615063,
+      "conclusion": "failed before any steps due to billing/spending limit",
+      "fallback": "normal npm run deploy:staging from clean integrated stg under shared lease"
+    }
+  },
+  "committed_screenshots": {
+    "d2-cad-reopened.png": "sha256:516df922dff02d663419d8473827855d5bf4c5bad1bd43947f860ea70acd9e67",
+    "hub-guidance.png": "sha256:b3bc672eccbe60a24bd298c3b95d371b030860ed40498656a6e260d73098d633",
+    "d1-cad-reopened.png": "sha256:0d06e9461b5d0c82909c3de110fbd6534bdd0a228ab83739a116d7acd969f35a"
+  }
+}
