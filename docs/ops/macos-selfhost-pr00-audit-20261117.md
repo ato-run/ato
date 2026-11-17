@@ -242,3 +242,13 @@ Run `brew trust --formula ato-run/ato/ato-cli` or `brew trust ato-run/ato` to tr
 
 formula 自体は実在し v0.9.3 の arm64 sha256 がリリース tarball と一致するが、**Homebrew は第三者 tap を信頼しないと読み込まない**。公開手順・初回案内には `brew trust ato-run/ato` を明記する必要がある（システム変更を伴うため実機インストールは未実施）。
 
+
+### 9.7 Hub の実態（CAP-02 の前提）
+
+```
+$ curl -s https://api.ato.run/v1/hub/capsules
+{"items":[],"total":0}
+```
+
+公開 Capsule Hub は**現在0件**。したがって `capsules/ato/hello` が 404 なのは個別の欠落ではなく、参照先そのものが空である。CAP-02 の Hub 経路（取り込み成功 E2E）は、誰かが公開するまで実データで検証できない。初期ユーザーの価値は、ローカル `.capsule` と GitHub URL の2経路で成立させるのが現実的。
+
