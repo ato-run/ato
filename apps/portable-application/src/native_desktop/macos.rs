@@ -380,6 +380,7 @@ pub(crate) fn sandbox_plan(
 pub(crate) struct PreparedNative {
     pub extracted: ExtractedArtifact,
     pub entry: PathBuf,
+    pub entry_relative: String,
     pub signature: SignaturePreparation,
     pub sandbox: SandboxPlan,
     pub profile: String,
@@ -488,6 +489,7 @@ pub(crate) fn prepare(
     Ok(PreparedNative {
         extracted,
         entry,
+        entry_relative: physical_entry.to_owned(),
         signature,
         sandbox,
         profile,
@@ -1032,7 +1034,7 @@ pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure
         native: Some(VerificationNativeEvidence {
             artifact_ref: request.provenance.artifact_ref.clone(),
             materialized_tree_digest: prepared.extracted.tree_digest.clone(),
-            entry: request.descriptor.entry.clone(),
+            entry: prepared.entry_relative.clone(),
             signature_policy: request.descriptor.signature.as_str().to_owned(),
             signature_target: prepared.signature.target_kind.as_str().to_owned(),
             verified_target: prepared.signature.target.clone(),
@@ -1125,7 +1127,7 @@ fn start_terminal(
         native: Some(VerificationNativeEvidence {
             artifact_ref: request.provenance.artifact_ref.clone(),
             materialized_tree_digest: prepared.extracted.tree_digest.clone(),
-            entry: request.descriptor.entry.clone(),
+            entry: prepared.entry_relative.clone(),
             signature_policy: request.descriptor.signature.as_str().to_owned(),
             signature_target: prepared.signature.target_kind.as_str().to_owned(),
             verified_target: prepared.signature.target.clone(),
