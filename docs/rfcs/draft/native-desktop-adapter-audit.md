@@ -65,8 +65,9 @@ reported as complete.
   `CARGO_HOME` / `RUSTUP_HOME`.
 - Isolated build: the existing Seatbelt profile makes the source read-only and
   allows writes only to the Run-scoped target directory, scratch and cargo
-  caches; TCP egress is limited to 443. The child environment is cleared and
-  then set explicitly.
+  caches; outbound TCP is limited to HTTPS/443 plus DNS/53, with UDP/53 and
+  the macOS resolver socket also allowed. The child environment is cleared
+  and then set explicitly.
 - Output cache: `sha256(recipe version, source_sha256, commit, cargo_lock,
   toolchain, target, build_argv, entry)` under
   `$ATO_HOME/cache/native-build/<hash>`. A second Run reuses it without
@@ -119,7 +120,7 @@ wire protocol and no new receipt schema version:
 | terminal ready framing | ready is the declared `ready_output`, otherwise the first output; a program that prints nothing before its input is observable only if it declares a prompt it actually prints | timeout recorded as an unsatisfied observation |
 | PTY availability | a host that cannot allocate a pseudo terminal refuses the terminal route at launch instead of falling back to a pipe | `native_terminal_start_failed` |
 | `zip` entries compressed with bzip2 / zstd / lzma, and ZIP64 archives | stored and deflate are unpacked (PR3b); another method or the ZIP64 record is refused per archive/entry, never skipped | `native_format_extractor_unavailable` |
-| build egress host filter | SBPL grants tcp/443 only; the declared host is validated against `NATIVE_BUILD_EGRESS_HOSTS`, but enforcement is port-level | recorded in the receipt's `build_network` |
+| build egress host filter | SBPL grants TCP/443 plus DNS/53 and the macOS resolver socket; the declared host is validated against `NATIVE_BUILD_EGRESS_HOSTS`, but enforcement is port-level | the in-memory realization evidence describes `build_network`; the `/5` verification receipt does not carry this field |
 | Windows Adapter | stays fail-closed before launch because signature/sandbox cannot be enforced | `native_adapter_unavailable` family |
 | signature scope | macOS `codesign --verify --deep --strict` + `spctl --assess` only; no notarization ticket, stapling or revocation check | — |
 | state collection | each slot is delivered by path into a Run-scoped writable directory; the Adapter itself captures nothing when the Run stops (that belongs to the Run's state path) | — |
@@ -194,4 +195,34 @@ access.
   input; a remote or source D must meet the same shape.
 - Platform admission compares the descriptor's os/arch with host facts and does
   not refuse another D because an unselected D cannot run (unchanged).
+
+## 7. Source-build DNS investigation (2026-11-17)
+
+The handoff's unrestricted-network trial was not adopted. The existing
+`with_network(false).allow_tcp_connect_remote([443])` build policy stays in
+place. For remote-port grants only, the common Seatbelt renderer now permits
+the two literal mDNSResponder socket paths, metadata lookup on the resolver's
+parent paths (including the `/etc` and `/var` symlinks), and read access to the
+literal hosts/resolver configuration files. It does not grant read access to
+the whole `/private/var/run` directory or writes to those paths. A runtime
+policy with only loopback Ports receives none of these resolver permissions.
+
+On this host, unlike the earlier agent session, Seatbelt application succeeds.
+Using the failed Run's actual build profile, `/usr/bin/curl` reproduced exit 6
+against `https://index.crates.io/config.json`. Adding the socket rules alone
+still failed: the kernel reported denied metadata reads for `/etc` and `/var`.
+With those metadata grants and the resolved `resolv.conf` read, the same HTTPS
+request succeeded; HTTP/80 remained denied (curl exit 7). This is a resolver
+probe, not proof that the complete SolidCraft build or Contract succeeded.
+
+The socket/configuration boundary is also visible in Chromium's
+[macOS network profile](https://chromium.googlesource.com/chromium/src/+/cfbe56f17a3d7a3397a09d091252db6e3470223d/sandbox/policy/mac/network.sb).
+The local kernel denials and before/after probe are the evidence for this fix.
+
+Detected evidence gap: `NativeProvenance::build_cache` reaches the in-memory
+`RealizationEvidence::workspace`, but neither it nor `build_network` is in
+`VerificationNativeEvidence` schema `/5`. The original acceptance script
+claims a cache hit without checking one. A successful second Run alone must
+not be reported as cache-hit evidence; this needs separate evidence before
+M2 acceptance can be marked complete.
 
