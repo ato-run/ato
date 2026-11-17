@@ -155,3 +155,62 @@ UI-01 の含意: 「CLI が正本」の原則は既存構造と整合するが�
 3. **Kev の位置づけ**: P0 gate に含めるか、optional demonstration に留めるか（MOD-01 の PASS 定義が変わる）
 3b. **API の失敗契約**: 409 語彙のまま CLI で写像する（推奨・互換）か、429/402 + Retry-After を versioned endpoint で新設するか
 4. **実機 E2E の実行場所**: この sandbox では `ps` 不可。Terminal.app 実行を許容するか、exec 制限のない環境を用意するか
+
+## 9. 実測ログ（2026-11-17・macOS 15.8.1 / M1 / 16GiB）
+
+この節は §2 の RED 一覧に対する**その後の実測**であり、判定が変わったものだけを上書きする。
+
+### 9.1 GitHub URL → ローカルアプリ（新規に GREEN）
+
+```sh
+ato source fetch https://github.com/octocat/Spoon-Knife --out <dir>
+# commit d0dd1f61b33d64e29d8bc1372a94ef6a2fee76a9
+# tree   sha256:5b70fb337ee6f9e170f0abd195f08e13ec7ace5831d8dcdcb0ecc51945ea77d1  3 files / 1391 bytes
+
+ato form <dir>/source --runtime local --network denied --out <dir>/out
+# seal / runtime_verification / cleanup / publication = succeeded, fully_satisfied: true
+# attempt-record: K sha256:872f2b8e…, D sha256:c1bbb704…, outcome "verified"
+
+ato app add https://github.com/octocat/Spoon-Knife
+# instance linst_95805a78…, K sha256:2132c2ee…, D sha256:26facb1d…, bundle sha256:26ab765a…
+
+ato run <ATO_HOME>/sources/app-*/application.capsule --no-open --verification-receipt r.json
+# fully_satisfied: true / GET / 200 / body_sha256 2b391997… / target cli-local
+```
+
+同じ commit を `--reference` で再取得すると **tree digest と archive sha256 が一致**した（同じ入力→同じソース）。
+
+### 9.2 追加された CLI 面（いずれも実機で実行済み）
+
+| コマンド | 状態 | 実測 |
+|---|---|---|
+| `ato doctor [--json]` | 実装 | `ato.doctor/1`。この sandbox では `process-identity` が fail（`ps` 不可）を正しく申告して exit 1 |
+| `ato app list [--json]` | 実装 | `ato.local-instance-list/1`、state は `active_run` から導出 |
+| `ato app remove [--purge-data]` | 実装 | 既定はデータ保持（`<ATO_HOME>/removed/<id>/state`）、purge のみ削除 |
+| `ato app open` | 実装 | 停止中は型付き理由で拒否 |
+| `ato app add <file \| Hub ref \| GitHub URL>` | 実装 | file/Hub は同一解決器、GitHub URL は §9.1 |
+| `ato source fetch` | 実装 | commit 固定・上限・既存 verified-archive authority で展開 |
+
+### 9.3 判定が変わっていない RED（理由付き）
+
+| ID | 現状 | 理由 |
+|---|---|---|
+| MAC-01 | 一部 | doctor は実装。Homebrew は **tap の信頼が必要**（`brew info ato-run/ato/ato-cli` → "Refusing to load formula … from untrusted tap"）。配布物は ad-hoc 署名・未公証 |
+| CAP-01 / APP-01 | 一部 | list/remove/open は実装・テスト済み。start/stop/restart は sandbox が `/bin/ps` を拒否するため未判定（製品不具合ではない） |
+| CAP-02 | 一部 | Hub 参照の解決器は動作（`hub-not-found` を実 API から取得）。`capsules/ato/hello` は存在しない |
+| SRC-02/03 | 未 | LLM 生成 D は公式 API の認証・同意・予算の判断待ち。409 を 429 に変えるかの契約判断も未 |
+| MOD-01/02 | 未 | `ato model install` 未実装。Kev の head.pt は provenance と SHA 不一致 |
+| UI-01 | 未 | PWA/Desktop にローカル専用画面なし。`__ATO_DESKTOP__` 非注入 |
+| SEC-01 | 一部 | GitHub 取込は既存 verified-archive の containment に依存。悪性 fixture は未追加 |
+| REL-01 | 未 | 署名・公証・再現ハーネス未 |
+
+### 9.4 レビュー用 PR
+
+- PR-00 監査: #1871
+- PR-02 `app list/open/remove` + doctor: #1876
+- PR-03 `app add`（file/Hub）: #1877
+- PR-04 `source fetch`: #1878
+- PR-05 `app add <github-url>`（静的サイト）: #1880
+
+すべて Draft。CI の macOS `cli` は pass、ubuntu/windows/workspace の赤は dev 既存赤（`ato-adapter-pty` の Windows 非対応、`workspace_control`/`derivation_selection`）。
+
