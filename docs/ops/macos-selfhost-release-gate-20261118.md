@@ -168,6 +168,27 @@ outcomes:      seal=succeeded, runtime_verification=succeeded, cleanup=succeeded
   （`capsule.toml`）を持つソースで `ato pack` する経路になる。
 - **LLM生成Dが必要なOSS**の経路は未測定（下記「阻害要因」）。
 
+## 4b. Runtime Network（hosted）経路の実測 — 2026-11-18
+
+`ato form --runtime-network` を staging に対して実行し、requester 側の経路がどこまで通るかを確認した。
+
+```
+$ ato form samples/interop-static-k --runtime-network \
+    --api https://staging.api.ato.run --token-file <token> --work-root .tmp/rn-work
+satisfy 01M7NMRSN8HYEW7NRKKDHAK7GK (search search_e9deb0d18f71b219b17d96b8db091332): 0 candidate(s) admissible
+error: ... /v1/runtime-network/satisfy/01M7NMRSN8HYEW7NRKKDHAK7GK: connection reset by peer
+```
+
+- **search の作成と satisfy の要求までは成功**（staging が search id と satisfy id を発行）
+- **admissible な候補が 0** = このアカウントに **登録済み Runtime が無い**ため、実行できるホストが存在しない
+- 続くポーリングは接続リセット（transient）
+
+### 意味すること
+- hosted 経路（受入条件4の「Runtime Network 上で検証・実行」）は、**アカウントに Runtime を登録**して初めて成立する。
+  登録は `ato runtime-network serve` 側の運用で、この端末単独では完結しない。
+- ローカル経路（`ato form <dir>`）は既に **PASS**（本doc §4）。初期ユーザーの単独価値はローカル経路で成立している。
+- したがって hosted 経路は「未測定」ではなく「**Runtime 未登録により候補0**」という具体的な状態として記録する。
+
 ## 4. ソースから実行の阻害要因（要判断）
 
 - 既知D経路は実測済み（GitHub URL → source fetch → form → pack → run → receipt）
