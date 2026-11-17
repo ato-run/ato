@@ -194,12 +194,18 @@ pub(crate) fn generate_sbpl_profile(policy: &SandboxPolicy) -> String {
         .copied()
         .filter(|port| *port != 0)
         .collect::<Vec<_>>();
+    let remote_ports = policy
+        .allowed_connect_remote_tcp_ports
+        .iter()
+        .copied()
+        .filter(|port| *port != 0)
+        .collect::<Vec<_>>();
     if policy.allow_network {
         profile.push_str("\n; Network access\n");
         profile.push_str("(allow network-outbound)\n");
         profile.push_str("(allow network-inbound)\n");
         profile.push_str("(allow system-socket)\n");
-    } else if !bind_ports.is_empty() || !connect_ports.is_empty() {
+    } else if !bind_ports.is_empty() || !connect_ports.is_empty() || !remote_ports.is_empty() {
         profile.push_str("\n; Port-scoped network access\n");
         profile.push_str("(allow system-socket)\n");
         // Inbound is scoped to the loopback host: the declared Port is the
@@ -218,6 +224,19 @@ pub(crate) fn generate_sbpl_profile(policy: &SandboxPolicy) -> String {
             profile.push_str(&format!(
                 "(allow network-outbound (remote tcp \"localhost:{port}\"))\n"
             ));
+        }
+        // A build reaches the crate and source hosts over HTTPS. Seatbelt is
+        // port-scoped only, so the grant is 443 to any host; the declaration
+        // already bounds the vocabulary, and a hostname must resolve before
+        // HTTPS is attempted, so the resolver ports travel with it.
+        for port in &remote_ports {
+            profile.push_str(&format!(
+                "(allow network-outbound (remote tcp \"*:{port}\"))\n"
+            ));
+        }
+        if !remote_ports.is_empty() {
+            profile.push_str("(allow network-outbound (remote udp \"*:53\"))\n");
+            profile.push_str("(allow network-outbound (remote tcp \"*:53\"))\n");
         }
     }
 
@@ -458,6 +477,22 @@ mod tests {
             profile.contains("(allow network-outbound (remote tcp \"localhost:43124\"))"),
             "outbound connect must name the loopback host:\n{profile}"
         );
+    }
+
+    /// A source build reaches the crate and source hosts its declaration
+    /// names, and a hostname must resolve before HTTPS is attempted. Seatbelt
+    /// is port-scoped only, so the build grant is 443 to any host plus the
+    /// resolver ports; unrestricted network stays denied.
+    #[test]
+    fn a_build_egress_grant_renders_the_port_and_the_resolver() {
+        let policy = SandboxPolicy::new()
+            .with_network(false)
+            .allow_tcp_connect_remote([443]);
+        let profile = generate_sbpl_profile(&policy);
+        assert!(profile.contains("(allow network-outbound (remote tcp \"*:443\"))"));
+        assert!(profile.contains("(allow network-outbound (remote udp \"*:53\"))"));
+        assert!(profile.contains("(allow network-outbound (remote tcp \"*:53\"))"));
+        assert!(!profile.contains("\n(allow network-outbound)\n"));
     }
 
     #[test]
