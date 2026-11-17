@@ -106,6 +106,27 @@ checkpoint     = {weights: lora, base_revision: dc7cdfe2…, head_dim: 256, temp
 - `temperature 2.3511` は model card の T=2.35 と一致
 - **ネットワークアクセスなし**: 参照ランタイムが Hub id で解決する Qwen base を検証済みローカルディレクトリへ差し替え
 
+### 2b. 受入条件2を release binary で再検証（2026-11-18）
+
+デバッグビルドではなく **release プロファイルの binary**（`ato 0.9.5`）で、まっさらな ATO_HOME に
+1.8 GB をダウンロードし、digest 照合と推論まで通した。
+
+```
+$ ./target/release/ato model install kev-0.8b --home <fresh>
+kev-0.8b: 1835330682 of 1835330682 bytes downloaded into <fresh>/models/kev-0.8b
+real 10m32.144s
+
+$ ./target/release/ato model status --home <fresh> --verify --json
+installed True | bytes 1835330682 | all verified True
+
+$ ./target/release/ato model score --home <fresh> --python <venv>/bin/python --request '<json>' --json
+choice: billing | conf: 0.6645 | backend: mlx | temp: 2.3511
+```
+
+- **release binary でも 12 asset / 1,835,330,682 bytes を完全に照合**（`all verified True`）
+- 推論も動作し、`temperature 2.3511`（model card の T=2.35）を `head.pt` から読み出している
+- 所要時間 10分32秒（1.8 GB、ネットワーク次第）
+
 ### ローカル決定サーバ
 ```
 $ ato model serve --home <ATO_HOME> --python <venv>/bin/python --port 8202
