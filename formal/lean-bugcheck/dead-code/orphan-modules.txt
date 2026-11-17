@@ -1,0 +1,14 @@
+extensions/providers/nacelle/src/launcher/dev.rs
+extensions/providers/nacelle/src/launcher/resolver.rs
+extensions/providers/nacelle/src/manager/ebpf_enforcer.rs
+extensions/providers/nacelle/src/manager/enforcement_guard.rs
+extensions/providers/nacelle/src/manager/startup_gc.rs
+extensions/providers/nacelle/src/manager/supervisor_mode.rs
+extensions/providers/nacelle/src/tsnet.rs
+scripts/acceptance/coverage/adaptive-100-preflight.rs
+scripts/acceptance/coverage/adaptive-100-requester.rs
+scripts/acceptance/coverage/exploration-gate-plan.rs
+scripts/acceptance/coverage/exploration-gate-requester.rs
+scripts/acceptance/coverage/exploration-preflight.rs
+scripts/acceptance/coverage/state-verification-retained.rs
+scripts/acceptance/proposal/execution/project.rs
