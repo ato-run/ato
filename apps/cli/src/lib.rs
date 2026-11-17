@@ -16,6 +16,7 @@ mod mcp_stdio;
 mod model_cache;
 mod object_transport;
 mod portable_dependency;
+mod ui;
 pub mod workspace;
 mod workspace_control;
 pub mod zip_store;
@@ -117,7 +118,9 @@ enum Commands {
     /// Continue a branch or create a new future from a historical Record.
     Resume(ResumeArgs),
     /// Quiesce the active Run and atomically seal its branch head.
-    Stop { capsule: String },
+    Stop {
+        capsule: String,
+    },
     /// Materialize one selected point into a portable .capsule bundle.
     Encap(EncapArgs),
     /// Compile an ato.capsule/2 source directory into a portable Application.
@@ -200,6 +203,12 @@ enum Commands {
     ///
     /// Read-only: it never downloads a model, starts a Run, or changes
     /// configuration. A failing check is a reason not to promise the feature.
+    /// Open a loopback-only management page for the local Instance library.
+    ///
+    /// The page is a thin front-end over this same CLI: it lists Instances and
+    /// starts or stops them by running the corresponding subcommands, so the
+    /// CLI stays the single authority for state.
+    Ui(ui::UiArgs),
     Doctor(DoctorArgs),
     /// Report this binary's build identity (version, commit, profile).
     ///
@@ -1100,6 +1109,7 @@ pub fn run() -> Result<()> {
     match Cli::parse().command {
         Commands::Version { json } => version(json),
         Commands::Doctor(args) => doctor(args),
+        Commands::Ui(args) => ui::serve(args),
         Commands::Init(args) => init(args),
         Commands::Resume(args) => resume(args),
         Commands::Stop { capsule } => stop(&capsule),
