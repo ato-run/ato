@@ -335,6 +335,13 @@ pub fn build(
 
     let target_dir = scratch.join("target");
     let environment = build_environment(toolchain, &target_dir, &scratch);
+    // Linkers and build scripts use these paths directly; exporting a missing
+    // TMPDIR makes clang fail only after a potentially long compilation.
+    for directory in [scratch.join("home"), scratch.join("tmp")] {
+        fs::create_dir_all(&directory).map_err(|error| {
+            BuildFailure::Io(format!("could not create {}: {error}", directory.display()))
+        })?;
+    }
     let args = build_command(&build.build, &toolchain.cargo)
         .into_iter()
         .skip(1)
@@ -490,6 +497,11 @@ mod tests {
     impl BuildExecutor for FakeCargo {
         fn run(&self, execution: &BuildExecution<'_>) -> Result<(), BuildFailure> {
             self.calls.set(self.calls.get() + 1);
+            for name in ["HOME", "TMPDIR"] {
+                let directory = Path::new(&execution.environment[name]);
+                assert!(directory.starts_with(execution.scratch));
+                fs::write(directory.join("build-tool-probe"), b"scratch is usable").unwrap();
+            }
             if self.fail {
                 return Err(BuildFailure::Failed("cargo exited with 101".to_owned()));
             }
@@ -616,6 +628,30 @@ mod tests {
         assert_eq!(second.output_digest, first.output_digest);
         assert_eq!(second.cache_key, first.cache_key);
         assert_eq!(fs::read(&second.entry).unwrap(), b"built binary");
+    }
+
+    #[test]
+    fn an_unusable_build_temp_directory_is_refused_before_cargo_starts() {
+        let scratch = tempfile::tempdir().unwrap();
+        let home = scratch.path().join("home");
+        let build = source_build(COMMIT, &sha(b"Cargo.lock bytes"));
+        let source = archive(scratch.path(), COMMIT, "Cargo.lock bytes");
+        let working = scratch.path().join("native-build/scratch");
+        fs::create_dir_all(&working).unwrap();
+        fs::write(working.join("tmp"), b"not a directory").unwrap();
+        let executor = FakeCargo::new();
+        let error = build_with(
+            &build,
+            &home,
+            scratch.path(),
+            &toolchain(&home),
+            &source,
+            &executor,
+        )
+        .unwrap_err();
+        assert!(matches!(error, BuildFailure::Io(_)), "{error}");
+        assert_eq!(executor.calls.get(), 0);
+        assert!(!home.join(BUILD_CACHE_DIR).exists());
     }
 
     #[test]
