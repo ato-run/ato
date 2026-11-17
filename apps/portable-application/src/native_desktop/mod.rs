@@ -47,8 +47,9 @@ pub(crate) mod remote;
 /// The isolated, content-addressed build of a source route.
 #[cfg(target_os = "macos")]
 pub(crate) mod source_build;
-/// The declared terminal exchanges of a Terminal surface.
-#[cfg(target_os = "macos")]
+/// The declared terminal exchanges of a Terminal surface. Pure framing tests
+/// run on every host; native execution remains macOS-only.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) mod terminal;
 /// The managed toolchain a source build needs: policy, layout and installer.
 pub(crate) mod toolchain;
@@ -93,6 +94,7 @@ pub(crate) fn artifact_refusal(error: anyhow::Error) -> NativeRefusal {
 pub(crate) enum NativeArtifactPayload {
     /// A packed archive: the bundle's own blob, or a verified remote fetch on
     /// disk.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Archive(NativeArchiveSource),
     /// A staged directory a source build produced in this Run. The declared
     /// entry is already laid out inside it.
@@ -103,6 +105,8 @@ pub(crate) enum NativeArtifactPayload {
 /// Where one archive's bytes live.
 pub(crate) enum NativeArchiveSource {
     /// The bundle closure's blob, already verified by the delivery path.
+    /// Other native hosts currently refuse admission before unpacking it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Memory(Vec<u8>),
     /// A file this Run fetched and verified.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
