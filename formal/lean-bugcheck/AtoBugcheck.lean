@@ -2470,3 +2470,311 @@ theorem spec_code_is_injective : Function.Injective specCode := by
   cases a <;> cases b <;> simp_all [specCode]
 
 end HostedFailureCode
+
+
+/-! ## 34. lib/objects/src/portable_bundle.rs :: version/profile dispatch -/
+namespace BundleDispatch
+
+def profileV3 : String := "ato.portable-application/1"
+def profileV4 : String := "ato.portable-application/2"
+
+/-- bundle.rs::validate_shape sees only index.version. -/
+def acceptsV2 (version : Nat) : Bool := version == 2
+
+/-- portable_bundle.rs::validate_shape_and_payloads ties version to profile. -/
+def acceptsPortable (version : Nat) (profile : Option String) : Bool :=
+  match version with
+  | 3 => profile == some profileV3
+  | 4 => profile == some profileV4
+  | _ => false
+
+/-- v3 refuses the v4-only transport manifest and Instance snapshot. -/
+def acceptsV3Shape (profile : Option String) (portability : Bool) (snapshot : Bool) : Bool :=
+  acceptsPortable 3 profile && !portability && !snapshot
+
+/-- v4 requires the dependency transport manifest. -/
+def acceptsV4Shape (profile : Option String) (portability : Bool) : Bool :=
+  acceptsPortable 4 profile && portability
+
+theorem v2_and_portable_are_disjoint (version : Nat) (profile : Option String) :
+    acceptsV2 version = true -> acceptsPortable version profile = false := by
+  intro h
+  have hv : version = 2 := by simpa [acceptsV2] using h
+  simp [acceptsPortable, hv]
+
+theorem v3_requires_the_v3_profile (profile : Option String) :
+    acceptsPortable 3 profile = true -> profile = some profileV3 := by
+  intro h; simpa [acceptsPortable] using h
+
+theorem v4_requires_the_v4_profile (profile : Option String) :
+    acceptsPortable 4 profile = true -> profile = some profileV4 := by
+  intro h; simpa [acceptsPortable] using h
+
+theorem other_versions_are_refused (version : Nat) (profile : Option String)
+    (h3 : version ≠ 3) (h4 : version ≠ 4) :
+    acceptsPortable version profile = false := by
+  unfold acceptsPortable
+  split
+  . contradiction
+  . contradiction
+  . rfl
+
+theorem unknown_version_is_unsupported (version : Nat)
+    (hv3 : version ≠ 3) (hv4 : version ≠ 4) :
+    acceptsPortable version none = false :=
+  other_versions_are_refused version none hv3 hv4
+
+theorem v3_refuses_instance_snapshot (profile : Option String) (portability : Bool) :
+    acceptsV3Shape profile portability true = false := by
+  simp [acceptsV3Shape]
+
+theorem v4_refuses_without_the_transport_manifest (profile : Option String) :
+    acceptsV4Shape profile false = false := by
+  simp [acceptsV4Shape]
+
+/-- Positive controls: a matching pair is accepted, so the model is not
+    vacuously strict. -/
+theorem v3_accepts_its_own_profile :
+    acceptsV3Shape (some profileV3) false false = true := by decide
+
+theorem v4_accepts_its_own_profile :
+    acceptsV4Shape (some profileV4) true = true := by decide
+
+/-- Cross-labelling is refused in both directions. -/
+theorem v3_shape_refuses_the_v4_profile :
+    acceptsV3Shape (some profileV4) false false = false := by decide
+
+theorem v4_shape_refuses_the_v3_profile :
+    acceptsV4Shape (some profileV3) true = false := by decide
+
+end BundleDispatch
+
+/-! ## 35. lib/objects/src/portable_bundle.rs :: sorted arrays and payload digests -/
+namespace PortableShape
+
+/-- portable_bundle.rs::is_strictly_sorted, as a boolean over Nat references
+    (the real code compares the canonical sha256 references, whose byte order is
+    the digest order). -/
+def strictlySorted : List Nat -> Bool
+  | [] => true
+  | [_] => true
+  | a :: b :: t => decide (a < b) && strictlySorted (b :: t)
+
+theorem strictly_sorted_rejects_a_duplicate (a : Nat) (t : List Nat) :
+    strictlySorted (a :: a :: t) = false := by
+  simp [strictlySorted]
+
+theorem strictly_sorted_orders_the_first_pair (a b : Nat) (t : List Nat) :
+    strictlySorted (a :: b :: t) = true -> a < b := by
+  intro h
+  simp [strictlySorted] at h
+  exact h.1
+
+/-- PortableApplicationBundle::descriptor / payload_bytes binary-search the array
+    that validate_shape_and_payloads has already required to be strictly sorted.
+    This linear model is the specification those searches implement. -/
+def search (x : Nat) : List Nat -> Option Nat
+  | [] => none
+  | a :: t => if a == x then some a else search x t
+
+theorem search_complete (x : Nat) (l : List Nat) : x ∈ l -> search x l = some x := by
+  intro h
+  induction l with
+  | nil => exact absurd h (by simp)
+  | cons a t ih =>
+    by_cases ha : a = x
+    · subst ha; simp [search]
+    · have hx : x ∈ t := by
+        rcases List.mem_cons.mp h with h' | h'
+        · exact absurd h'.symm ha
+        · exact h'
+      have hne : (a == x) = false := by simpa using ha
+      simp [search, hne]
+      exact ih hx
+
+/-- With sortedness the found element is the searched one, so the search may not
+    silently return a neighbour (the reason unsorted arrays are rejected). -/
+theorem search_is_the_searched_element (x y : Nat) (l : List Nat)
+    (hk : ∀ z, z ∈ l -> x = z -> False) (h : search x l = some y) : y = x := by
+  induction l with
+  | nil => simp [search] at h
+  | cons a t ih =>
+    by_cases ha : a = x
+    · subst ha
+      simp [search] at h
+      exact h.symm
+    · have hne : (a == x) = false := by simpa using ha
+      simp [search, hne] at h
+      exact ih (fun z hz hx => hk z (List.mem_cons_of_mem _ hz) hx) h
+
+/-- portable_bundle.rs accepts a payload only when both the declared length and
+    the SHA-256 digest match. -/
+theorem accepted_payload_has_the_declared_length (len size digest actual : Nat)
+    (h : ((len == size) && (actual == digest)) = true) : len = size := by
+  simp only [Bool.and_eq_true] at h
+  simpa using h.1
+
+theorem accepted_payload_has_the_declared_digest (len size digest actual : Nat)
+    (h : ((len == size) && (actual == digest)) = true) : actual = digest := by
+  simp only [Bool.and_eq_true] at h
+  simpa using h.2
+
+theorem a_wrong_digest_is_refused (len size digest actual : Nat)
+    (h : actual ≠ digest) :
+    ((len == size) && (actual == digest)) = false := by
+  have hd : (actual == digest) = false := by simpa using h
+  simp [hd]
+
+/-- The two inclusion checks validate_portable_application_closure performs
+    (declared subset of reachable, reachable subset of declared) express set
+    equality. -/
+theorem both_inclusions_mean_equality (a b : List Nat)
+    (hab : ∀ x, x ∈ a -> x ∈ b) (hba : ∀ x, x ∈ b -> x ∈ a) :
+    ∀ x, x ∈ a ↔ x ∈ b :=
+  fun x => ⟨hab x, hba x⟩
+
+end PortableShape
+
+/-! ## 36. lib/objects/src/bundle.rs :: v2 closure visited kinds -/
+namespace BundleClosureV2
+
+/-- Refs are natural numbers. residual x = some g means the object at x is a
+    canonical computation object whose residual reference is g; the object at g
+    may itself be a computation object. out x is what a registered
+    ComputationReferences implementation emits as ObjectLink::Computation. -/
+structure Store where
+  residual : Nat -> Option Nat
+  out : Nat -> List Nat
+
+/-- bundle.rs::closure. One result map keyed by content reference serves both
+    ObjectLink::Content and ObjectLink::Computation, and the Computation arm
+    starts with: if result.contains_key(&content) { continue; } -/
+def closureBug (fuel : Nat) (store : Store) (queue seen : List Nat) : List Nat :=
+  match fuel with
+  | 0 => seen
+  | fuel + 1 =>
+    match queue with
+    | [] => seen
+    | x :: rest =>
+      if x ∈ seen then
+        closureBug fuel store rest seen
+      else
+        match store.residual x with
+        | some g => closureBug fuel store (rest ++ store.out x) (g :: x :: seen)
+        | none => closureBug fuel store rest (x :: seen)
+
+/-- The traversal the closure invariant needs: "already walked as a computation"
+    and "already present as a content object" are separate sets, so a residual
+    that happens to be another computation's content reference cannot hide that
+    computation's own outgoing references. Returns (walked, content). -/
+def closureFixed (fuel : Nat) (store : Store) (queue walked content : List Nat) :
+    List Nat × List Nat :=
+  match fuel with
+  | 0 => (walked, content)
+  | fuel + 1 =>
+    match queue with
+    | [] => (walked, content)
+    | x :: rest =>
+      if x ∈ walked then
+        closureFixed fuel store rest walked content
+      else
+        match store.residual x with
+        | some g =>
+          closureFixed fuel store (rest ++ store.out x) (x :: walked) (g :: content)
+        | none => closureFixed fuel store rest (x :: walked) content
+
+def reachedFixed (fuel : Nat) (store : Store) (roots : List Nat) : List Nat :=
+  let pair := closureFixed fuel store roots [] []
+  pair.1 ++ pair.2
+
+/-- Witness: object 0 has residual 1 and its extractor names computation 1;
+    object 1 has residual 2. The true closure of 0 is {0, 1, 2}. -/
+def bugResidual : Nat -> Option Nat
+  | 0 => some 1
+  | 1 => some 2
+  | _ => none
+
+def bugOut : Nat -> List Nat
+  | 0 => [1]
+  | _ => []
+
+def bugStore : Store := { residual := bugResidual, out := bugOut }
+
+theorem bug_store_shapes :
+    bugStore.residual 0 = some 1 ∧ bugStore.residual 1 = some 2 := by decide
+
+/-- The code's traversal never walks computation 1, because its content
+    reference was already inserted as 0's residual. Object 2 (1's residual) is
+    therefore absent although it is reachable. -/
+theorem v2_closure_drops_a_reachable_object_BUG :
+    (2 ∈ closureBug 8 bugStore [0] []) = false := by decide
+
+theorem fixed_closure_keeps_it :
+    (2 ∈ reachedFixed 8 bugStore [0]) = true := by decide
+
+/-- import_bundle accepts exactly when the declared set and the traversed set are
+    equal in both directions. -/
+def bundleAccepts (declared reachable : List Nat) : Bool :=
+  (reachable.all fun x => x ∈ declared) && (declared.all fun x => x ∈ reachable)
+
+theorem the_short_closed_bundle_is_accepted :
+    bundleAccepts [0, 1] (closureBug 8 bugStore [0] []) = true := by decide
+
+/-- The invariant OBJECT_BUNDLE.md states for import ("complete closure"): the
+    accepted closure is closed under the reference relation. -/
+def closedOn (nodes : List Nat) (store : Store) (s : List Nat) : Bool :=
+  nodes.all fun x =>
+    if x ∈ s then
+      (match store.residual x with
+        | some g => g ∈ s
+        | none => true) &&
+      (store.out x).all fun y => y ∈ s
+    else true
+
+theorem accepted_bundle_is_not_closed_BUG :
+    closedOn [0, 1, 2] bugStore (closureBug 8 bugStore [0] []) = false := by decide
+
+theorem the_fixed_traversal_is_closed :
+    closedOn [0, 1, 2] bugStore (reachedFixed 8 bugStore [0]) = true := by decide
+
+theorem the_fixed_traversal_still_covers_the_buggy_one :
+    (closureBug 8 bugStore [0] []).all (fun x => x ∈ reachedFixed 8 bugStore [0]) = true := by
+  decide
+
+end BundleClosureV2
+
+/-! ## 37. lib/objects/src/portable_bundle.rs :: declared size bounds -/
+namespace BundleBounds
+
+/-- portable_bundle.rs::MAX_BUNDLE_BYTES. -/
+def maxBundleBytes : Nat := 768 * 1024 * 1024
+/-- portable_bundle.rs::MAX_DECODED_BYTES. -/
+def maxDecodedBytes : Nat := 256 * 1024 * 1024
+/-- the 512 MiB portable OCI transport bound the comment names. -/
+def maxArchiveBytes : Nat := 512 * 1024 * 1024
+/-- portable_bundle.rs::MAX_OCI_ARCHIVE_BASE64_BYTES. -/
+def maxArchiveBase64 : Nat := maxArchiveBytes / 3 * 4 + 4
+
+/-- canonical base64 length of n bytes. -/
+def base64Len (n : Nat) : Nat := 4 * ((n + 2) / 3)
+
+theorem archive_bound_is_the_base64_of_512_mib :
+    maxArchiveBase64 = base64Len maxArchiveBytes := by decide
+
+theorem a_full_archive_leaves_less_than_64_mib_of_base64 :
+    maxArchiveBase64 + base64Len (64 * 1024 * 1024) > maxBundleBytes := by decide
+
+theorem both_declared_maxima_do_not_fit :
+    base64Len maxArchiveBytes + base64Len maxDecodedBytes > maxBundleBytes := by decide
+
+theorem the_remaining_object_budget :
+    maxBundleBytes - maxArchiveBase64 = 89478484 := by decide
+
+/-- So an offline bundle that carries a maximum-size OCI archive cannot also
+    carry a maximum-size object: the per-part limits are not jointly reachable
+    and ensure_bundle_size refuses the envelope first. -/
+theorem per_part_limits_are_not_jointly_attainable :
+    maxArchiveBase64 + base64Len (64 * 1024 * 1024) > maxBundleBytes ∧
+    maxArchiveBase64 < maxBundleBytes := by decide
+
+end BundleBounds

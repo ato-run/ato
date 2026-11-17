@@ -89,6 +89,15 @@ rustc --edition 2024 "$HERE/repro/instance_lease.rs" \
   -L "dependency=$TARGET_DIR/debug/deps" -o "$OUT/instance-lease"
 mkdir -p "$OUT/instance"
 OUT="$OUT/instance" "$OUT/instance-lease"
+echo '== portable capsule v2/v3/v4 closure, dispatch and bounds'
+for repro in bundle_v2_closure bundle_v3_shape bundle_v3_closure; do
+  rustc --edition 2024 "$HERE/repro/$repro.rs" \
+    --extern "ato_objects=$TARGET_DIR/debug/libato_objects.rlib" \
+    --extern "ato_computation=$TARGET_DIR/debug/libato_computation.rlib" \
+    --extern "ato_portable_application=$TARGET_DIR/debug/libato_portable_application.rlib" \
+    -L "dependency=$TARGET_DIR/debug/deps" -o "$OUT/$repro"
+  "$OUT/$repro"
+done
 echo '== rejected resume overwrites the workspace snapshot'
 ATO_CLI="${ATO_CLI:-$TARGET_DIR/debug/ato}"
 if [ ! -x "$ATO_CLI" ]; then

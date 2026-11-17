@@ -336,7 +336,7 @@ Materializer/Instance、ato-api/ato-pwa/Desktop/配信）を対象に、棚卸�
 | 優先 | 機能 | 状態（今回の到達点） | 未検査 / 次の範囲 |
 |---|---|---|---|
 | 高 | Run の記録とローカル保存 (`lib/objects`, `lib/local-execution`) | **R1/R2/R3 を確定**（実コード再現あり）。crash 復旧・並行の候補は R4/R5 | 電源断の実測、ENOSPC/EIO、真の並行実行 |
-| 高 | Portable Capsule v2/v3/v4 (`lib/objects`, `apps/portable-application`) | 調査中（結果は次コミットで追記） | hosted import の実環境、v4 の実 Run |
+| 高 | Portable Capsule v2/v3/v4 (`lib/objects`, `apps/portable-application`) | **P1 を確定**（v2 closure が Content/Computation を混同し、宣言 closure ≠ 真の closure のまま受理）。v3/v4 の dispatch・closure・digest は実コードで拒否を確認 | hosted import の実環境、Hosted v4 roundtrip |
 | 高 | Run admission と Contract receipt | 第2回で一致を確認。今回 **B13**（ato-api の受理 schema が /1 固定で Rust の /3 を拒否）を追加 | 実 hosted import での再現、Control Plane 側の retry 判断 |
 | 高 | Formation の source 取得・展開 (`lib/formation`) | U1 の判定を維持（到達経路なし・資源の非対称のみ） | 埋め込み利用者、zstd window |
 | 高 | Model Set の受信・キャッシュ (`lib/runtime-attempt/src/data_plane`) | 第2回で範囲/quota の性質と B9 候補を確認 | 配信経路の上限、同時実行 |
@@ -344,7 +344,7 @@ Materializer/Instance、ato-api/ato-pwa/Desktop/配信）を対象に、棚卸�
 | 中 | Semantic Core、Kernel、Composition | 第2回で B2/B3/B8 と性質を確認。今回の残りなし | 実評価スタック、C1/C2/C10 |
 | 中 | CLI lifecycle、Materializer、local Instance | **B11/B12 を確定**。候補 6 件（下記） | durable Run 稼働中の挙動、vm-snapshot 本体 |
 | 中 | Coordinator、Formation Worker、Hosted Runner | **H1-H4 を確定**。Coordinator（ato-api）は repo 外で未検査。H5-H8 候補 | ato-api の fence/retry/reaping、実 staging 6 slot |
-| 中 | ato-api、ato-pwa、Desktop、配信 | ato-api は B13 と境界 probe、PWA は実行テスト 178 件、Desktop は IPC/navigation を確認。配信 2 repo は**未読** | PWA 875 ファイルの残り、ato-edge/usercontent、Desktop cargo test |
+| 中 | ato-api、ato-pwa、Desktop、配信 | ato-api は B13 と境界 probe、PWA は実行テスト 178 件、Desktop は IPC/navigation、配信 2 repo は manifest 受理境界とテスト 69 件を確認 | PWA 875 ファイルの残り、Desktop cargo test、ato-api 109 route の残り |
 
 ### B11 — `[encap] materializers`（realization 要求）が sealed identity に入る（未修正・F2 の確定）
 
@@ -445,6 +445,65 @@ ack route は `zValidator` なので /3 は 400 になり、validator は ack �
 影響は fail closed（誤って verified にはならない）だが、TLS requirement を持つ portable app は hosted で verified に到達できない。
 AGENTS.md の「CLI と ato.run は同一 schema の receipt を発行し」に対する Detected mismatch。
 証拠はコード読解のみ（ato-api に node_modules が無く zod を実行できない）。未検証: 実 hosted import での再現、ato-api に /3 以降を受ける別経路があるか。
+### P1 — v2 bundle の closure が Content と Computation を混同し、閉じていない closure を受理する（未修正）
+
+`lib/objects/src/bundle.rs` の `closure`（527-582）は visited を 1 つの `result` map で表し、
+`ObjectLink::Computation` の処理で `if result.contains_key(&content) { continue; }` する（558-562）。
+ある computation の residual が別 computation の `content_ref` と一致すると、後者は Content として先に登録され、
+Computation として訪れた時点で skip される。その computation は解決されず、子孫が closure に入らない。
+`import_bundle`（494-515）は declared と **traversed** の両方向一致しか見ないため、この truncated closure を受理する。
+
+- 実コード再現: `repro/bundle_v2_closure.rs`（公開 API で export → import。`run.sh` で実行）。
+  観測: exported objects = 2（本来 3）、child kind = Content、import 受理、子の residual が destination に無い。
+  対照として子を root に export すると 2 件（子 + 孫）になり、走査自体は壊れていない。
+- Lean: `BundleClosureV2.v2_closure_drops_a_reachable_object_BUG` / `accepted_bundle_is_not_closed_BUG` /
+  修正版 `the_fixed_traversal_is_closed` / `fixed_closure_keeps_it`。
+- 到達条件: 公開 API では再現可。in-tree で `ObjectLink::Computation` を出すのは `ComposeReferences` だけで、
+  compose root の residual（`CompositeResidual`）は `ComputationObjectWire` と schema が交わらないため、通常の authoring では不達（B2 と同格の潜在）。
+  細工した compose + authoring 混在 graph では、BFS 順（`BTreeMap<NodeId>` 昇順）で Content が先に入り得る。
+- 影響: `OBJECT_BUNDLE.md` の「Import verifies … complete closure」が破れる。identity の改ざん・権限昇格ではない。
+  受理後に closure を辿ると `NotFound` になり、Run が後段で失敗する遅延失敗。
+- 未検証: 実 `capsule.toml` から上記 graph を作る手順、hosted 経路での観測、`MAX_BUNDLE_OBJECTS` 近傍。
+
+### v2/v3/v4 の受理境界（否定を含む）
+
+- dispatch: version と profile は 1:1 で、取り違え 15 ケースを実コードで拒否確認（`repro/bundle_v3_shape.rs`）。
+  拒否は digest を見る前の段で起きるため、後段の digest 失敗に救われているだけではない。
+- v3 closure: declared == reachable を両方向で検査（未到達 → `UnreachableObject`、未宣言 → `IncompleteClosure`、
+  未知 schema → `MissingExtractor`）。`repro/bundle_v3_closure.rs` で確認。
+- payload の長さ/digest、厳密昇順 → 重複排除、root（contract_ref / derivation_ref）の再計算一致を確認（Lean `PortableShape`）。
+- C1: `import_bundle` は canonical JCS を検査しない（`decode_bundle` のみ）。RFC の「Import verifies canonical JCS」との Detected mismatch だが、
+  in-tree は decode 経由で未到達。
+- C2: v2 descriptor の `kind` は内容と照合されない（読むコードが無く影響 0）。
+- C3: v4 の external blob は長さ・digest を検証せず、宣言 size だけが予算を消費する（過剰拒否側）。
+- C4: 宣言上限が同時に達成できない。512MiB の OCI archive の base64 は 715,827,884 文字で、768MiB の残りに 64MiB object が入らない
+  （Lean `BundleBounds.per_part_limits_are_not_jointly_attainable`）。安全側。
+- C5: `descriptor()` / `payload_bytes()` はソート済み前提の `binary_search` を公開 API として持つ（validate 後呼び出しが前提）。
+- C6: `instance_snapshot_ref` は ato_objects 層では Structured を要求しない（上位層が塞ぐ）。
+- C7: `decode_capsule_bundle_document` はサイズ検査より先に JSON 全体を走査し、`fs::read` に上限が無い（増幅は無い）。
+- C8: v2 bundle は sha256 residual を運べる（F3 と同じ経路差。未実行）。
+- 否定: v4 restore evidence は local 経路では実 bytes から再計算する。ただし **Hosted 経路は API が永続化した evidence を受け取る**ため、
+  Rust validator は restore を独立観測しない（信頼境界の記録）。Hosted / CLI は v2 を capsule identity として扱わない。
+### 外部 repo（ato-api / ato-pwa / Desktop / 配信）の確認範囲
+
+これらは本 worktree の外（別 repo）であり、解決策の提示ではなく境界の把握に留めた。
+
+- **ato-api**: B13（receipt schema の /1 固定）のほか、CORS/CSRF 境界の純関数（`isSameOriginRequest` / `canonicalizeOrigin` /
+  `surfaceActivationProbeUrl`）を Node 22 で実行し、probe URL 19 入力で origin escape 0、origin の完全一致比較を確認した。
+  認可は `requireAuth` / `requirePublisher` / `requireManagementAuth(scope)` / admin allowlist の 4 層で、admin は
+  Cloudflare Access 優先・device credential 非受容・beta grant 再検査・空 allowlist で fail closed。
+  未検査: 109 route の大半、D1 の所有権クエリの網羅、冪等性の実装、R2 signed URL、rate limit。node_modules 不在のため既存テストは未実行。
+- **ato-pwa**: README は GitHub のサニタイズ済み HTML と、Codeberg の markdown を escape-first で描画する 2 経路。
+  `npx vitest run src/auth src/lib/repoSource` が 178 件成功。セッショントークンを localStorage に置く箇所は見つからない。
+  未検査: 875 ファイルの大半、E2E、配信物の CSP。
+- **ato-desktop**: `#[tauri::command]` は 7 個、`capabilities/default.json` は `main` window のみ。
+  `navigation.rs` の `classify` は userinfo を常に拒否し、Main は local launcher URL のみ、guest は exact loopback origin のみ Allow する純粋関数で、
+  既存 unit test が retired remote Home の拒否と origin 固定を assert している（読解。cargo test は未実行）。
+- **配信（ato-edge / ato-usercontent-static）**: `parseStaticManifest` は JCS 再 encode 一致 + sha256 digest + 厳密 key 集合 +
+  固定 `frame_ancestors`（4 origin の固定順）+ ASCII 昇順 `connect_src`（https/wss の bare origin のみ、
+  localhost/IP/.local 拒否）+ MIME 許可リスト + サイズ上限で受理を判定する。CSP builder は検証後の manifest 値だけを使うため、
+  CSP ディレクティブ注入は成立しない。`npx vitest run` が ato-edge 34 件・ato-usercontent-static 35 件成功。
+  未検査: 配信スクリプト（deploy）と R2 の実データ、ワークフロー。
 ### 候補（第3回。コード読解のみ、確定バグに数えない）
 
 - R4: `stop_and_seal`（`seal.rs:104-116`）の 5 段階（active_run → stop_active → evolve_workspace → seal frontier → update_head → release）が
@@ -514,10 +573,10 @@ AGENTS.md の「CLI と ato.run は同一 schema の receipt を発行し」に�
 - 小さく純粋なセキュリティ判定ロジック 6 箇所（約 1,500 行）を手書きで Lean 4 にモデル化（`AtoBugcheck.lean`、Mathlib 不使用、`sorry` なし、Lean 4.36.0 で検査済み）。
 - 「成り立つべき性質」が証明できなかった箇所は反例を定理（`*_BUG`）として固定し、実コードで再現。
 - 全体は Rust 約 40 万行。見たのはその一部で、ここに無い箇所は未検証。
-- 第2回・第3回でモデルを拡張し、`AtoBugcheck.lean` は 40 セクション超・200 定理超になった（Semantic Core の正規化/識別子/resolve、authoring と compose の配線ゲート、
+- 第2回・第3回でモデルを拡張し、`AtoBugcheck.lean` は 37 セクション・240 定理になった（Semantic Core の正規化/識別子/resolve、authoring と compose の配線ゲート、
   kernel 登録、compose 深さ、CLI resume/lease、data plane の quota/range、record 復旧/seq/分岐 origin、egress の CIDR 形式、hosted lease の寿命/attempt/失敗 code、
   materializer identity、Instance lease、v4 snapshot restore）。
-- `run.sh` は Lean カーネル検査の後、未使用コード走査を除く 15 系統の実コード再現（path / budget / netd グラント / static-web / record 連続性 / record 復旧・cursor・分岐 origin / egress CIDR / hosted lease / kernel+compose / kernel depth / authoring gate / Instance lease / CLI resume / CLI lifecycle）を順に実行し、失敗時に非ゼロ終了する。
+- `run.sh` は Lean カーネル検査の後、未使用コード走査を除く 16 系統の実コード再現（path / budget / netd グラント / static-web / record 連続性 / record 復旧・cursor・分岐 origin / egress CIDR / hosted lease / kernel+compose / kernel depth / authoring gate / Instance lease / portable capsule 3 本 / CLI resume / CLI lifecycle）を順に実行し、失敗時に非ゼロ終了する。
 
 ## 引き継ぎ時に見つかった問題（修正前の状態）
 | # | 場所 | 内容 | Lean | 実コード再現 | 影響 |
