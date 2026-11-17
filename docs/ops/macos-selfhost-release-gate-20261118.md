@@ -225,6 +225,23 @@ error: ... /v1/runtime-network/satisfy/01M7NMRSN8HYEW7NRKKDHAK7GK: connection re
 - ローカル経路（`ato form <dir>`）は既に **PASS**（本doc §4）。初期ユーザーの単独価値はローカル経路で成立している。
 - したがって hosted 経路は「未測定」ではなく「**Runtime 未登録により候補0**」という具体的な状態として記録する。
 
+### 4c. hosted Runtime Network が止まっている理由（2026-11-18 追記）
+
+`GET /v1/runtime-network/runtimes`（staging, account token）で実態を確認した。
+
+```
+runtime 01M46ATG90JM | user_managed | linux/aarch64 | online: false (observed 2026-10-05)
+runtime rnr_01M66HBY | ato_managed  | —             | online: false (observed 2026-11-14)
+```
+
+- アカウントには Runtime が**登録されている**が、**両方とも offline**。これが「0 candidate(s) admissible」の理由。
+- 登録済み Runtime を online にするには `ato runtime-network serve` に **runner token** が必要。
+- このホストにある runner 資格情報は `~/.ato/runner/credentials.json` の1つだけで、`api_base = https://api.ato.run`（**本番**）。
+- 本番は最終承認まで保留のため、**本番 runner token は使用しない**。staging 用の runner token は未発行。
+
+→ hosted 経路（受入条件4の検証・実行）は「Runtime 未登録」ではなく
+「**登録済み Runtime が offline で、それを online にする staging 用 runner token が無い**」が正確な阻害要因。
+
 ## 4. ソースから実行の阻害要因（要判断）
 
 - 既知D経路は実測済み（GitHub URL → source fetch → form → pack → run → receipt）
