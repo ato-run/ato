@@ -420,3 +420,33 @@ let (bytes, _bundle) = build_authored_bundle_v2(&application_root)?;
 - GitHub URL からの単一コマンド: **静的サイト限定の近道**（探索なし）
 - LLM生成D: **未測定**（runner token 待ち）
 
+## 7. Kev の順位付けは hosted 経路にしか繋がっていない（仕様との差分）
+
+指示書の役割分担は「Kev-0.8B：実行条件を満たす候補の評価・順位付けに使用する」。
+実装を確認した結果、**Kev の decision provider は Runtime Network 経路にのみ接続されている**。
+
+```rust
+// apps/cli/src/lib.rs
+#[arg(long, value_parser = ["jev", "kev"], requires = "runtime_network")]
+decision_provider: Option<String>,
+```
+
+- `ato form --decision-provider kev` は `--runtime-network` を要求するため、**ローカルの `ato form` では候補の順位付けに Kev を使えない**
+- ローカル経路は `--max-attempts` の範囲で候補を順に試すだけで、順位付けの判断点が無い
+- したがって「Kev で候補Dを評価・順位付けする」は、hosted Runtime Network が online な Runtime を持つ場合にのみ成立する
+
+### 現状の評価
+
+| 要素 | 状態 |
+|---|---|
+| Kev の導入・推論・ローカルサーバ | **実装済み・実測済み**（§2） |
+| `kev` decision provider（`jev` と identity 分離） | **実装済み・テスト済み**（PR #1893） |
+| Kev による候補Dの順位付け（ローカル経路） | **未実装**（decision provider が `--runtime-network` 必須） |
+| Kev による候補Dの順位付け（hosted 経路） | 実装済みだが Runtime が offline のため未測定 |
+
+### 初期リリースへの影響
+
+受入条件2（任意DL + ローカル推論）は満たしているが、**roadmap 6 の「候補Dの評価・順位付け」は
+ローカルでは未接続**。初期リリースで Kev を「順位付けに使う」と謳うには、ローカル `ato form` に
+decision point を設ける追加工事が必要（別PR）。
+
