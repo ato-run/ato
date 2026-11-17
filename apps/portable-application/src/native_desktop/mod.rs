@@ -167,7 +167,7 @@ impl NativeProvenance {
                 self.fetched_from.as_deref().unwrap_or("(unnamed)")
             ),
             "source" => format!(
-                "built in this Run from commit {} with {} ({}), cache {}",
+                "source artifact from commit {} with {} ({}), build cache {}",
                 self.source_commit.as_deref().unwrap_or("(unknown)"),
                 self.toolchain.as_deref().unwrap_or("(unknown toolchain)"),
                 self.build_argv.as_deref().unwrap_or("(unknown command)"),
@@ -360,6 +360,11 @@ pub(crate) fn acquire(
                 };
                 refusal(code, error.to_string())
             })?;
+            eprintln!(
+                "Native source build cache: {} ({})",
+                built.cache.as_str(),
+                built.cache_key
+            );
             Ok(AcquiredArtifact {
                 payload: if descriptor.local_window {
                     let (root, entry) =

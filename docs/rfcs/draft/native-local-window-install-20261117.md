@@ -44,10 +44,13 @@ report the mount location. Hashing streams large files. D2 compiles the pinned
 build requires the already approved explicit unsigned override.
 
 For source-built window executables, the macOS materializer creates a minimal
-local `.app` wrapper at a stable content-addressed path. The executable is copied
-unchanged and verified against the build output digest; the generated plist has
-an Ato-local identifier, never the upstream publisher identity. Each reuse checks
-the executable, exact plist and absence of additional files. This wrapper is
+local `.app` wrapper at a stable content-addressed path. Before wrapping, the copy
+is verified against the build output digest. A local ad-hoc signature binds the
+generated plist to the executable so macOS can register the app identifier; this
+does not satisfy Developer ID policy and still requires the local override. The
+original build remains unchanged. The plist has an Ato-local identifier, never
+the upstream publisher identity. Each reuse checks the signed tree digest, exact
+plist and absence of additional files. This wrapper is
 physical materialization, not a new Contract or build recipe. Signature evidence
 identifies the wrapped executable actually launched, and the original source
 consent and mandatory sandbox remain in force.
