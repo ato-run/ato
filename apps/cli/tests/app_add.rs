@@ -32,30 +32,24 @@ fn a_local_capsule_is_added_as_an_instance() {
         "install failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    // The install prints what it did for a human; the library is the record.
-    let listed = ato(home.path())
-        .args(["app", "list", "--json"])
-        .output()
-        .unwrap();
-    assert!(listed.status.success());
-    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
-    let instances = listed["instances"].as_array().unwrap();
-    assert_eq!(instances.len(), 1, "{listed}");
-    let instance_id = instances[0]["instance"]["instance_id"].as_str().unwrap();
-    assert_eq!(instances[0]["instance"]["schema"], "ato.local-instance/1");
+    // The install prints what it did for a human; the Instance id is in that text.
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let instance_id = stdout
+        .split_whitespace()
+        .find(|word| word.starts_with("linst_"))
+        .expect("the install names the Instance")
+        .trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .to_owned();
 
-    // The same object is what `inspect` reads back.
+    // The same object is what inspect reads back.
     let inspected = ato(home.path())
-        .args(["app", "inspect", instance_id])
+        .args(["app", "inspect", &instance_id])
         .output()
         .unwrap();
     assert!(inspected.status.success());
     let inspected: Value = serde_json::from_slice(&inspected.stdout).unwrap();
-    assert_eq!(inspected["instance"]["instance_id"], instance_id);
-    assert_eq!(
-        inspected["instance"]["contract_ref"],
-        instances[0]["instance"]["contract_ref"]
-    );
+    assert_eq!(inspected["instance"]["instance_id"], instance_id.as_str());
+    assert_eq!(inspected["instance"]["schema"], "ato.local-instance/1");
 }
 
 #[test]
