@@ -205,3 +205,18 @@ theorem admission_has_capacity (available required : Nat)
 theorem equal_capacity_admitted (n : Nat) : admitted n n = true := by
   simp [admitted]
 end StorageCapacity
+
+/-! ## 8. lib/objects/src/repository.rs :: commit_observation -/
+namespace RecordContinuity
+/-- The commit gate checks token, expected cursor and stream but not the record's source head. -/
+def commitAllowed (tokenOk headOk streamOk : Bool) (_recordBeforeMatches : Bool) : Bool :=
+  tokenOk && headOk && streamOk
+
+def continuous (recordBeforeMatches : Bool) : Bool := recordBeforeMatches
+
+theorem mismatched_record_BUG :
+    ∃ tokenOk headOk streamOk recordBeforeMatches,
+      commitAllowed tokenOk headOk streamOk recordBeforeMatches = true ∧
+      continuous recordBeforeMatches = false :=
+  ⟨true, true, true, false, by decide⟩
+end RecordContinuity

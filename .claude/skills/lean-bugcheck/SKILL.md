@@ -30,7 +30,7 @@ formal/lean-bugcheck/run.sh                 # ~1 min
 RUN_CHECK=1 formal/lean-bugcheck/run.sh     # + cargo check + dead-code scan (slow, run in background)
 ```
 
-Existing repro programs now assert the fixed behavior. If a regression reappears they fail.
+Repro programs for fixed findings assert the fixed behavior. Repro programs for open `*_BUG` findings assert that the counterexample still reproduces; they fail after a fix until converted to regression tests.
 When fixing another finding, replace its `*_BUG` theorem with a positive property and update `REPORT.md`.
 
 ## 2. Pick targets — minimise tokens, plan before reading

@@ -1,5 +1,32 @@
 # ato-run/ato Lean バグチェック報告（2026-11-17）
 
+## 主要機能の棚卸し（第1回、対象 c4f29fe5f）
+
+優先度は影響範囲と調査順を示す。下記は機能ごとの網羅保証ではなく、現在確認した境界を明記するための一覧。API / PWA / Desktop は本 repo 外または別ビルド境界であり、今回は未検査。
+
+| 優先 | 機能 | 今回の確認と状態 | 次に調べる範囲 |
+|---|---|---|---|
+| 高 | Run の記録とローカル保存 (`lib/objects`, `lib/local-execution`) | **新規の不整合を1件再現**。下記 B1。既存 object/repository/bundle 単体63件は成功 | 更新失敗・クラッシュ時の復旧、branch 作成の途中失敗、複数 Run の競合 |
+| 高 | Portable Capsule v2/v3/v4 の受理・closure (`lib/objects`, `apps/portable-application`) | 形状、参照、digest、closure の入口を読解。object 側63件成功 | 全 profile での root と object kind の整合、未到達 object、外部 blob、サイズ、CLI/hosted の呼び出し境界 |
+| 高 | Run admission と Contract receipt (`lib/runtime-attempt`) | 関連の既存 admission 9件と verification 15件成功。対象以外は未検査 | D/K 選択、権限・runtime 境界、全 observation と receipt の実行時結合 |
+| 高 | Formation の source 取得・展開 (`lib/formation`, `apps/formation-worker`) | 展開の入口を読解。メモリ内圧縮展開に下記 U1 の要調査事項 | メモリ版とファイル版の入力経路、展開上限と deadline、symlink 連鎖、アーカイブ衝突 |
+| 高 | Model Set の受信・キャッシュ (`lib/runtime-attempt/src/data_plane`) | range と digest 検証の一部を読解。形式モデル・追加再現は未実施 | 同時受信、resume、部分書込み、quota、取得先と grants の結合 |
+| 高 | 通信の認可・egress (`services/netd`) | 前回の既知問題は修正済み。今回の新規モデルは未追加 | 並行予算、時計変動・再起動後の replay、DNS と接続の一貫性 |
+| 中 | Semantic Core、Kernel、Composition (`lib/computation`, `lib/kernel`, `lib/compose`) | 未着手 | identity、Port、Evolution、配線・閉包の不変条件 |
+| 中 | CLI lifecycle、Materializer、local Instance (`apps/cli`, `extensions/materializers`, `apps/portable-application`) | 一部の呼び出し元を読解したのみ | init/resume/stop、競合、保存・復旧、v2/v3 分離 |
+| 中 | Coordinator、Formation Worker、Hosted Runner | 未着手 | Job/lease/attempt の帰属、取消・冪等性、実環境の権限境界 |
+| 中 | ato-api、ato-pwa、Desktop、配信・外部連携 | 未着手 | 各 repo の契約・実装・認証・変更経路 |
+
+### B1 — Record の開始位置を照合せず Run を進める（未修正）
+
+`LocalCapsuleRepository::commit_observation` はトークン・`expected_head`・stream を検査するが、`record.head_before == expected_head` を検査しない。既存の正しい Record の後に別の `head_before` を持つ Record を渡すと受理して Run cursor を更新し、その後の `records_for_causal_branch` は `CausalHeadMismatch` になる。accepted RFC `LOCAL_CAPSULE_REPOSITORY.md` が示す Record の連続性と実装の不一致として扱う。
+
+Lean: `RecordContinuity.mismatched_record_BUG`。実コード再現: `repro/record_continuity.rs` を `run.sh` から実行し、受理と履歴検証失敗を確認した。これは公開 repository API の不正入力での再現であり、通常の CLI の `RepositoryObservationSink::emit` は同じ locked head を両方に設定する。通常操作や外部利用者がこの不整合を誘発できることは未確認。プロセスクラッシュや実機の再開操作は未検証。
+
+### U1 — メモリ内 source archive の展開量（要調査、未確定）
+
+`lib/formation/src/source.rs` のメモリ内 `decompressed` は gzip/zstd を `Vec` 全体に展開してから `SourceLimits` による tar 検査を行う。圧縮サイズと展開サイズの比によって検査前のメモリ使用が大きくなり得る。`FileVerifiedArchive` の streaming reader には別の展開読み取り上限があるため、一律に全経路の問題とは言えない。実運用の `formation-worker/src/retained.rs` は pack した artifact をメモリ版で再測定するが、攻撃者が圧縮 bytes を直接制御できる経路、具体的な最大メモリ、実機での影響は未確認。Lean モデル・実コードの資源消費再現は未実施であり、確定バグには数えない。
+
 ## 引き継ぎ後の修正
 
 対象は `feat/lean-bugcheck` @ `bbeea6f` を起点とする worktree。下の5件を修正し、Lean 4.36.0 で修正版のモデルを検査した。`run.sh` は失敗時に非ゼロ終了し、ソースを書き換えずに回帰検証する。Lean は `$LEAN` または `~/.elan/bin/lean` から指定する。

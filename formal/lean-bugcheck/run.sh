@@ -27,6 +27,15 @@ echo '== grant and subprotocol regressions'
 (cd "$REPO" && cargo test -p netd --lib surface_websocket_auth::tests)
 echo '== manifest error regression'
 (cd "$REPO" && cargo test -p ato-materializer-static-web --lib distinguishes_empty_and_invalid_materialization_ids)
+echo '== discontinuous record counterexample'
+(cd "$REPO" && cargo build -p ato-objects -p ato-computation)
+TARGET_DIR="${CARGO_TARGET_DIR:-$REPO/target}"
+case "$TARGET_DIR" in /*) ;; *) TARGET_DIR="$REPO/$TARGET_DIR" ;; esac
+rustc --edition 2024 "$HERE/repro/record_continuity.rs" \
+  --extern "ato_objects=$TARGET_DIR/debug/libato_objects.rlib" \
+  --extern "ato_computation=$TARGET_DIR/debug/libato_computation.rlib" \
+  -L "dependency=$TARGET_DIR/debug/deps" -o "$OUT/record-continuity"
+"$OUT/record-continuity"
 if [ "${RUN_CHECK:-0}" = 1 ] && [ -z "${CHECK_JSON:-}" ]; then
   CHECK_JSON="$OUT/check.json"
   echo '== cargo check'
