@@ -1,2 +1,7 @@
 # These embedded bytes define the producer's versioned prompt digest.
 apps/formation-worker/src/runtime_network/proposal/prompt*.txt text eol=lf
+
+# These sample bytes are pinned by the Contract and must survive Windows checkout.
+samples/interop-static-k/capsule.toml text eol=lf
+samples/interop-static-k/index.html text eol=lf
+samples/interop-static-k/proof.txt text eol=lf

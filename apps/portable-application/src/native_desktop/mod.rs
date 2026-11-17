@@ -30,7 +30,6 @@ use ato_formation::native_desktop::NativeDescriptor;
 use ato_runtime_attempt::realize::{RealizeFailure, Realized};
 
 use crate::ValidatedNativePort;
-use toolchain::ToolchainConsent;
 
 // Only the macOS adapter materializes an artifact today. Gating the module
 // keeps every other target free of helpers that have no caller there; the
@@ -43,6 +42,7 @@ pub(crate) mod artifact;
 pub(crate) mod macos;
 
 /// Streaming acquisition of a digest-pinned remote artifact.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) mod remote;
 /// The isolated, content-addressed build of a source route.
 #[cfg(target_os = "macos")]
@@ -52,12 +52,25 @@ pub(crate) mod source_build;
 #[cfg(any(target_os = "macos", test))]
 pub(crate) mod terminal;
 /// The managed toolchain a source build needs: policy, layout and installer.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) mod toolchain;
 #[cfg(target_os = "windows")]
 pub(crate) mod windows;
 /// Safe unpacking of a `zip` remote artifact, from its central directory.
 #[cfg(target_os = "macos")]
 pub(crate) mod zip;
+
+/// Whether this Run may install a managed toolchain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ToolchainConsent {
+    /// The user approved installing under `@@ATO_HOME`.
+    Approved,
+    /// The user was asked and did not approve.
+    #[default]
+    Denied,
+    /// There is no one to ask (a non-interactive Run).
+    Unavailable,
+}
 
 /// A named native-adapter refusal. The code is stable and user-facing; the
 /// detail names what could not be enforced.
@@ -136,6 +149,7 @@ pub(crate) struct NativeProvenance {
     pub build_argv: Option<String>,
 }
 
+#[cfg(target_os = "macos")]
 impl NativeProvenance {
     /// What the acquisition stage did, in one line for the receipt.
     pub fn materialization(&self) -> String {

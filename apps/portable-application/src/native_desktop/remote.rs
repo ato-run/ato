@@ -182,6 +182,7 @@ pub struct FetchedArtifact {
 
 /// Largest source tarball this build will download. A source tree is smaller
 /// than a packaged desktop application, so the artifact bound is reused.
+#[cfg(target_os = "macos")]
 pub const MAX_NATIVE_SOURCE_BYTES: u64 = ato_formation::native_desktop::MAX_NATIVE_REMOTE_BYTES;
 
 /// Fetch one pinned remote artifact to `destination`.
@@ -204,6 +205,7 @@ pub fn fetch_to_file(
 }
 
 /// Fetch a digest-pinned source tarball, whose exact size is not declared.
+#[cfg(target_os = "macos")]
 pub fn fetch_source_archive(
     build: &ato_formation::native_desktop::SourceBuild,
     destination: &Path,

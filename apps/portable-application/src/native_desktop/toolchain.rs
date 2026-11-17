@@ -25,17 +25,7 @@ use ato_formation::native_desktop::RustToolchainSpec;
 /// Where `rustup-init` is published for each target.
 pub const RUSTUP_DIST: &str = "https://static.rust-lang.org/rustup/dist";
 
-/// Whether this Run may install a managed toolchain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ToolchainConsent {
-    /// The user approved installing under `@@ATO_HOME`.
-    Approved,
-    /// The user was asked and did not approve.
-    #[default]
-    Denied,
-    /// There is no one to ask (a non-interactive Run).
-    Unavailable,
-}
+use super::ToolchainConsent;
 
 /// Why a toolchain could not be provided.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -393,6 +383,26 @@ mod tests {
     }
 
     #[test]
+    fn the_toolchain_transport_refuses_an_untrusted_url_before_fetching() {
+        struct NeverFetch;
+        impl super::super::remote::NativeFetcher for NeverFetch {
+            fn fetch(
+                &self,
+                _: &str,
+                _: &mut dyn std::io::Write,
+            ) -> Result<u64, super::super::remote::FetchFailure> {
+                panic!("an invalid URL must never reach the transport");
+            }
+        }
+        let fetcher = ArtifactToolchainFetcher { inner: &NeverFetch };
+        assert!(
+            fetcher
+                .fetch("http://example.com/rustup-init", &mut Vec::new())
+                .is_err()
+        );
+    }
+
+    #[test]
     fn the_toolchain_installs_under_the_ato_home_only() {
         let root = toolchain_root(Path::new("/home/u/.ato"), &spec(), "aarch64-apple-darwin");
         assert_eq!(
@@ -409,7 +419,7 @@ mod tests {
             &spec(),
             Some("aarch64-apple-darwin"),
             ToolchainConsent::Denied,
-            &FakeInstall { layout: true },
+            &RustupProvisioner,
             &NoFetch,
         )
         .unwrap_err();
@@ -420,7 +430,11 @@ mod tests {
         );
         assert!(message.contains("rust:1.83.0"), "{message}");
         assert!(
-            message.contains("toolchains/rust/1.83.0-aarch64-apple-darwin"),
+            message.contains(
+                &toolchain_root(home.path(), &spec(), "aarch64-apple-darwin")
+                    .display()
+                    .to_string()
+            ),
             "{message}"
         );
         assert!(
