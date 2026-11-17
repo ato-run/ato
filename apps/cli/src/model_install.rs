@@ -354,6 +354,75 @@ const SERVE_SCHEMA: &str = "ato.model-serve/1";
 /// needs no cloud account and no second installation. Each request reloads the
 /// model in its own process (about three seconds for Kev-0.8B); the alternative
 /// would be keeping a Python child alive and serialising every request through it.
+/// One long-lived runner process, so the model is loaded for the first request
+/// only. Requests are serialised through it: the model is single-threaded and a
+/// second interpreter would double the resident memory for no throughput.
+struct RunnerWorker {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    stdout: std::io::BufReader<std::process::ChildStdout>,
+}
+
+impl RunnerWorker {
+    fn spawn(python: &Path, runner: &Path) -> Result<Self> {
+        let mut child = std::process::Command::new(python)
+            .arg(runner)
+            .arg("--serve")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .with_context(|| format!("start {}", python.display()))?;
+        let stdin = child.stdin.take().context("runner stdin is unavailable")?;
+        let stdout = std::io::BufReader::new(
+            child
+                .stdout
+                .take()
+                .context("runner stdout is unavailable")?,
+        );
+        Ok(Self {
+            child,
+            stdin,
+            stdout,
+        })
+    }
+
+    fn ask(&mut self, payload: &serde_json::Value) -> Result<serde_json::Value> {
+        writeln!(self.stdin, "{}", serde_json::to_string(payload)?)
+            .context("write the runner request")?;
+        self.stdin.flush().context("flush the runner request")?;
+        let mut line = String::new();
+        let read = self
+            .stdout
+            .read_line(&mut line)
+            .context("read the runner response")?;
+        ensure!(read > 0, "the runner closed its output");
+        let value: serde_json::Value =
+            serde_json::from_str(line.trim()).context("the runner response is not JSON")?;
+        if let Some(error) = value.get("error") {
+            bail!(
+                "{}: {}",
+                error
+                    .get("code")
+                    .and_then(|code| code.as_str())
+                    .unwrap_or("model_runtime_failed"),
+                error
+                    .get("message")
+                    .and_then(|message| message.as_str())
+                    .unwrap_or("the runner reported an error")
+            );
+        }
+        Ok(value)
+    }
+}
+
+impl Drop for RunnerWorker {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 fn serve(args: &ServeArgs) -> Result<()> {
     let status = status_report(&args.model, args.home.clone(), false)?;
     ensure!(
@@ -400,9 +469,17 @@ fn serve(args: &ServeArgs) -> Result<()> {
         }
         println!("  stop with Ctrl-C");
     }
+    let mut worker: Option<RunnerWorker> = None;
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
-        let _ = handle_connection(&mut stream, &python, &runner, &status, token.as_deref());
+        let _ = handle_connection(
+            &mut stream,
+            &python,
+            &runner,
+            &status,
+            token.as_deref(),
+            &mut worker,
+        );
     }
     Ok(())
 }
@@ -413,6 +490,7 @@ fn handle_connection(
     runner: &Path,
     status: &ModelStatusReport,
     token: Option<&str>,
+    worker: &mut Option<RunnerWorker>,
 ) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     let mut reader = std::io::BufReader::new(stream.try_clone()?);
@@ -449,7 +527,7 @@ fn handle_connection(
             } else if !authorized {
                 ("401 Unauthorized", error_body("a bearer token is required"))
             } else {
-                match systemone(python, runner, status, &body) {
+                match systemone(python, runner, status, &body, worker) {
                     Ok(answer) => ("200 OK", answer),
                     Err(error) => ("422 Unprocessable Entity", error_body(&error.to_string())),
                 }
@@ -473,11 +551,25 @@ fn error_body(message: &str) -> String {
 /// The reference runtime's request ceiling for a state plus its questions.
 const MAX_SYSTEMONE_BYTES: usize = 48 * 1024;
 
+fn ask_worker(
+    python: &Path,
+    runner: &Path,
+    payload: &serde_json::Value,
+    worker: &mut Option<RunnerWorker>,
+) -> Result<serde_json::Value> {
+    if worker.is_none() {
+        *worker = Some(RunnerWorker::spawn(python, runner)?);
+    }
+    let running = worker.as_mut().context("the runner is not running")?;
+    running.ask(payload)
+}
+
 fn systemone(
     python: &Path,
     runner: &Path,
     status: &ModelStatusReport,
     body: &[u8],
+    worker: &mut Option<RunnerWorker>,
 ) -> Result<String> {
     let request: serde_json::Value =
         serde_json::from_slice(body).context("the request is not valid JSON")?;
@@ -497,7 +589,16 @@ fn systemone(
         "questions": questions,
         "model_root": status.root,
     });
-    let value = invoke_runner(python, runner, &payload)?;
+    let value = match ask_worker(python, runner, &payload, worker) {
+        Ok(value) => value,
+        Err(_) => {
+            // A worker that died or answered garbage is replaced once: the next
+            // request gets a clean interpreter, and a genuine model error is still
+            // reported to the caller.
+            *worker = None;
+            ask_worker(python, runner, &payload, worker)?
+        }
+    };
     // The decision provider reads "model" first: it is the local family identity,
     // not the caller's requested name, so a client cannot relabel the model.
     Ok(serde_json::json!({
@@ -1176,6 +1277,19 @@ mod tests {
         token: Option<&str>,
         request: &str,
     ) -> String {
+        exchange_with(python, runner, status, token, request, &mut None)
+    }
+
+    /// The same exchange, but on a caller-owned worker, so two requests can prove
+    /// they shared one interpreter.
+    fn exchange_with(
+        python: &Path,
+        runner: &Path,
+        status: &ModelStatusReport,
+        token: Option<&str>,
+        request: &str,
+        worker: &mut Option<RunnerWorker>,
+    ) -> String {
         use std::io::{Read as _, Write as _};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let address = listener.local_addr().expect("addr");
@@ -1198,19 +1312,28 @@ mod tests {
             assets: Vec::new(),
         };
         let token = token.map(str::to_owned);
-        let request = request.to_owned();
-        let handle = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
-            handle_connection(&mut stream, &python, &runner, &status, token.as_deref())
-                .expect("handle");
-        });
         let mut client = std::net::TcpStream::connect(address).expect("connect");
-        client.write_all(request.as_bytes()).expect("write");
-        client.flush().expect("flush");
-        let mut response = String::new();
-        client.read_to_string(&mut response).expect("read");
-        handle.join().expect("join");
-        response
+        // A scoped thread lets the handler borrow the caller's worker, so one test
+        // can send two requests through one interpreter.
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let (mut stream, _) = listener.accept().expect("accept");
+                handle_connection(
+                    &mut stream,
+                    &python,
+                    &runner,
+                    &status,
+                    token.as_deref(),
+                    worker,
+                )
+                .expect("handle");
+            });
+            client.write_all(request.as_bytes()).expect("write");
+            client.flush().expect("flush");
+            let mut response = String::new();
+            client.read_to_string(&mut response).expect("read");
+            response
+        })
     }
 
     fn http(request: &str) -> String {
@@ -1297,30 +1420,85 @@ mod tests {
         fs::remove_dir_all(root).ok();
     }
 
+    /// A line-protocol stub: one request per line, one response per line, and it
+    /// counts how many requests the same process served.
+    fn write_serve_stub(root: &Path) -> PathBuf {
+        let script = root.join("stub_runner.py");
+        // Written with explicit indentation because a Rust line continuation would
+        // strip it, and Python needs it.
+        let stub = concat!(
+            "import json, sys\n",
+            "seen = 0\n",
+            "for line in sys.stdin:\n",
+            "    if not line.strip():\n",
+            "        continue\n",
+            "    json.loads(line)\n",
+            "    seen += 1\n",
+            "    json.dump({'answers': {'decision': {'type': 'choice', 'choice': 'c3'}, 'seen': seen}},\n",
+            "              sys.stdout)\n",
+            "    sys.stdout.write('\\n')\n",
+            "    sys.stdout.flush()\n",
+        );
+        fs::write(&script, stub).expect("stub");
+        script
+    }
+
+    fn systemone_request() -> String {
+        let body = "{\"state\":\"s\",\"questions\":{\"decision\":{}}}";
+        format!(
+            "POST /v1/systemone HTTP/1.1\r\nhost: localhost\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
     #[test]
     fn a_runner_answer_is_served_as_the_local_model() {
         let root = temp_root();
         let status = serve_status(&root);
-        let script = root.join("stub_runner.py");
-        fs::write(
+        let script = write_serve_stub(&root);
+        let response = exchange(
+            Path::new("python3"),
             &script,
-            "import json,sys\n\
-             json.load(sys.stdin)\n\
-             json.dump({'answers': {'decision': {'type': 'choice', 'choice': 'c3'}},\n\
-                        'checkpoint': {'weights': 'lora'},\n\
-                        'runtime': {'backend': 'mlx'}}, sys.stdout)\n",
-        )
-        .expect("stub");
-        let body = "{\"state\":\"s\",\"questions\":{\"decision\":{}}}";
-        let request = format!(
-            "POST /v1/systemone HTTP/1.1\r\nhost: localhost\r\ncontent-length: {}\r\n\r\n{body}",
-            body.len()
+            &status,
+            None,
+            &systemone_request(),
         );
-        let response = exchange(Path::new("python3"), &script, &status, None, &request);
         assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
         // The served model name is the local family, never the caller's string.
         assert!(response.contains("\"model\":\"kev-0.8b\""), "{response}");
         assert!(response.contains("\"choice\":\"c3\""), "{response}");
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// Two requests must share one interpreter: that is the whole point of the
+    /// worker, and reloading a model per request would make serving pointless.
+    #[test]
+    fn two_requests_share_one_interpreter() {
+        let root = temp_root();
+        let status = serve_status(&root);
+        let script = write_serve_stub(&root);
+        let mut worker = None;
+        let first = exchange_with(
+            Path::new("python3"),
+            &script,
+            &status,
+            None,
+            &systemone_request(),
+            &mut worker,
+        );
+        assert!(first.contains("\"seen\":1"), "{first}");
+        let second = exchange_with(
+            Path::new("python3"),
+            &script,
+            &status,
+            None,
+            &systemone_request(),
+            &mut worker,
+        );
+        assert!(
+            second.contains("\"seen\":2"),
+            "the second request must reach the same interpreter: {second}"
+        );
         fs::remove_dir_all(root).ok();
     }
 

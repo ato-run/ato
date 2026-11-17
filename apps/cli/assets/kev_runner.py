@@ -19,8 +19,12 @@ import time
 from pathlib import Path
 
 
+def failure(code, message):
+    return {"error": {"code": code, "message": message}}
+
+
 def fail(code, message):
-    json.dump({"error": {"code": code, "message": message}}, sys.stdout)
+    json.dump(failure(code, message), sys.stdout)
     sys.stdout.write("\n")
     sys.exit(1)
 
@@ -37,9 +41,9 @@ def link(source, target):
         shutil.copyfile(source, target)
 
 
-def main():
-    request = json.load(sys.stdin)
-    root = Path(request["model_root"]).resolve()
+def load(root):
+    """Load one Model Set. -> a context every request can reuse without reloading."""
+    root = Path(root).resolve()
     base = root / "base"
     adapter = root / "adapter"
     tokenizer = root / "tokenizer"
@@ -100,44 +104,116 @@ def main():
         fail("model_load_failed", f"{type(error).__name__}: {error}")
     load_seconds = time.time() - started
 
+    return {
+        "checkpoint": checkpoint,
+        "ckpt": ckpt,
+        "tokenizer": tokenizer_obj,
+        "model": model,
+        "device": device,
+        "load_seconds": load_seconds,
+    }
+
+
+def answer(ctx, request):
+    """Score one request with an already loaded Model Set. -> the response dict."""
+    # Imported here, not in load(): these names are only reachable once load()
+    # proved the runtime is importable, and a missing runtime must still be
+    # reported as runtime_unavailable rather than as a NameError.
+    from kev.api import SystemOneRequest, to_answers, to_record
+    from kev.model import admit
+
     try:
         req = SystemOneRequest(state=request["state"], questions=request["questions"])
         record, meta = to_record(req)
-        encoded = admit(model, tokenizer_obj, record)
+        encoded = admit(ctx["model"], ctx["tokenizer"], record)
         started = time.time()
-        probs = model.probs(encoded)
+        probs = ctx["model"].probs(encoded)
         infer_ms = (time.time() - started) * 1000
     except Exception as error:
-        fail("inference_failed", f"{type(error).__name__}: {error}")
+        return failure("inference_failed", f"{type(error).__name__}: {error}")
 
     import mlx.core
     import mlx_lm
 
-    json.dump(
-        {
-            "answers": to_answers(probs, meta),
-            "raw": [[float(p) for p in row] for row in probs],
-            "checkpoint": {
-                "weights": ckpt.meta.weights,
-                "base": ckpt.meta.base,
-                "base_revision": ckpt.meta.base_revision,
-                "head_dim": ckpt.meta.head_dim,
-                "temperature": float(getattr(model.head, "temperature", 0.0)),
-            },
-            "runtime": {
-                "backend": "mlx",
-                "device": str(device),
-                "mlx": getattr(mlx.core, "__version__", None),
-                "mlx_lm": getattr(mlx_lm, "__version__", None),
-                "python": sys.version.split()[0],
-                "load_seconds": round(load_seconds, 3),
-                "inference_ms": round(infer_ms, 1),
-            },
+    ckpt = ctx["ckpt"]
+    return {
+        "answers": to_answers(probs, meta),
+        "raw": [[float(p) for p in row] for row in probs],
+        "checkpoint": {
+            "weights": ckpt.meta.weights,
+            "base": ckpt.meta.base,
+            "base_revision": ckpt.meta.base_revision,
+            "head_dim": ckpt.meta.head_dim,
+            "temperature": float(getattr(ctx["model"].head, "temperature", 0.0)),
         },
-        sys.stdout,
-    )
+        "runtime": {
+            "backend": "mlx",
+            "device": str(ctx["device"]),
+            "mlx": getattr(mlx.core, "__version__", None),
+            "mlx_lm": getattr(mlx_lm, "__version__", None),
+            "python": sys.version.split()[0],
+            "load_seconds": round(ctx["load_seconds"], 3),
+            "inference_ms": round(infer_ms, 1),
+        },
+    }
+
+
+def main():
+    """One request on stdin, one response on stdout: the one-shot score path."""
+    request = json.load(sys.stdin)
+    try:
+        ctx = load(request["model_root"])
+    except SystemExit:
+        raise
+    except Exception as error:
+        fail("model_load_failed", f"{type(error).__name__}: {error}")
+    json.dump(answer(ctx, request), sys.stdout)
     sys.stdout.write("\n")
 
 
+def serve():
+    """One JSON request per line, one JSON response per line, loaded once.
+
+    A server holds this process open so the model is loaded for the first request
+    only. A bad request is answered with an error and the loop continues: a single
+    malformed call must not take the local model server down.
+    """
+    ctx = None
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+        except ValueError as error:
+            response = failure("invalid", f"the request is not valid JSON: {error}")
+        else:
+            if ctx is None or request.get("model_root") != ctx.get("root"):
+                try:
+                    ctx = load(request["model_root"])
+                    ctx["root"] = request.get("model_root")
+                except SystemExit:
+                    # load() already wrote its error line; keep serving so the next
+                    # request can try again instead of taking the server down.
+                    ctx = None
+                    continue
+                except Exception as error:
+                    ctx = None
+                    json.dump(
+                        failure("model_load_failed", f"{type(error).__name__}: {error}"),
+                        sys.stdout,
+                    )
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    continue
+            response = answer(ctx, request)
+        json.dump(response, sys.stdout)
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+
 if __name__ == "__main__":
-    main()
+    if "--serve" in sys.argv[1:]:
+        serve()
+    else:
+        main()
