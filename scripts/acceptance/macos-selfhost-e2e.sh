@@ -166,7 +166,11 @@ else
 fi
 
 # 8. Formation explores candidate Derivation and verifies one.
-if "$binary" form "$root/samples/interop-static-k" --runtime local --network denied \
+# The source has no capsule.toml on purpose: a declared route would skip the
+# exploration this check exists to exercise.
+mkdir -p "$work/explore-src"
+printf '<!doctype html><html><body>hello</body></html>' >"$work/explore-src/index.html"
+if "$binary" form "$work/explore-src" --runtime local --network denied \
      --max-attempts 4 --out "$work/form-out" --work-root "$work/form-work" \
      >"$work/form.json" 2>"$work/form.err"; then
   if python3 - "$work/form.json" <<'PY'
