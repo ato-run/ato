@@ -117,6 +117,9 @@ pub(crate) enum NativeArtifactPayload {
     /// entry is already laid out inside it.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     BuiltTree(PathBuf),
+    /// An installed, digest-verified distribution rechecked under its format policy.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    InstalledArchive(PathBuf),
     /// A generated macOS wrapper around an unchanged verified source executable.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     WindowApp { root: PathBuf, entry: String },
@@ -249,7 +252,7 @@ pub(crate) fn acquire(
             })?;
             Ok(AcquiredArtifact {
                 payload: if descriptor.local_window {
-                    NativeArtifactPayload::BuiltTree(
+                    NativeArtifactPayload::InstalledArchive(
                         artifact::cached_archive_tree(
                             &fetched.path,
                             descriptor.format,

@@ -36,8 +36,11 @@ copies untrusted code into `/Applications` or changes a user's existing app.
 
 Remote DMGs are digest/length verified before a read-only, non-browsing mount.
 Only top-level real `.app` directories are copied, with bounded file count and
-2 GiB total contents. Links/devices inside these bundles fail closed; the DMG's
-usual `/Applications` shortcut is not copied or followed. Signature verification
+2 GiB total contents. Relative framework links inside an app are recreated after
+its real files and directories. Each link must resolve within that app. Dangling
+links, cycles, ancestor links, absolute targets and special files are rejected.
+The tree digest includes each link's path and literal target. The top-level
+`/Applications` shortcut is skipped. Signature verification
 covers the copied bundle. All mount exits detach; detach failures retain and
 report the mount location. Hashing streams large files. D2 compiles the pinned
 `solidcraft` GUI package with the existing managed Rust/source policy. A local
