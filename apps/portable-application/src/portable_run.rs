@@ -20,6 +20,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(target_os = "linux")]
+mod process_group_linux;
+
 // The native process group (and its peer broker) is a Unix-only
 // materialization: it needs process groups and Unix sockets, and it refuses
 // the whole route on other hosts. The import follows the code it belongs to.
@@ -577,6 +580,7 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
                     && route.derivation.runtimes.contains_key(PYTHON_RUNTIME)
                     && route.model_sets.is_empty()
             }
+            PortableRealizationKind::ProcessServiceGroup => cfg!(target_os = "linux"),
             PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup => {
                 cfg!(target_os = "linux") && self.offline()
             }
@@ -595,16 +599,19 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
                 "This portable route does not yet support launch under a fixed verification budget",
             ).into()));
         }
-        if route.realization == PortableRealizationKind::LocalProcess {
+        if matches!(
+            route.realization,
+            PortableRealizationKind::LocalProcess | PortableRealizationKind::ProcessServiceGroup
+        ) {
             let failure = if !ato_sandbox::bubblewrap_containment_available() {
                 Some((
                     "linux_bubblewrap_unavailable",
-                    "Python verification requires usable Linux bubblewrap namespaces",
+                    "Native Python verification requires usable Linux bubblewrap namespaces",
                 ))
             } else if !ato_sandbox::linux_tcp_sandbox_available() {
                 Some((
                     "linux_landlock_tcp_unavailable",
-                    "Python verification requires a Linux kernel with Landlock TCP restrictions",
+                    "Native Python verification requires a Linux kernel with Landlock TCP restrictions",
                 ))
             } else {
                 None
@@ -736,7 +743,7 @@ impl PortableBundleExecutor<'_> {
                 bounded_oci.as_ref(),
             )?,
             PortableRealizationKind::ProcessServiceGroup => {
-                self.start_process_group(workspace, &state_mounts, &input_mounts)?
+                self.start_process_group(workspace, &state_mounts, &input_mounts, control)?
             }
             PortableRealizationKind::NativeDesktop => {
                 self.start_native_desktop(workspace, &state_mounts)?
@@ -1423,6 +1430,7 @@ impl PortableBundleExecutor<'_> {
         workspace: PathBuf,
         state_mounts: &[PortableStateMount],
         input_mounts: &[PortableInputMount],
+        control: Option<&ExecutionControl>,
     ) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
         let derivation = &route.derivation;
@@ -1436,6 +1444,12 @@ impl PortableBundleExecutor<'_> {
                 &workspace,
             ));
         }
+        #[cfg(target_os = "linux")]
+        if let Some(control) = control {
+            return self.start_bounded_process_group(workspace, control);
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = control;
         let process_runtime = self.runtime_root.join("process");
         let peer_root = self.runtime_root.join("peer");
         fs::create_dir_all(&process_runtime)
@@ -1507,13 +1521,7 @@ impl PortableBundleExecutor<'_> {
                 .and_then(|()| fs::create_dir_all(&process_home))
                 .map_err(|error| launch(error.into(), &workspace))?;
 
-            let mut environment = step.env.clone();
-            for binding in &step.bindings {
-                let name = crate::binding_environment_name(binding);
-                if let Some(value) = self.binding_environment.get(&name) {
-                    environment.insert(name, value.clone());
-                }
-            }
+            let mut environment = self.process_service_environment(step);
             for port in derivation.ports.iter().filter(|port| port.from == step.id) {
                 environment.insert(
                     endpoint_port_env_name(&port.id),
@@ -1543,20 +1551,9 @@ impl PortableBundleExecutor<'_> {
                 process_home.join(".cache").display().to_string(),
             );
 
-            let python_version = step
-                .runtimes
-                .get(PYTHON_RUNTIME)
-                .context("native process service omitted python")
-                .map_err(|error| launch(error, &workspace))?;
-            let mut command = step.argv.clone();
-            if !matches!(command[0].as_str(), "python" | "python3") {
-                return Err(RealizeFailure::Execution(anyhow::anyhow!(
-                    "Python process service `{}` must use a logical python executable in argv[0]",
-                    step.id
-                )));
-            }
             let (executable, version) =
-                resolve_pinned_python(python_version).map_err(|error| launch(error, &workspace))?;
+                resolve_service_python(step, None).map_err(|error| launch(error, &workspace))?;
+            let mut command = step.argv.clone();
             command[0] = executable.clone();
             // No argv port rewrite: the new path binds explicitly through the
             // environment and refuses a hardcoded guest port.
@@ -1666,52 +1663,79 @@ impl PortableBundleExecutor<'_> {
             });
         }
 
+        let owned = vec![workspace.clone(), process_runtime, peer_root];
         let group = ProcessServiceGroup::start(&workspace, services)
-            .map_err(|error| launch(error, &workspace))?;
-        let surface_port = derivation
+            .map_err(|error| process_group_launch_failure(error, &owned))?;
+        Ok(self.realized_process_group(
+            ProcessServiceGroupCandidate {
+                group: Some(group),
+                broker,
+                #[cfg(target_os = "linux")]
+                namespace: None,
+                endpoints,
+                owned,
+            },
+            &runtime_identity,
+        ))
+    }
+
+    #[cfg(unix)]
+    fn process_service_environment(
+        &self,
+        step: &ato_formation::authoring::BoundStep,
+    ) -> BTreeMap<String, String> {
+        let mut environment = step.env.clone();
+        for binding in &step.bindings {
+            let name = crate::binding_environment_name(binding);
+            if let Some(value) = self.binding_environment.get(&name) {
+                environment.insert(name, value.clone());
+            }
+        }
+        environment
+    }
+
+    #[cfg(unix)]
+    fn realized_process_group(
+        &self,
+        candidate: ProcessServiceGroupCandidate,
+        runtime_identity: &BTreeMap<String, (String, String)>,
+    ) -> Realized {
+        let surface_port = self
+            .validated
+            .derivation
             .ports
             .iter()
             .find(|port| port.protocol == ato_formation::authoring::HTTP_PROTOCOL)
-            .context("native process group omitted its Surface Port")
-            .map_err(|error| launch(error, &workspace))?;
-        let surface_step = derivation
-            .steps
-            .iter()
-            .find(|step| step.id == surface_port.from)
-            .context("Surface Port has no serving step")
-            .map_err(|error| launch(error, &workspace))?;
+            .expect("the validator requires exactly one HTTP Surface Port");
         let (executable, version) = runtime_identity
-            .get(&surface_step.id)
+            .get(&surface_port.from)
             .cloned()
             .expect("every service resolved its runtime");
-        let pid = group
+        let pid = candidate
+            .group
+            .as_ref()
+            .expect("the service group is live")
             .pids()
             .into_iter()
-            .find(|(name, _)| name == &surface_step.id)
+            .find(|(name, _)| name == &surface_port.from)
             .map(|(_, pid)| pid);
-        let base = endpoints
+        let base = candidate
+            .endpoints
             .get(&surface_port.id)
-            .cloned()
             .expect("the Surface Port has an endpoint");
-        let mut execution = evidence(
+        let execution = evidence(
             "process_service_group",
             Some(executable),
             Some(version),
             pid,
-            &base,
+            base,
         );
-        execution.endpoint = Some(base.clone());
-        Ok(Realized {
-            candidate: Box::new(ProcessServiceGroupCandidate {
-                group: Some(group),
-                broker,
-                endpoints,
-                owned: vec![workspace, process_runtime, peer_root],
-            }),
+        Realized {
+            candidate: Box::new(candidate),
             evidence: None,
             execution,
             kept: None,
-        })
+        }
     }
 
     #[cfg(not(unix))]
@@ -1720,6 +1744,7 @@ impl PortableBundleExecutor<'_> {
         workspace: PathBuf,
         _state_mounts: &[PortableStateMount],
         _input_mounts: &[PortableInputMount],
+        _control: Option<&ExecutionControl>,
     ) -> Result<Realized, RealizeFailure> {
         Err(launch(
             anyhow::anyhow!("a native process service group requires a Unix host"),
@@ -1875,6 +1900,56 @@ fn launch(error: anyhow::Error, workspace: &Path) -> RealizeFailure {
     }
 }
 
+#[cfg(unix)]
+fn process_group_launch_failure(error: anyhow::Error, owned: &[PathBuf]) -> RealizeFailure {
+    if let Some(failure) = error.downcast_ref::<crate::process_group::StartCleanupUnconfirmed>() {
+        let mut resources = failure.resources.clone();
+        resources.extend(
+            owned
+                .iter()
+                .map(|path| format!("scratch:{}", path.display())),
+        );
+        return RealizeFailure::Abandoned {
+            cleanup: failure.cleanup.clone(),
+            error,
+            resources,
+        };
+    }
+    match remove_owned(owned) {
+        Ok(()) => RealizeFailure::Launch {
+            error,
+            evidence: None,
+        },
+        Err(cleanup) => RealizeFailure::Stopped {
+            error,
+            evidence: Box::new(process_group_evidence(
+                "native_process_group",
+                BTreeMap::new(),
+            )),
+            stop: ato_runtime_attempt::realize::StopClass::ScratchKept {
+                reason: format!("{cleanup:#}"),
+            },
+        },
+    }
+}
+
+#[cfg(unix)]
+fn process_group_evidence(
+    containment: &str,
+    endpoints: BTreeMap<String, String>,
+) -> ato_formation::request::RealizationEvidence {
+    ato_formation::request::RealizationEvidence {
+        port_operations: Vec::new(),
+        executor: "process_service_group".into(),
+        containment: containment.into(),
+        workspace: "read_only".into(),
+        build_network: "not_applicable".into(),
+        candidate_network: "declared_peers".into(),
+        endpoints,
+        destroyed: false,
+    }
+}
+
 fn evidence(
     realization: &str,
     executable: Option<String>,
@@ -1977,6 +2052,8 @@ impl Drop for PortableProcessCandidate {
 pub struct ProcessServiceGroupCandidate {
     group: Option<ProcessServiceGroup>,
     broker: Option<PeerBroker>,
+    #[cfg(target_os = "linux")]
+    namespace: Option<process_group_linux::ScopedNetwork>,
     endpoints: BTreeMap<String, String>,
     owned: Vec<PathBuf>,
 }
@@ -1995,13 +2072,7 @@ impl RunningCandidate for ProcessServiceGroupCandidate {
     }
 
     fn stop(mut self: Box<Self>) -> Result<()> {
-        if let Some(group) = self.group.take() {
-            group.stop()?;
-        }
-        // The broker goes after every consumer and shim is gone, so no live
-        // connection is left pointing at a removed socket.
-        drop(self.broker.take());
-        remove_owned(&self.owned)
+        self.shutdown()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -2010,11 +2081,42 @@ impl RunningCandidate for ProcessServiceGroupCandidate {
 }
 
 #[cfg(unix)]
+impl ProcessServiceGroupCandidate {
+    fn shutdown(&mut self) -> Result<()> {
+        use ato_runtime_attempt::realize::CandidateStopFailure;
+
+        let owned = std::mem::take(&mut self.owned);
+        if let Some(group) = self.group.take() {
+            let mut resources = group.resources();
+            if let Err(error) = group.stop() {
+                resources.extend(
+                    owned
+                        .iter()
+                        .map(|path| format!("scratch:{}", path.display())),
+                );
+                return Err(CandidateStopFailure::Unconfirmed {
+                    reason: format!("{error:#}"),
+                    resources,
+                }
+                .into());
+            }
+        }
+        drop(self.broker.take());
+        #[cfg(target_os = "linux")]
+        drop(self.namespace.take());
+        remove_owned(&owned).map_err(|error| {
+            CandidateStopFailure::ScratchKept {
+                reason: format!("{error:#}"),
+            }
+            .into()
+        })
+    }
+}
+
+#[cfg(unix)]
 impl Drop for ProcessServiceGroupCandidate {
     fn drop(&mut self) {
-        drop(self.group.take());
-        drop(self.broker.take());
-        if let Err(error) = remove_owned(&self.owned) {
+        if let Err(error) = self.shutdown() {
             eprintln!("[ato run] {error:#}");
         }
     }
@@ -2366,6 +2468,39 @@ fn resolve_pinned_python(version: &str) -> Result<(String, String)> {
     find_pinned_python(version, None)
 }
 
+#[cfg(unix)]
+fn resolve_service_python(
+    step: &ato_formation::authoring::BoundStep,
+    control: Option<&ExecutionControl>,
+) -> Result<(String, String)> {
+    let version = step
+        .runtimes
+        .get(PYTHON_RUNTIME)
+        .context("native process service omitted python")?;
+    ensure!(
+        matches!(
+            step.argv.first().map(String::as_str),
+            Some("python" | "python3")
+        ),
+        "Python process service `{}` must use a logical python executable in argv[0]",
+        step.id
+    );
+    match (find_pinned_python(version, control), control) {
+        (Err(error), Some(control)) => {
+            control.remaining(AttemptPhase::Launch)?;
+            Err(error.context(ato_formation::failure::FormationFailure::new(
+                "python_runtime_unavailable",
+                ato_formation::failure::FailureStage::Admission,
+                format!(
+                    "Service `{}` requires an installed Python {version}",
+                    step.id
+                ),
+            )))
+        }
+        (result, _) => result,
+    }
+}
+
 fn find_pinned_python(
     version: &str,
     control: Option<&ExecutionControl>,
@@ -2712,13 +2847,6 @@ fn portable_process_bwrap_command(
 ) -> Result<Vec<String>> {
     let state_mounts = mounts.state;
     let input_mounts = mounts.inputs;
-    let bwrap = executable_path("bwrap")
-        .context("local process runtime admission failed: `bwrap` is not on PATH")?;
-    let guest_working_dir = if working_dir == "." {
-        "/app".to_owned()
-    } else {
-        format!("/app/{working_dir}")
-    };
     let policy = SandboxPolicy::new()
         .allow_read_write(
             state_mounts
@@ -2753,52 +2881,7 @@ fn portable_process_bwrap_command(
     fs::write(&policy_path, serde_json::to_vec_pretty(&policy)?)
         .with_context(|| format!("write portable sandbox policy {}", policy_path.display()))?;
 
-    let mut command = vec![
-        bwrap.display().to_string(),
-        "--unshare-all".to_owned(),
-        "--share-net".to_owned(),
-        "--die-with-parent".to_owned(),
-        "--new-session".to_owned(),
-        "--proc".to_owned(),
-        "/proc".to_owned(),
-        "--dev".to_owned(),
-        "/dev".to_owned(),
-        "--tmpfs".to_owned(),
-        "/tmp".to_owned(),
-    ];
-    for (source, target, required) in [
-        ("/bin", "/bin", false),
-        ("/sbin", "/sbin", false),
-        ("/lib", "/lib", false),
-        ("/lib64", "/lib64", false),
-        ("/usr", "/usr", true),
-        ("/etc/resolv.conf", "/etc/resolv.conf", false),
-        ("/etc/hosts", "/etc/hosts", false),
-        ("/etc/ssl", "/etc/ssl", false),
-    ] {
-        command.extend([
-            if required {
-                "--ro-bind"
-            } else {
-                "--ro-bind-try"
-            }
-            .to_owned(),
-            source.to_owned(),
-            target.to_owned(),
-        ]);
-    }
-    if !interpreter_root.starts_with("/usr") {
-        command.extend([
-            "--ro-bind".to_owned(),
-            interpreter_root.display().to_string(),
-            interpreter_root.display().to_string(),
-        ]);
-    }
-    command.extend([
-        "--ro-bind".to_owned(),
-        workspace.display().to_string(),
-        "/app".to_owned(),
-    ]);
+    let mut command = process_bwrap_base(workspace, interpreter_root, true)?;
     for state in state_mounts {
         command.extend([
             "--bind".to_owned(),
@@ -2826,7 +2909,7 @@ fn portable_process_bwrap_command(
         policy_path.display().to_string(),
         "/.ato/sandbox-policy.json".to_owned(),
         "--chdir".to_owned(),
-        guest_working_dir,
+        format!("/app/{working_dir}"),
         "/.ato/ato".to_owned(),
         sandbox_subcommand.to_owned(),
         "--policy".to_owned(),
@@ -2834,6 +2917,69 @@ fn portable_process_bwrap_command(
         "--".to_owned(),
     ]);
     command.extend(workload.iter().cloned());
+    Ok(command)
+}
+
+#[cfg(target_os = "linux")]
+fn process_bwrap_base(
+    workspace: &Path,
+    interpreter_root: &Path,
+    share_network: bool,
+) -> Result<Vec<String>> {
+    ensure!(
+        interpreter_root != Path::new("/"),
+        "The interpreter needs a dedicated installation root"
+    );
+    let bwrap = executable_path("bwrap")
+        .context("local process runtime admission failed: `bwrap` is not on PATH")?;
+    let mut command = vec![bwrap.display().to_string(), "--unshare-all".to_owned()];
+    if share_network {
+        command.push("--share-net".to_owned());
+    } else {
+        command.extend([
+            "--unshare-user".into(),
+            "--disable-userns".into(),
+            "--cap-drop".into(),
+            "ALL".into(),
+        ]);
+    }
+    command.extend(
+        [
+            "--die-with-parent",
+            "--new-session",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--tmpfs",
+            "/tmp",
+        ]
+        .map(str::to_owned),
+    );
+    for (path, option) in [
+        ("/bin", "--ro-bind-try"),
+        ("/sbin", "--ro-bind-try"),
+        ("/lib", "--ro-bind-try"),
+        ("/lib64", "--ro-bind-try"),
+        ("/usr", "--ro-bind"),
+        ("/etc/resolv.conf", "--ro-bind-try"),
+        ("/etc/hosts", "--ro-bind-try"),
+        ("/etc/ssl", "--ro-bind-try"),
+    ] {
+        command.extend([option, path, path].map(str::to_owned));
+    }
+    if !interpreter_root.starts_with("/usr") {
+        command.extend([
+            "--ro-bind".into(),
+            interpreter_root.display().to_string(),
+            interpreter_root.display().to_string(),
+        ]);
+    }
+    command.extend([
+        "--ro-bind".into(),
+        workspace.display().to_string(),
+        "/app".into(),
+    ]);
     Ok(command)
 }
 
