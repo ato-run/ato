@@ -410,15 +410,14 @@ pub fn lease_admission(facts: &HostFacts) -> LeaseAdmission {
         browser_executor_status(facts),
     ];
     if facts.explicit_placement {
-        let runtime_launch = lease_capability(RUNTIME_LAUNCH_LEASE_KIND);
         let restriction = Reason::new(
             ReasonCode::ExplicitPlacementRestrictsLeaseKinds,
             "this Runner was started in explicit placement mode \
-             (--require-explicit-runtime-placement), so only runtime_launch leases are advertised; \
+             (--require-explicit-runtime-placement), so only runtime launch and volume maintenance can be advertised; \
              this lease kind is reported as removed instead of being dropped silently",
         );
-        for status in &mut statuses {
-            if status.capability != runtime_launch {
+        for (kind, status) in ALL_LEASE_KINDS.iter().zip(&mut statuses) {
+            if !crate::supports_explicit_runner_assignment(kind) {
                 status.state = CapabilityState::Unavailable;
                 status.reasons.push(restriction.clone());
             }
@@ -789,11 +788,13 @@ mod tests {
         let report = capability_report(&facts);
         assert_eq!(
             report.advertised_lease_kinds,
-            vec![RUNTIME_LAUNCH_LEASE_KIND]
+            vec![
+                RUNTIME_LAUNCH_LEASE_KIND,
+                STATE_VOLUME_MAINTENANCE_LEASE_KIND
+            ]
         );
         for kind in [
             PORTABLE_CAPSULE_LEASE_KIND,
-            STATE_VOLUME_MAINTENANCE_LEASE_KIND,
             ACTIVITY_BROWSER_EXECUTOR_LEASE_KIND,
         ] {
             let entry = status(&report, &format!("lease_kind:{kind}"));

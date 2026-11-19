@@ -134,18 +134,26 @@ pub struct RuntimeLaunchLeaseCommand {
 impl RuntimeLaunchLeaseCommand {
     /// This routing restriction never replaces lease/execution authorization.
     pub fn validate_runner_assignment(&self, runner_id: &str, required: bool) -> Result<()> {
-        match self.explicit_runner_id.as_deref() {
-            Some(assigned) => ensure!(
-                !assigned.trim().is_empty() && assigned == runner_id,
-                "explicit_runner_assignment_mismatch: command must explicitly name this Runner"
-            ),
-            None => ensure!(
-                !required,
-                "explicit_runner_assignment_required: this Runner accepts explicit placement only"
-            ),
-        }
-        Ok(())
+        validate_runner_assignment(self.explicit_runner_id.as_deref(), runner_id, required)
     }
+}
+
+pub(super) fn validate_runner_assignment(
+    assigned_runner: Option<&str>,
+    runner_id: &str,
+    required: bool,
+) -> Result<()> {
+    match assigned_runner {
+        Some(assigned) => ensure!(
+            !assigned.trim().is_empty() && assigned == runner_id,
+            "explicit_runner_assignment_mismatch: command must explicitly name this Runner"
+        ),
+        None => ensure!(
+            !required,
+            "explicit_runner_assignment_required: this Runner accepts explicit placement only"
+        ),
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
