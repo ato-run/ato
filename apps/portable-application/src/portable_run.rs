@@ -47,6 +47,7 @@ use ato_formation::verify::{
 use ato_objects::PortableDependencyProfile;
 use ato_runtime_attempt::admission::EffectAuthorization;
 use ato_runtime_attempt::build_sandbox::NetworkPolicy;
+use ato_runtime_attempt::control::{AttemptPhase, ExecutionControl};
 use ato_runtime_attempt::data_plane::{ModelCache, ModelSetEntry, ModelSetManifest, env_name};
 use ato_runtime_attempt::launch::oci::{
     LaunchedOci, OciCandidate, ServiceStart, start_service_group,
@@ -558,19 +559,26 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
 
     fn realize_controlled(
         &self,
-        attempt_id: &str,
-        attempt_root: &Path,
-        control: &ato_runtime_attempt::control::ExecutionControl,
+        _attempt_id: &str,
+        _attempt_root: &Path,
+        control: &ExecutionControl,
     ) -> Result<Realized, RealizeFailure> {
         use ato_formation::failure::{FailureStage, FormationFailure};
-        use ato_runtime_attempt::control::AttemptPhase;
 
         control.remaining(AttemptPhase::Launch)?;
-        // The static adapter expands a validated finite tree and starts a
-        // loopback socket in this process. No toolchain or external object can
-        // enter this bounded launch path. Other adapters need their own
-        // deadline-aware launch, and must fail closed until they have it.
-        if self.validated.realization != PortableRealizationKind::StaticWeb
+        let route = self.validated;
+        let supported = match route.realization {
+            PortableRealizationKind::StaticWeb => true,
+            // Its PID namespace dies even if a child leaves the process
+            // group. The supervisor can confirm the whole workload stopped.
+            PortableRealizationKind::LocalProcess => {
+                cfg!(target_os = "linux")
+                    && route.derivation.runtimes.contains_key(PYTHON_RUNTIME)
+                    && route.model_sets.is_empty()
+            }
+            _ => false,
+        };
+        if !supported
             || self
                 .bundle
                 .portability
@@ -583,10 +591,39 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
                 "This portable route does not yet support launch under a fixed verification budget",
             ).into()));
         }
-        self.realize(attempt_id, attempt_root)
+        if route.realization == PortableRealizationKind::LocalProcess {
+            let failure = if !ato_sandbox::bubblewrap_containment_available() {
+                Some((
+                    "linux_bubblewrap_unavailable",
+                    "Python verification requires usable Linux bubblewrap namespaces",
+                ))
+            } else if !ato_sandbox::linux_tcp_sandbox_available() {
+                Some((
+                    "linux_landlock_tcp_unavailable",
+                    "Python verification requires a Linux kernel with Landlock TCP restrictions",
+                ))
+            } else {
+                None
+            };
+            if let Some((code, message)) = failure {
+                return Err(RealizeFailure::Execution(
+                    FormationFailure::new(code, FailureStage::Admission, message).into(),
+                ));
+            }
+        }
+        self.realize_bundle(Some(control))
     }
 
     fn realize(&self, _attempt_id: &str, _attempt_root: &Path) -> Result<Realized, RealizeFailure> {
+        self.realize_bundle(None)
+    }
+}
+
+impl PortableBundleExecutor<'_> {
+    fn realize_bundle(
+        &self,
+        control: Option<&ExecutionControl>,
+    ) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
         fs::create_dir_all(self.runtime_root)
             .with_context(|| format!("create {}", self.runtime_root.display()))?;
@@ -612,10 +649,13 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
         };
         let workspace = self.runtime_root.join("workspace");
         crate::materialize_tree(&hydrated, route, &workspace).map_err(anyhow::Error::from)?;
+        if let Some(control) = control {
+            control.remaining(AttemptPhase::Launch)?;
+        }
         let mut realized = match route.realization {
             PortableRealizationKind::StaticWeb => self.start_static(workspace)?,
             PortableRealizationKind::LocalProcess => {
-                self.start_process(workspace, &state_mounts, &input_mounts)?
+                self.start_process(workspace, &state_mounts, &input_mounts, control)?
             }
             PortableRealizationKind::OciContainer => {
                 self.start_container(&hydrated, workspace, &state_mounts, &host)?
@@ -724,6 +764,7 @@ impl PortableBundleExecutor<'_> {
         workspace: PathBuf,
         state_mounts: &[PortableStateMount],
         input_mounts: &[PortableInputMount],
+        control: Option<&ExecutionControl>,
     ) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
         let step = &route.derivation.steps[0];
@@ -736,17 +777,33 @@ impl PortableBundleExecutor<'_> {
         let guest_port = guest_port.to_string();
         let host_port = host_port.to_string();
         let mut command = step.argv.clone();
-        let (executable, version) =
-            if let Some(python_version) = route.derivation.runtimes.get(PYTHON_RUNTIME) {
-                if !matches!(command[0].as_str(), "python" | "python3") {
-                    return Err(RealizeFailure::Execution(anyhow::anyhow!(
-                        "Python process derivation must use a logical python executable in argv[0]"
-                    )));
+        let (executable, version) = if let Some(python_version) =
+            route.derivation.runtimes.get(PYTHON_RUNTIME)
+        {
+            if !matches!(command[0].as_str(), "python" | "python3") {
+                return Err(RealizeFailure::Execution(anyhow::anyhow!(
+                    "Python process derivation must use a logical python executable in argv[0]"
+                )));
+            }
+            match find_pinned_python(python_version, control) {
+                Ok(interpreter) => interpreter,
+                Err(error) if control.is_none() => return Err(error.into()),
+                Err(_) => {
+                    use ato_formation::failure::{FailureStage, FormationFailure};
+                    if let Some(control) = control {
+                        control.remaining(AttemptPhase::Launch)?;
+                    }
+                    let failure = FormationFailure::new(
+                        "python_runtime_unavailable",
+                        FailureStage::Admission,
+                        "The pinned Python runtime is unavailable for bounded publication verification",
+                    );
+                    return Err(RealizeFailure::Execution(failure.into()));
                 }
-                resolve_pinned_python(python_version)?
-            } else {
-                (command[0].clone(), "unconstrained".to_owned())
-            };
+            }
+        } else {
+            (command[0].clone(), "unconstrained".to_owned())
+        };
         command[0] = executable.clone();
         let mut replaced = 0;
         for argument in &mut command {
@@ -808,7 +865,7 @@ impl PortableBundleExecutor<'_> {
         let process_home = process_runtime.join("home");
         fs::create_dir_all(&process_tmp).context("create the process tmp directory")?;
         fs::create_dir_all(&process_home).context("create the process home directory")?;
-        if state_mounts.is_empty() || state_by_path {
+        if control.is_none() && (state_mounts.is_empty() || state_by_path) {
             environment.insert(
                 "ATO_RUNTIME_DIR".to_owned(),
                 process_runtime.display().to_string(),
@@ -849,6 +906,7 @@ impl PortableBundleExecutor<'_> {
                 inputs: input_mounts,
                 state_by_path,
             },
+            control.is_some(),
             self.context.sandbox_shim,
             self.context.sandbox_subcommand,
         )?;
@@ -860,6 +918,9 @@ impl PortableBundleExecutor<'_> {
             isolated_group: true,
         })
         .map_err(|error| launch(error.into(), &workspace))?;
+        if let Some(control) = control {
+            control.remaining(AttemptPhase::Launch)?;
+        }
         let handle = adapter
             .spawn(&workspace)
             .map_err(|error| launch(error.into(), &workspace))?;
@@ -1760,9 +1821,10 @@ impl RunningCandidate for PortableProcessCandidate {
             // child behind is still running in the same group. The group is
             // stopped and shown empty, and a group that survives is an error
             // this Run reports instead of a cleanup the Drop path hides.
-            handle
-                .stop_group(ProcessStopBudget::default())
-                .context("stopping the selected process group")?;
+            if let Err(error) = handle.stop_group(ProcessStopBudget::default()) {
+                self.owned.clear();
+                return Err(error).context("stopping the selected process group");
+            }
         }
         remove_owned(&self.owned)
     }
@@ -2174,16 +2236,28 @@ struct PortableProcessMounts<'a> {
 }
 
 fn resolve_pinned_python(version: &str) -> Result<(String, String)> {
-    if let Ok(output) = Command::new("uv")
-        .args(["python", "find", version])
-        .env("UV_PYTHON_DOWNLOADS", "never")
-        .output()
+    find_pinned_python(version, None)
+}
+
+fn find_pinned_python(
+    version: &str,
+    control: Option<&ExecutionControl>,
+) -> Result<(String, String)> {
+    let mut uv = Command::new("uv");
+    uv.args(["python", "find", version])
+        .env("UV_PYTHON_DOWNLOADS", "never");
+    if control.is_some() {
+        uv.env("UV_OFFLINE", "true")
+            .env("UV_NO_CONFIG", "true")
+            .current_dir("/");
+    }
+    if let Ok(output) = python_probe(&mut uv, control)
         && output.status.success()
     {
         let path = String::from_utf8(output.stdout)?.trim().to_owned();
         if !path.is_empty() {
             let executable = executable_path(&path).unwrap_or_else(|| PathBuf::from(&path));
-            return verified_python(&executable.display().to_string(), version);
+            return verified_python(&executable.display().to_string(), version, control);
         }
     }
     let provisioned_root = PathBuf::from("/opt/ato/toolchains/python");
@@ -2200,12 +2274,12 @@ fn resolve_pinned_python(version: &str) -> Result<(String, String)> {
         for candidate in candidates.into_iter().rev() {
             let executable = provisioned_root.join(candidate).join("bin").join("python3");
             if executable.is_file() {
-                return verified_python(&executable.display().to_string(), version);
+                return verified_python(&executable.display().to_string(), version, control);
             }
         }
     }
     for executable in ["python3", "python"] {
-        let Ok(output) = Command::new(executable).arg("--version").output() else {
+        let Ok(output) = python_probe(Command::new(executable).arg("--version"), control) else {
             continue;
         };
         let reported = format!(
@@ -2218,8 +2292,11 @@ fn resolve_pinned_python(version: &str) -> Result<(String, String)> {
                 .unwrap_or_else(|| PathBuf::from(executable))
                 .display()
                 .to_string();
-            return verified_python(&selected, version);
+            return verified_python(&selected, version, control);
         }
+    }
+    if let Some(control) = control {
+        control.remaining(AttemptPhase::Launch)?;
     }
     bail!(
         "selected derivation requires Python {version}; install that runtime with `uv python install {version}`"
@@ -2245,10 +2322,12 @@ fn python_version_matches(reported: &str, required: &str) -> bool {
         .is_some_and(|actual| actual == required || actual.starts_with(&format!("{required}.")))
 }
 
-fn verified_python(executable: &str, version: &str) -> Result<(String, String)> {
-    let output = Command::new(executable)
-        .arg("--version")
-        .output()
+fn verified_python(
+    executable: &str,
+    version: &str,
+    control: Option<&ExecutionControl>,
+) -> Result<(String, String)> {
+    let output = python_probe(Command::new(executable).arg("--version"), control)
         .with_context(|| format!("inspect selected Python executable {executable}"))?;
     let reported = format!(
         "{}{}",
@@ -2261,18 +2340,81 @@ fn verified_python(executable: &str, version: &str) -> Result<(String, String)> 
             reported.trim()
         );
     }
-    let identity = Command::new(executable)
-        .args([
-            "-c",
-            "import os,sys; print(os.path.realpath(sys.executable))",
-        ])
-        .output()
+    let mut interpreter = Command::new(executable);
+    if control.is_some() {
+        interpreter.args(["-I", "-S"]);
+    }
+    interpreter.args([
+        "-c",
+        "import os,sys; print(os.path.realpath(sys.executable))",
+    ]);
+    let identity = python_probe(&mut interpreter, control)
         .with_context(|| format!("resolve selected Python executable {executable}"))?;
     let resolved = String::from_utf8(identity.stdout)?.trim().to_owned();
     if !identity.status.success() || resolved.is_empty() || !PathBuf::from(&resolved).is_file() {
         bail!("selected Python executable {executable} did not resolve to a file");
     }
     Ok((resolved, reported.trim().to_owned()))
+}
+
+fn python_probe(
+    command: &mut Command,
+    control: Option<&ExecutionControl>,
+) -> Result<std::process::Output> {
+    use std::io::{Read, Seek};
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let Some(control) = control else {
+        return Ok(command.output()?);
+    };
+    const MAX_OUTPUT: u64 = 16 * 1024;
+    let allowance = control.cap(AttemptPhase::Launch, Duration::from_secs(5))?;
+    let mut stdout = tempfile::tempfile()?;
+    let mut stderr = tempfile::tempfile()?;
+    command
+        .stdin(Stdio::null())
+        .stdout(stdout.try_clone()?)
+        .stderr(stderr.try_clone()?);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let started = Instant::now();
+    let mut child = command.spawn()?;
+    let status: Result<_> = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Err(error) => break Err(error.into()),
+            Ok(None) if started.elapsed() >= allowance => {
+                break Err(anyhow::anyhow!("Python runtime probe timed out"));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(15)),
+        }
+    };
+    if status.is_err() {
+        #[cfg(unix)]
+        let _ = ato_adapter_process::force_kill_process_tree(child.id(), child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let status = status?;
+    let read = |file: &mut std::fs::File| -> Result<Vec<u8>> {
+        file.rewind()?;
+        let mut bytes = Vec::new();
+        file.take(MAX_OUTPUT + 1).read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() as u64 <= MAX_OUTPUT,
+            "Python runtime probe output exceeded its limit"
+        );
+        Ok(bytes)
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: read(&mut stdout)?,
+        stderr: read(&mut stderr)?,
+    })
 }
 
 fn resolve_portable_state_mounts(
@@ -2332,6 +2474,7 @@ fn portable_process_sandbox_command(
     host_port: u16,
     working_dir: &str,
     mounts: PortableProcessMounts<'_>,
+    require_namespace: bool,
     sandbox_shim: &Path,
     sandbox_subcommand: &str,
 ) -> Result<Vec<String>> {
@@ -2353,7 +2496,7 @@ fn portable_process_sandbox_command(
         .and_then(std::path::Path::parent)
         .context("portable runtime has no readable installation root")?
         .to_path_buf();
-    if !state_mounts.is_empty() {
+    if require_namespace || !state_mounts.is_empty() {
         #[cfg(target_os = "linux")]
         {
             return portable_process_bwrap_command(
@@ -2370,7 +2513,7 @@ fn portable_process_sandbox_command(
         }
         #[cfg(not(target_os = "linux"))]
         {
-            if !mounts.state_by_path {
+            if require_namespace || !mounts.state_by_path {
                 // A route that declares a fixed mount but does not say it can
                 // be found by path cannot run where there is no mount
                 // namespace. Refusing is the point: `mount` is not ignored.
@@ -2900,6 +3043,7 @@ default = "pure"
                 inputs: &[],
                 state_by_path: true,
             },
+            false,
             Path::new("/usr/bin/true"),
             "__portable-sandbox-exec",
         )
@@ -3030,7 +3174,7 @@ Server(("127.0.0.1", int(os.environ["ATO_ENDPOINT_APP_HTTP_PORT"])), Handler).se
                 binding_environment: &BTreeMap::new(),
                 context: &context,
             };
-            let realized = match executor.start_process(workspace, &state_mounts, &[]) {
+            let realized = match executor.start_process(workspace, &state_mounts, &[], None) {
                 Ok(realized) => realized,
                 Err(RealizeFailure::Execution(error))
                 | Err(RealizeFailure::Launch { error, .. })
@@ -3132,6 +3276,7 @@ Server(("127.0.0.1", int(os.environ["ATO_ENDPOINT_APP_HTTP_PORT"])), Handler).se
                 inputs: &[],
                 state_by_path: false,
             },
+            false,
             Path::new("/usr/bin/true"),
             "__portable-sandbox-exec",
         )

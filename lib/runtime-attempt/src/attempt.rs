@@ -18,6 +18,7 @@
 //! to the candidate afterwards.
 
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -785,7 +786,11 @@ fn observe_http(
             }
         };
         let status = response.status().as_u16();
-        let body = response.bytes().context("cannot read the response body")?;
+        let mut body = Vec::new();
+        response
+            .take(MAX_BODY_BYTES as u64 + 1)
+            .read_to_end(&mut body)
+            .context("cannot read the response body")?;
         if let Some(control) = control {
             control.remaining(crate::control::AttemptPhase::Verification)?;
         }
