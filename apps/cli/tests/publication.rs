@@ -317,6 +317,41 @@ fn reports_declared_routes_and_scopes_passes_to_the_requested_host() {
 }
 
 #[test]
+fn forms_authored_native_service_groups_with_their_original_contract_and_peer_ports() {
+    let workspace = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/native-process-group");
+    let source = workspace.path().join("group");
+    fs::create_dir(&source).unwrap();
+    for name in ["capsule.toml", "backend.py", "proxy.py"] {
+        fs::copy(sample.join(name), source.join(name)).unwrap();
+    }
+    let (_, original) = ato_portable_application::build_authored_bundle_v2(&source).unwrap();
+    let prepared = Client::connect(home.path(), workspace.path()).ok(
+        "publication_prepare",
+        json!({"source":"group","destination":scope()}),
+    );
+    assert_eq!(prepared["phase"], "prepared");
+    assert_eq!(
+        prepared["plan"]["base_contract_ref"],
+        original.index.root_contract_ref.to_string()
+    );
+    assert_eq!(
+        prepared["plan"]["derivations"],
+        json!(original.index.derivations)
+    );
+    let route = &prepared["plan"]["declared_routes"][0];
+    assert_eq!(route["realization"], "Native Process Group");
+    assert_eq!(
+        route["services"],
+        json!([
+            {"id":"backend","runtimes":{"python":"3.12"},"ports":["backend.http"]},
+            {"id":"web","runtimes":{"python":"3.12"},"ports":["app.http"],"peer_ports":["backend.http"]}
+        ])
+    );
+}
+
+#[test]
 fn missing_contained_browser_prevents_a_pass_for_a_frozen_browser_condition() {
     let workspace = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();

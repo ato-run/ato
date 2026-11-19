@@ -237,6 +237,8 @@ struct DeclaredService {
     id: String,
     runtimes: BTreeMap<String, String>,
     ports: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    peer_ports: Vec<String>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -613,6 +615,7 @@ fn prepare(store: &Store, workspace: &Path, mut request: Prepare) -> Result<Valu
                             .filter(|port| port.from == step.id)
                             .map(|port| port.id.clone())
                             .collect(),
+                        peer_ports: step.peer_ports.clone(),
                     })
                     .collect()
             } else {

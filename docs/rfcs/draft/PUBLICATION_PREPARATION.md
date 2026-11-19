@@ -21,6 +21,12 @@ alternative route changes the artifact and its declared Derivations while
 retaining K. A bundle or authored source retains its declared Contract and
 routes. A proposed HTTP check on those targets must already be declared
 exactly or is reported as unsupported.
+Use an `ato.capsule/2` manifest with an `ato.process@1` route and
+`[[derivation.service]]` entries to form a native process service group.
+Set an empty `runtimes = {}` on the route. Each service declares its own
+Python version, Ports and `connect` edges.
+The preparation shows the serving Ports and peer edges by service and keeps
+the authored K and D unchanged.
 An authored `ato.capsule/2` can define a single OCI container or an OCI
 service group. Supply `oci_archives` as image-reference and path pairs
 within the authorized workspace. Keep the archives beside the source tree.
@@ -141,13 +147,24 @@ This lane accepts self-contained portable bundles and portable authoring
 manifests and can form Static Web and pinned single-process Python routes
 from source. Candidate exploration uses the available declared routes
 within the fixed time and attempt budget. Static Web, Linux Python
-processes, single OCI containers, and OCI service groups have bounded
-verification launch paths.
+processes and process service groups, single OCI containers, and OCI service
+groups have bounded verification launch paths.
 
 The Linux process route requires bubblewrap PID and mount namespaces plus
 Landlock network policy. The worker resolves and measures an installed
 interpreter before launch. The isolated process sees a read-only source
 and private Run storage. Its namespace stops with the owned supervisor.
+
+For native process service groups, publication verification additionally
+isolates each service in a separate network namespace with only loopback.
+The Runtime forwards observation traffic through an owner-held ingress
+listener. It connects consuming services through fixed bridges for the
+declared peer Ports. A readiness check waits for the workload's Port
+instead of the host listener. Runtime discovery, ordered startup and
+readiness share the preparation deadline. After expiry the worker still
+stops and reaps every started service before removing scratch. Unconfirmed
+cleanup leaves the attempt inconclusive. The recipient uses the same D
+through the normal portable Run entry point.
 
 OCI verification requires a self-contained offline archive for every image
 and a directly reachable native Linux Docker Engine. The attempt carries
@@ -158,7 +175,7 @@ HTTP surface. Cleanup has a separate budget. The worker leaves a
 preparation inconclusive if removal of owned containers or networks cannot
 be confirmed.
 
-Native process groups and Native Desktop still need bounded launch and
+Native Desktop still needs bounded launch and
 verified teardown for this workflow. The frozen upload is limited to 8 MiB.
 The review receipt remains in the local preparation store. Hosting review
 receipts and admission enforcement in the Hub require server support.

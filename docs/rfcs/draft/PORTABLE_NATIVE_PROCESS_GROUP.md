@@ -40,6 +40,7 @@ compiler classification; it is not part of D, K, or the wire.
 [[derivation]]
 id = "native-web"
 use = "ato.process@1"
+runtimes = {}
 
 [[derivation.service]]
 id = "backend"
@@ -60,7 +61,8 @@ connect = ["backend.http"]
 A `service` entry declares its own `argv`, `cwd`, `env`, `runtimes`, `ports`,
 `state`, `bindings`, and `connect`. Route-level `argv`, `cwd`, `env`,
 `guest_port`, and `runtimes` are refused: every process fact belongs to the
-service that uses it. `depends_on` keeps its existing meaning — authored
+service that uses it. Use an empty `runtimes = {}` table on the route.
+`depends_on` keeps its existing meaning — authored
 ordering of startup only — and is not a connection declaration.
 
 `connect` names Ports served by other services of the same route. The authoring
@@ -144,16 +146,20 @@ confidentiality boundary, and the broker tokens are per-Run and short-lived.
 
 ## Linux
 
-The intended transport on Linux is the existing scoped network path
-(per-service network namespace plus Runner-owned ingress), which already backs
-the hosted process executor. That path is a property of the hosted
-`ResolvedRuntimeLaunchContext`; wiring it into the local portable Run is a
-separate change and is **not** part of this increment. Until then the local
-portable process group uses the same broker and shim as macOS. The Landlock
-policy still restricts TCP bind to the service's own allocated Ports and TCP
-connect to its shim Ports, so undeclared peer and external connections are
-refused by the kernel on both platforms. The netns-based Linux realization
-remains the target and is listed as unverified in the PR.
+Publication verification uses a network, PID and mount namespace per
+service. A trusted ingress relay proves the declared service is listening
+inside that namespace. Each declared peer has a separate Unix socket mounted
+in the consumer's namespace. It can reach only the associated owner-held
+ingress listener. Namespace-local loopback addresses are assigned by the
+Runtime and supplied in the same Port environment variables. Landlock
+restricts the workload's TCP operations, and its namespace has no external
+network interface. The verification deadline covers every service and peer.
+The owner confirms cessation separately after the deadline.
+
+The normal local portable Run uses the broker and shim described for macOS.
+Landlock restricts allowed TCP bind and connect port numbers on Linux in
+that path. Publication verification and recipient execution use the same
+Derivation and observe its original Contract.
 
 ## Validator split
 
