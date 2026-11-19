@@ -145,17 +145,20 @@ enum Commands {
     },
     /// Build and verify an application from a source directory.
     #[command(
-        long_about = "Build and verify an application from a source directory.\n\nExample: ato form ./site --out ./formed (./site contains index.html)"
+        long_about = "Build and verify an application from a source directory.\n\nExample: ato form ./site --out ./formed (./site contains index.html)\nSee preview and inspection commands with ato formation --help."
     )]
     Form(Box<FormArgs>),
     /// Open a loopback preview of a static artifact saved by `ato form`.
-    FormPreview {
-        /// Artifact directory printed by `ato form`.
-        artifact: PathBuf,
-        /// Print the URL and keep serving without opening a browser.
-        #[arg(long)]
-        no_open: bool,
-    },
+    FormPreview(FormPreviewArgs),
+    /// Build, inspect, and preview Formation artifacts.
+    #[command(subcommand)]
+    Formation(FormationCommands),
+    /// Record, resume, and export authored project history.
+    #[command(subcommand)]
+    Project(ProjectCommands),
+    /// Operate execution hosts and their Model Sets.
+    #[command(subcommand)]
+    Runtime(RuntimeCommands),
     /// Share encrypted links or publish apps to the public Hub.
     #[command(
         after_long_help = SHARE_HELP
@@ -176,10 +179,7 @@ enum Commands {
     Resume(ResumeArgs),
     /// Stop an authored project's Run and save its branch head.
     #[command(after_long_help = "Example: ato stop ./project")]
-    Stop {
-        /// Path to a project directory initialized by `ato init`.
-        capsule: String,
-    },
+    Stop(ProjectStopArgs),
     /// Materialize one selected point into a portable .capsule bundle.
     #[command(
         after_long_help = "Export main: ato encap ./project -o project.capsule\nExport a sealed record: ato encap './project@main#3' -o recorded.capsule"
@@ -245,19 +245,7 @@ enum Commands {
         display_order = 90,
         after_long_help = "Example: ato form-inspect ./project\nInspect source hints before building. With --derivation and --contract, also show the route and what it must satisfy."
     )]
-    FormInspect {
-        /// Local source directory to scan for declared or hinted runtimes, ports, and entrypoints.
-        path: PathBuf,
-        /// Print the full inspection document as JSON, including on a terminal.
-        #[arg(long)]
-        json: bool,
-        /// Optional canonical D JSON, inspected without changing or executing it.
-        #[arg(long, requires = "contract")]
-        derivation: Option<PathBuf>,
-        /// The unchanged K whose observations the selected D must satisfy.
-        #[arg(long, requires = "derivation")]
-        contract: Option<PathBuf>,
-    },
+    FormInspect(FormInspectArgs),
     /// Automation: inspect or supply scoped input to an existing Formation Search.
     #[command(
         display_order = 90,
@@ -357,6 +345,77 @@ struct SourceOciBuildArgs {
     /// New output directory.
     #[arg(long)]
     out: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct FormPreviewArgs {
+    /// Artifact directory printed by `ato form`.
+    artifact: PathBuf,
+    /// Print the URL and keep serving without opening a browser.
+    #[arg(long)]
+    no_open: bool,
+}
+
+#[derive(Debug, Args)]
+struct ProjectStopArgs {
+    /// Path to a project directory initialized by `ato init`.
+    capsule: String,
+}
+
+#[derive(Debug, Args)]
+struct FormInspectArgs {
+    /// Local source directory to scan for declared or hinted runtimes, ports, and entrypoints.
+    path: PathBuf,
+    /// Print the full inspection document as JSON, including on a terminal.
+    #[arg(long)]
+    json: bool,
+    /// Optional canonical D JSON, inspected without changing or executing it.
+    #[arg(long, requires = "contract")]
+    derivation: Option<PathBuf>,
+    /// The unchanged K whose observations the selected D must satisfy.
+    #[arg(long, requires = "derivation")]
+    contract: Option<PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum FormationCommands {
+    /// Build and verify an application from a source directory.
+    Build(Box<FormArgs>),
+    /// Open a loopback preview of a saved static artifact.
+    Preview(FormPreviewArgs),
+    /// Inspect a source directory without building or launching.
+    Inspect(FormInspectArgs),
+    /// Inspect or supply scoped input to an existing remote Search.
+    Input(formation_input::InputArgs),
+    /// Work through a scoped Formation Session.
+    Session(formation_session::SessionArgs),
+    /// Authorize functional verification of a retained Source result.
+    Verify(formation_verify::VerifyArgs),
+}
+
+#[derive(Subcommand)]
+enum ProjectCommands {
+    /// Initialize an authored directory with a capsule.toml.
+    Init(InitArgs),
+    /// Continue the selected branch or start a new branch from history.
+    Resume(ResumeArgs),
+    /// Stop the project's active Run and save its branch head.
+    Stop(ProjectStopArgs),
+    /// Export a sealed point to a portable Capsule.
+    Encap(EncapArgs),
+}
+
+#[derive(Subcommand)]
+enum RuntimeCommands {
+    /// Run Formation work assigned by the Runtime Network.
+    #[command(subcommand)]
+    Network(RuntimeNetworkCommand),
+    /// Manage verified Model Sets on this host.
+    #[command(subcommand)]
+    ModelSet(model_cache::ModelSetCommands),
+    /// Serve a local MLX model as a generation endpoint.
+    #[command(subcommand)]
+    Llm(LlmCommands),
 }
 
 #[derive(Subcommand)]
@@ -1009,41 +1068,52 @@ pub fn cli_exit_code(error: &anyhow::Error) -> i32 {
     derivation_selection::exit_code(error)
 }
 
-fn command_with_grouped_help() -> clap::Command {
-    let command = Cli::command();
-    let groups: &[(&str, &[&str])] = &[
-        ("Use apps", &["run", "app", "workspace", "hub", "login"]),
-        (
-            "Create and share",
-            &[
-                "form",
-                "form-preview",
-                "pack",
-                "reform",
-                "export-plan",
-                "export",
-                "upload",
-            ],
-        ),
-        (
-            "Author a recorded project",
-            &["init", "resume", "stop", "encap"],
-        ),
-        (
-            "Formation and runtime tools",
-            &[
-                "form-inspect",
-                "form-input",
-                "form-session",
-                "form-verify",
-                "runtime-network",
-                "model-set",
-                "llm",
-                "data",
-            ],
-        ),
-        ("CLI information", &["version"]),
-    ];
+fn command_with_help(full: bool) -> clap::Command {
+    let command = Cli::command().arg(
+        clap::Arg::new("help-all")
+            .long("help-all")
+            .help("Show all commands, including authoring and automation tools")
+            .action(clap::ArgAction::HelpLong),
+    );
+    let groups: &[(&str, &[&str])] = if full {
+        &[
+            ("Use apps", &["run", "app", "workspace", "hub", "login"]),
+            (
+                "Create and share",
+                &[
+                    "form",
+                    "formation",
+                    "form-preview",
+                    "pack",
+                    "reform",
+                    "export-plan",
+                    "export",
+                    "upload",
+                ],
+            ),
+            (
+                "Author a recorded project",
+                &["project", "init", "resume", "stop", "encap"],
+            ),
+            (
+                "Formation and runtime tools",
+                &[
+                    "runtime",
+                    "form-inspect",
+                    "form-input",
+                    "form-session",
+                    "form-verify",
+                    "runtime-network",
+                    "model-set",
+                    "llm",
+                    "data",
+                ],
+            ),
+            ("CLI information", &["version"]),
+        ]
+    } else {
+        &[("Main commands", &["run", "app", "form", "hub", "login"])]
+    };
     let public: BTreeMap<_, _> = command
         .get_subcommands()
         .filter(|command| !command.is_hide_set())
@@ -1060,8 +1130,14 @@ fn command_with_grouped_help() -> clap::Command {
             }
         }
     }
-    writeln!(template, "  {:width$}  Print help for a command.", "help").expect("write to String");
+    if full {
+        writeln!(template, "  {:width$}  Print help for a command.", "help")
+            .expect("write to String");
+    }
     template.push_str("\n{options}{after-help}");
+    if !full {
+        template.push_str("\nSee all commands with ato --help-all.");
+    }
     command.help_template(template)
 }
 
@@ -1128,7 +1204,8 @@ pub fn run() -> Result<()> {
     if argv.get(1).is_some_and(|arg| arg == "sandbox-exec") {
         return ato_formation_worker::sandbox_exec::sandbox_exec(&argv[2..]);
     }
-    let cli = command_with_grouped_help()
+    let full_help = argv.get(1).is_some_and(|arg| arg == "--help-all");
+    let cli = command_with_help(full_help)
         .try_get_matches_from(&argv)
         .and_then(|matches| Cli::from_arg_matches(&matches))
         .unwrap_or_else(|error| command_usage_error(error, &argv).exit());
@@ -1136,7 +1213,7 @@ pub fn run() -> Result<()> {
         Commands::Version { json } => version(json),
         Commands::Init(args) => init(args),
         Commands::Resume(args) => resume(args),
-        Commands::Stop { capsule } => stop(&capsule),
+        Commands::Stop(args) => stop(&args.capsule),
         Commands::Encap(args) => encap(args),
         Commands::Pack(args) => pack(args),
         Commands::NativeBundle(args) => native_bundle(args),
@@ -1161,17 +1238,32 @@ pub fn run() -> Result<()> {
         Commands::Login(args) => login(args),
         Commands::Upload(args) => upload(args),
         Commands::Hub { command } => hub::run(command),
-        Commands::Form(args) if args.runtime_network => form_on_runtime_network(*args),
-        Commands::Form(args) => form(*args),
-        Commands::FormPreview { artifact, no_open } => preview_formation(&artifact, no_open),
+        Commands::Form(args) => build_formation(*args),
+        Commands::FormPreview(args) => preview_formation(&args.artifact, args.no_open),
+        Commands::Formation(command) => match command {
+            FormationCommands::Build(args) => build_formation(*args),
+            FormationCommands::Preview(args) => preview_formation(&args.artifact, args.no_open),
+            FormationCommands::Inspect(args) => inspect_formation_args(args),
+            FormationCommands::Input(args) => formation_input::run(args),
+            FormationCommands::Session(args) => formation_session::run(args),
+            FormationCommands::Verify(args) => formation_verify::run(args),
+        },
+        Commands::Project(command) => match command {
+            ProjectCommands::Init(args) => init(args),
+            ProjectCommands::Resume(args) => resume(args),
+            ProjectCommands::Stop(args) => stop(&args.capsule),
+            ProjectCommands::Encap(args) => encap(args),
+        },
+        Commands::Runtime(command) => match command {
+            RuntimeCommands::Network(RuntimeNetworkCommand::Serve(args)) => {
+                runtime_network_serve(args)
+            }
+            RuntimeCommands::ModelSet(command) => model_cache::execute(command),
+            RuntimeCommands::Llm(LlmCommands::Serve(args)) => llm_serve::serve(&args),
+        },
         Commands::Data { command } => data::run(data::DataArgs { command }),
         Commands::Workspace { command } => workspace::run(workspace::WorkspaceArgs { command }),
-        Commands::FormInspect {
-            path,
-            derivation,
-            contract,
-            json,
-        } => inspect_formation(&path, derivation.as_deref(), contract.as_deref(), json),
+        Commands::FormInspect(args) => inspect_formation_args(args),
         Commands::FormInput(args) => formation_input::run(args),
         Commands::FormSession(args) => formation_session::run(args),
         Commands::FormVerify(args) => formation_verify::run(args),
@@ -1914,6 +2006,23 @@ fn read_inspection_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T
     serde_json::from_slice(&bytes).context("invalid inspection JSON")
 }
 
+fn build_formation(args: FormArgs) -> Result<()> {
+    if args.runtime_network {
+        form_on_runtime_network(args)
+    } else {
+        form(args)
+    }
+}
+
+fn inspect_formation_args(args: FormInspectArgs) -> Result<()> {
+    inspect_formation(
+        &args.path,
+        args.derivation.as_deref(),
+        args.contract.as_deref(),
+        args.json,
+    )
+}
+
 fn form(args: FormArgs) -> Result<()> {
     use ato_formation::request::{
         ContractSource, FormationNetworkPolicy, FormationPolicy, FormationRequest, FormationResult,
@@ -1981,7 +2090,7 @@ fn form(args: FormArgs) -> Result<()> {
                     LocalArtifact::StaticWeb(path) => {
                         eprintln!("Static site saved to {}", path.display());
                         eprintln!(
-                            "Preview it with: ato form-preview {}",
+                            "Preview it with: ato formation preview {}",
                             display_path_argument(&path)
                         );
                     }
@@ -2465,7 +2574,7 @@ fn read_local_bundle(path: &Path, require_capsule_extension: bool) -> Result<Vec
     };
     if metadata.is_dir() {
         bail!(
-            "{input} is a directory. Pass a portable .capsule file. To preview a static artifact produced by `ato form`, use `ato form-preview`"
+            "{input} is a directory. Pass a portable .capsule file. To preview a static artifact produced by `ato form`, use `ato formation preview`"
         );
     }
     if !metadata.is_file() {

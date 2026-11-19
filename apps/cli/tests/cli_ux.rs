@@ -27,11 +27,25 @@ fn sample(name: &str) -> PathBuf {
 #[test]
 fn help_groups_expose_public_tasks_and_the_init_example_works() {
     let help = assert_success(ato().arg("--help").output().unwrap());
+    let (_, commands) = help.split_once("Main commands:\n").unwrap();
+    let names: Vec<_> = commands
+        .lines()
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+    assert_eq!(names, ["run", "app", "form", "hub", "login"]);
+    assert!(help.contains("--help-all"));
+    assert!(!help.contains("form-session"));
+
+    let help = assert_success(ato().arg("--help-all").output().unwrap());
     let use_apps = help.find("Use apps:").unwrap();
     let authoring = help.find("Author a recorded project:").unwrap();
     let tools = help.find("Formation and runtime tools:").unwrap();
     assert!(help[use_apps..authoring].contains("  run "));
     assert!(help[tools..].contains("  form-session "));
+    for namespace in ["formation", "project", "runtime"] {
+        assert!(help.contains(&format!("  {namespace} ")), "{help}");
+    }
     assert!(!help.contains("__worker"));
 
     let root = tempfile::tempdir().unwrap();
@@ -44,15 +58,20 @@ fn help_groups_expose_public_tasks_and_the_init_example_works() {
         .map(str::trim)
         .collect::<Vec<_>>()
         .join("\n");
-    fs::write(root.path().join("capsule.toml"), manifest).unwrap();
-    assert_success(
-        ato()
-            .args(["init", "--initial-only"])
-            .arg(root.path())
-            .output()
-            .unwrap(),
-    );
-    assert!(root.path().join(".capsule/refs/heads/main").is_file());
+    for (directory, command) in [("legacy", &["init"][..]), ("project", &["project", "init"])] {
+        let project = root.path().join(directory);
+        fs::create_dir(&project).unwrap();
+        fs::write(project.join("capsule.toml"), &manifest).unwrap();
+        assert_success(
+            ato()
+                .args(command)
+                .arg("--initial-only")
+                .arg(&project)
+                .output()
+                .unwrap(),
+        );
+        assert!(project.join(".capsule/refs/heads/main").is_file());
+    }
 }
 
 #[test]
@@ -230,9 +249,13 @@ fn form_inspection_preserves_the_scriptable_json_document() {
         r#"{"scripts":{"build":"vite build"}}"#,
     )
     .unwrap();
-    for json in [false, true] {
+    for (entry, json) in [
+        (&["form-inspect"][..], false),
+        (&["form-inspect"][..], true),
+        (&["formation", "inspect"][..], true),
+    ] {
         let mut command = ato();
-        command.arg("form-inspect").arg(root.path());
+        command.args(entry).arg(root.path());
         if json {
             command.arg("--json");
         }
@@ -306,6 +329,18 @@ fn documented_specialist_entry_points_keep_their_existing_shape() {
         ),
         (&["runtime-network", "serve", "--help"][..], "--token-file"),
         (&["model-set", "import", "--help"][..], "--manifest"),
+        (
+            &["formation", "verify", "--help"][..],
+            "--authorize-functional-verification",
+        ),
+        (
+            &["runtime", "network", "serve", "--help"][..],
+            "--token-file",
+        ),
+        (
+            &["runtime", "model-set", "import", "--help"][..],
+            "--manifest",
+        ),
     ] {
         let help = assert_success(ato().args(args).output().unwrap());
         assert!(help.contains(required), "{help}");
