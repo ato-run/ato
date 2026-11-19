@@ -217,6 +217,69 @@ fn repo_sample() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-static.capsule")
 }
 
+#[test]
+fn export_plan_accepts_a_public_hub_reference_without_starting_a_run() {
+    let bundle = sample_bytes();
+    let api = StubApi::new(vec![
+        json_response("200 OK", resolve_body(&bundle)),
+        binary_response(&bundle),
+    ]);
+    let home = tempfile::tempdir().unwrap();
+    let output = ato_with_home(home.path())
+        .args([
+            "export-plan",
+            "capsules/koh0920/interop-static",
+            "--api-url",
+            &api.base,
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["profile"], "cached");
+    let requests = api.wait_requests(2);
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|request| request.starts_with("GET ")));
+    assert!(!home.path().join("runs").exists());
+}
+
+#[test]
+fn export_from_a_hub_reference_preserves_contract_and_routes() {
+    let bundle = sample_bytes();
+    let api = StubApi::new(vec![
+        json_response("200 OK", resolve_body(&bundle)),
+        binary_response(&bundle),
+    ]);
+    let home = tempfile::tempdir().unwrap();
+    let target = home.path().join("offline.capsule");
+    let output = ato_with_home(home.path())
+        .args([
+            "export",
+            "capsules/koh0920/interop-static",
+            "--api-url",
+            &api.base,
+            "--portability",
+            "offline",
+            "-o",
+        ])
+        .arg(&target)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let source: Value = serde_json::from_slice(&bundle).unwrap();
+    let result: Value = serde_json::from_slice(&fs::read(target).unwrap()).unwrap();
+    assert_eq!(
+        result["index"]["root_contract_ref"],
+        source["index"]["root_contract_ref"]
+    );
+    assert_eq!(
+        result["index"]["derivations"],
+        source["index"]["derivations"]
+    );
+    assert_eq!(api.wait_requests(2).len(), 2);
+}
+
 fn readme_sample() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-static-README.md")
 }

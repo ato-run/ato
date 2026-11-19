@@ -347,6 +347,7 @@ dependencies = [
  "sha2",
  "signal-hook",
  "socket2 0.6.4",
+ "strsim",
  "tempfile",
  "tokio",
  "toml",

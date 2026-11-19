@@ -158,3 +158,72 @@ fn form_inspection_preserves_the_scriptable_json_document() {
         assert_eq!(value["declared_execution"], Value::Null);
     }
 }
+
+#[test]
+fn usage_errors_offer_relevant_public_commands() {
+    for (args, expected) in [
+        (&["status"][..], "ato app list"),
+        (&["doctor"][..], "ato data health"),
+        (&["hub", "search"][..], "https://ato.run/capsules"),
+        (&["ap"][..], "subcommand exists: 'app'"),
+    ] {
+        let output = ato().args(args).output().unwrap();
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            error.contains(expected) && !error.contains("__static-bundle"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn undeclared_route_error_lists_actual_references_and_the_next_command() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("test app.capsule");
+    fs::copy(sample("interop-multi-derivation.capsule"), &file).unwrap();
+    let output = ato()
+        .env("ATO_HOME", root.path())
+        .args(["run", "--derivation", "help"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    let routes = assert_success(
+        ato()
+            .env("ATO_HOME", root.path())
+            .args(["run", "--list-derivations", "--json"])
+            .arg(&file)
+            .output()
+            .unwrap(),
+    );
+    let routes: Value = serde_json::from_str(&routes).unwrap();
+    for route in routes["derivations"].as_array().unwrap() {
+        assert!(
+            error.contains(route["derivation_ref"].as_str().unwrap()),
+            "{error}"
+        );
+    }
+    assert!(
+        error.contains(&format!("ato run '{}' --list-derivations", file.display())),
+        "{error}"
+    );
+}
+
+#[test]
+fn documented_specialist_entry_points_keep_their_existing_shape() {
+    for (args, required) in [
+        (&["form-input", "--help"][..], "search_id"),
+        (&["form-session", "--help"][..], "--session-bridge"),
+        (
+            &["form-verify", "--help"][..],
+            "--authorize-functional-verification",
+        ),
+        (&["runtime-network", "serve", "--help"][..], "--token-file"),
+        (&["model-set", "import", "--help"][..], "--manifest"),
+    ] {
+        let help = assert_success(ato().args(args).output().unwrap());
+        assert!(help.contains(required), "{help}");
+    }
+}

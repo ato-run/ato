@@ -593,6 +593,34 @@ fn step_network_token(network: StepNetwork) -> &'static str {
     }
 }
 
+/// A short interactive listing. Keep full, copyable identifiers in every row.
+pub fn render_route_list(candidates: &DerivationCandidates) -> Vec<String> {
+    let mut lines = vec![format!("{:<30} {:<34} DERIVATION", "ROUTE", "HOST STATUS")];
+    for candidate in &candidates.derivations {
+        let route = candidate.route.unwrap_or("Unknown");
+        lines.push(format!(
+            "{route:<30} {:<34} {}",
+            host_verdict(candidate),
+            candidate.derivation_ref
+        ));
+        if let Some(name) = &candidate.display_name {
+            lines.push(format!("  App: {name}"));
+        }
+        if let Some(invalid) = &candidate.invalid {
+            lines.push(format!("  {invalid}"));
+        }
+        if let Some(admission) = &candidate.admission {
+            lines.extend(
+                admission
+                    .reasons
+                    .iter()
+                    .map(|reason| format!("  {}", reason.message)),
+            );
+        }
+    }
+    lines
+}
+
 /// The numbered selection screen, without a prompt.
 ///
 /// Every fact a choice depends on is here: the name the bundle carries, how the
