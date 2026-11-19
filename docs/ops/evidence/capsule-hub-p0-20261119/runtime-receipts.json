@@ -33,6 +33,44 @@
       ]
     }
   },
+  "uptime-kuma": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/4",
+      "bundle_sha256": "sha256:4c6ce8965e044038b82de81f397e66cbfbdf7885712bf2af009c56865124b7ef",
+      "contract_ref": "sha256:15e1b550d3df8ff93f65ede384bba4b7306e5b78b89ad866ff958017029e944a",
+      "derivation_ref": "sha256:246040cd78fb4dfbb7b2e384b08760c566042154a4a393bb1f8e9d21b04a6865",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "oci",
+        "runtime_executable": "docker",
+        "image": "docker.io/louislam/uptime-kuma@sha256:bc81e600a1b18824e7eaecbb0167c2a1c732475fc499c1e3253752b965946036",
+        "platform": "linux/amd64",
+        "platform_emulated": true,
+        "connector": "relay",
+        "relay_image_digest": "sha256:3e66ad944f585ee3a547dfd6db569e2c05383cbca66b1ba1639e10fa1620f0cd",
+        "attempt_id": "run-31893-1795066473589706000"
+      },
+      "observations": [
+        {
+          "id": "uptime-kuma-http",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/setup-database-info",
+            "status": 200,
+            "body_sha256": "sha256:fb74a2222c389a7c850248aedd98546feffc71b083587869e56c1afc3a0db38a"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "create and retrieve a local HTTP monitor",
+      "id": 1
+    }
+  },
   "beszel": {
     "receipt_excerpt": {
       "schema": "ato.contract-verification-receipt/4",
@@ -325,6 +363,40 @@
     "operations": {
       "operation": "diagram render and SVG export",
       "size": 11088
+    }
+  },
+  "code-server": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/4",
+      "bundle_sha256": "sha256:b465282253caad892bc575e4bb0cded66d7471cfa2b458f11a7773d118e4f6f5",
+      "contract_ref": "sha256:d0226549c3f6bff642e201963e16967004988a0db2855b45a7f496165ecb6f5f",
+      "derivation_ref": "sha256:d7c3a60824c553a518ffb05dada2de030d95b71600d4f499da1a356d69c1a5b2",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "oci",
+        "runtime_executable": "docker",
+        "image": "docker.io/codercom/code-server@sha256:aaad9c5f5ecb70713188e8466060f186b08bd328cd3e1bcffc4a2a2dca33c14b",
+        "platform": "linux/amd64",
+        "platform_emulated": true,
+        "connector": "relay",
+        "relay_image_digest": "sha256:3e66ad944f585ee3a547dfd6db569e2c05383cbca66b1ba1639e10fa1620f0cd",
+        "attempt_id": "run-32481-1795066514407311000"
+      },
+      "observations": [
+        {
+          "id": "code-server-http",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/healthz",
+            "status": 200,
+            "body_sha256": "sha256:d9f3d9f0503b1bc34b7faeaced9c83ec0519ec428aafa019bfdf47f3df862b5c"
+          }
+        }
+      ]
     }
   }
 }
