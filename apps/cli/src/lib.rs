@@ -27,6 +27,7 @@ pub mod auth_device;
 pub mod formation_session_mcp;
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -80,7 +81,7 @@ use ato_record_writer::{
 };
 use ato_runtime_object_graph::standard_reference_registry;
 use ato_sandbox::{SandboxPolicy, apply_sandbox};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 
 use crate::derivation_selection::{DerivationCandidate, DerivationChoice};
 
@@ -100,6 +101,20 @@ use ato_local_execution::{
     OwnedProcessIdentity, configure_detached_process, terminate_owned_process,
 };
 
+const SHARE_HELP: &str = "Encrypted link
+  ato hub push ./app.capsule --hub-url https://hub.example
+  The bundle is encrypted on this machine. Keep the full link private.
+  The recipient uses ato hub pull '<LINK>' -o app.capsule. The hub may require a token.
+
+Public listing
+  ato hub publish ./app.capsule --name owner/app
+  Requires Ato login or a publisher token. Anyone can run capsules/owner/app.
+
+Authored project upload
+  ato upload ./project --api-url https://api.ato.run --visibility private
+  Sends the project's object graph to the API using Ato login or a token.
+  Visibility controls API access. The command writes an upload receipt.";
+
 #[derive(Parser)]
 #[command(
     name = "ato",
@@ -116,12 +131,12 @@ struct Cli {
 enum Commands {
     /// Try a local or Hub Capsule in a temporary Run.
     #[command(
-        after_long_help = "Example: ato run ./application.capsule\nFor a local installation you can stop and restart, use `ato app install`."
+        after_long_help = "Try a Capsule: ato run ./application.capsule\nCtrl-C stops the temporary Run. Its runtime changes are discarded.\nTo keep a local Instance and its supported saved data, use ato app install ./application.capsule."
     )]
     Run(RunArgs),
     /// Install apps locally and list, start, or stop their Instances.
     #[command(
-        after_long_help = "Install: ato app install ./application.capsule\nFind the Instance ID: ato app list\nRestart it: ato app start <INSTANCE>"
+        after_long_help = "Install: ato app install ./application.capsule\nFind the Instance ID: ato app list\nStop or restart: ato app stop <INSTANCE> / ato app start <INSTANCE>\nStopping keeps the Instance and its supported saved data. Use ato run ./application.capsule for a temporary trial."
     )]
     App {
         #[command(subcommand)]
@@ -142,7 +157,7 @@ enum Commands {
     },
     /// Share encrypted links or publish apps to the public Hub.
     #[command(
-        after_long_help = "`push` encrypts the bundle locally and prints a link. The recipient uses `pull` to get the file.\n`publish` makes the bundle publicly discoverable under capsules/<owner>/<name> using an Ato login."
+        after_long_help = SHARE_HELP
     )]
     Hub {
         #[command(subcommand)]
@@ -150,7 +165,7 @@ enum Commands {
     },
     /// Initialize a directory with an existing capsule.toml and start recording.
     #[command(
-        after_long_help = "In capsule.toml, set schema = 1 and declare your process and adapters.\nInitialize without starting: ato init ./project --initial-only\nStart the initialized project: ato resume ./project"
+        after_long_help = "Example project/capsule.toml (requires Python 3 to start):\n\n  schema = 1\n\n  [[process]]\n  id = \"app\"\n  command = [\"python3\", \"-m\", \"http.server\", \"8000\", \"--bind\", \"127.0.0.1\"]\n\n  [[adapter]]\n  use = \"ato.process@1\"\n  target = \"app\"\n\nInitialize: ato init ./project --initial-only\nStart the project: ato resume ./project"
     )]
     Init(InitArgs),
     /// Continue a branch or create a new future from a historical Record.
@@ -193,6 +208,7 @@ enum Commands {
     /// Authenticate this CLI with an Ato API using the browser device flow.
     Login(LoginArgs),
     /// Upload an authored project's object graph to the Ato API.
+    #[command(after_long_help = SHARE_HELP)]
     Upload(UploadArgs),
     /// Read and write DataResources on a Coordinator (hosted API or selfhost).
     Data {
@@ -207,7 +223,11 @@ enum Commands {
     /// Inspect repository execution evidence without building or launching it.
     #[command(display_order = 90)]
     FormInspect {
+        /// Local source directory to scan for declared or hinted runtimes, ports, and entrypoints.
         path: PathBuf,
+        /// Print the full inspection document as JSON, including on a terminal.
+        #[arg(long)]
+        json: bool,
         /// Optional canonical D JSON, inspected without changing or executing it.
         #[arg(long, requires = "contract")]
         derivation: Option<PathBuf>,
@@ -313,7 +333,7 @@ enum LlmCommands {
 enum AppCommands {
     /// Install a local or Hub Capsule as an independent Instance and open it.
     #[command(
-        after_long_help = "Use `ato app list` to find the new Instance. Stop and restart it with `ato app stop` and `ato app start`. Use `ato run` for a temporary trial."
+        after_long_help = "Example: ato app install ./application.capsule\nFind the Instance ID with ato app list. Stop and restart it with ato app stop and ato app start.\nStopping keeps the Instance and its supported saved data. Use ato run ./application.capsule for a temporary trial."
     )]
     Install(AppInstallArgs),
     /// List apps installed or imported on this machine and their Run status.
@@ -401,11 +421,17 @@ struct RunArgs {
     #[arg(long)]
     derivation: Option<String>,
     /// List declared routes and whether this host can run them, then exit.
-    #[arg(long)]
+    #[arg(long, group = "inspection")]
     list_derivations: bool,
-    /// Emit the route list as JSON, including on a terminal.
-    #[arg(long, requires = "list_derivations")]
+    /// List the app's declared connection IDs and protocols without starting it.
+    #[arg(long, group = "inspection")]
+    list_bindings: bool,
+    /// Emit the route or binding list as JSON, including on a terminal.
+    #[arg(long, requires = "inspection")]
     json: bool,
+    /// Show full route identifiers, host diagnostics, and connection errors.
+    #[arg(long)]
+    verbose: bool,
     /// Accept the selected Derivation's declared permissions without the
     /// interactive confirmation.
     ///
@@ -413,7 +439,11 @@ struct RunArgs {
     /// run.
     #[arg(long)]
     accept_permissions: bool,
-    /// Set a connection value for this Run, using a Binding ID declared by the app.
+    /// Set a value for a declared runtime connection for this Run only.
+    ///
+    /// Use --list-bindings to see IDs and protocols. For example, --bind
+    /// database_url=https://db.example assigns an endpoint URL when the app
+    /// declares database_url. Values are runtime inputs and are not saved.
     #[arg(long = "bind", value_name = "BINDING_ID=VALUE", value_parser = parse_binding)]
     bindings: Vec<(String, String)>,
     /// Verify the temporary Run, stop it and exit without opening a browser.
@@ -505,9 +535,15 @@ struct AppStartArgs {
     allow_unsigned_native: bool,
     /// Local Instance ID from `ato app list`.
     instance: String,
-    /// Set a declared runtime connection as BINDING_ID=VALUE for this Run only.
+    /// Set a declared connection for this Run. Use --list-bindings for IDs and protocols.
+    ///
+    /// For example, --bind database_url=https://db.example assigns an endpoint
+    /// URL when the app declares database_url. The value is not saved.
     #[arg(long = "bind", value_name = "BINDING_ID=VALUE", value_parser = parse_binding)]
     bindings: Vec<(String, String)>,
+    /// List the app's declared connection IDs and protocols without starting it.
+    #[arg(long)]
+    list_bindings: bool,
     /// Start the Run and leave it active without opening its Surface. Stop it with `ato app stop`.
     #[arg(long)]
     no_open: bool,
@@ -919,6 +955,62 @@ pub fn cli_exit_code(error: &anyhow::Error) -> i32 {
     derivation_selection::exit_code(error)
 }
 
+fn command_with_grouped_help() -> clap::Command {
+    let command = Cli::command();
+    let groups: &[(&str, &[&str])] = &[
+        ("Use apps", &["run", "app", "workspace", "hub", "login"]),
+        (
+            "Create and share",
+            &[
+                "form",
+                "form-preview",
+                "pack",
+                "reform",
+                "export-plan",
+                "export",
+                "upload",
+            ],
+        ),
+        (
+            "Author a recorded project",
+            &["init", "resume", "stop", "encap"],
+        ),
+        (
+            "Formation and runtime tools",
+            &[
+                "form-inspect",
+                "form-input",
+                "form-session",
+                "form-verify",
+                "runtime-network",
+                "model-set",
+                "llm",
+                "data",
+            ],
+        ),
+        ("CLI information", &["version"]),
+    ];
+    let public: BTreeMap<_, _> = command
+        .get_subcommands()
+        .filter(|command| !command.is_hide_set())
+        .map(|command| (command.get_name(), command.get_about()))
+        .collect();
+    let width = public.keys().map(|name| name.len()).max().unwrap_or(0);
+    let mut template = String::from("{before-help}{about-with-newline}\n{usage-heading} {usage}\n");
+    for (heading, names) in groups {
+        template.push('\n');
+        writeln!(template, "{heading}:").expect("write to String");
+        for name in *names {
+            if let Some(about) = public.get(name).copied().flatten() {
+                writeln!(template, "  {name:width$}  {about}").expect("write to String");
+            }
+        }
+    }
+    writeln!(template, "  {:width$}  Print help for a command.", "help").expect("write to String");
+    template.push_str("\n{options}{after-help}");
+    command.help_template(template)
+}
+
 pub fn run() -> Result<()> {
     // Re-entry from INSIDE the build sandbox (Linux): bwrap execs this same
     // binary with sandbox-exec as argv[1]. Not a user-facing subcommand, so
@@ -927,24 +1019,27 @@ pub fn run() -> Result<()> {
     if argv.get(1).is_some_and(|arg| arg == "sandbox-exec") {
         return ato_formation_worker::sandbox_exec::sandbox_exec(&argv[2..]);
     }
-    let cli = Cli::try_parse_from(argv).unwrap_or_else(|mut error| {
-        use clap::error::{ContextKind, ContextValue};
+    let cli = command_with_grouped_help()
+        .try_get_matches_from(argv)
+        .and_then(|matches| Cli::from_arg_matches(&matches))
+        .unwrap_or_else(|mut error| {
+            use clap::error::{ContextKind, ContextValue};
 
-        // Internal re-entry commands use the __ prefix. Clap can suggest
-        // them even when they are hidden from help.
-        if let Some(ContextValue::Strings(mut suggestions)) =
-            error.remove(ContextKind::SuggestedSubcommand)
-        {
-            suggestions.retain(|name| !name.starts_with("__"));
-            if !suggestions.is_empty() {
-                error.insert(
-                    ContextKind::SuggestedSubcommand,
-                    ContextValue::Strings(suggestions),
-                );
+            // Internal re-entry commands use the __ prefix. Clap can suggest
+            // them even when they are hidden from help.
+            if let Some(ContextValue::Strings(mut suggestions)) =
+                error.remove(ContextKind::SuggestedSubcommand)
+            {
+                suggestions.retain(|name| !name.starts_with("__"));
+                if !suggestions.is_empty() {
+                    error.insert(
+                        ContextKind::SuggestedSubcommand,
+                        ContextValue::Strings(suggestions),
+                    );
+                }
             }
-        }
-        error.exit()
-    });
+            error.exit()
+        });
     match cli.command {
         Commands::Version { json } => version(json),
         Commands::Init(args) => init(args),
@@ -983,27 +1078,8 @@ pub fn run() -> Result<()> {
             path,
             derivation,
             contract,
-        } => {
-            let evidence = ato_formation::repository_evidence::inspect(&path)?;
-            let declared = match (derivation, contract) {
-                (Some(d), Some(k)) => {
-                    let d: ato_formation::authoring::BoundDerivation = read_inspection_json(&d)?;
-                    let k: ato_formation::authoring::BoundContract = read_inspection_json(&k)?;
-                    Some(serde_json::to_value(
-                        ato_formation::requirements::inspection::inspect(&d, &k),
-                    )?)
-                }
-                (None, None) => None,
-                _ => bail!("--derivation and --contract must be supplied together"),
-            };
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "repository": evidence, "declared_execution": declared,
-                }))?
-            );
-            Ok(())
-        }
+            json,
+        } => inspect_formation(&path, derivation.as_deref(), contract.as_deref(), json),
         Commands::FormInput(args) => formation_input::run(args),
         Commands::FormSession(args) => formation_session::run(args),
         Commands::FormVerify(args) => formation_verify::run(args),
@@ -1247,8 +1323,16 @@ fn preflight_hub_route(
     derivation_ref: &str,
     runtime_root: &Path,
     reference: &str,
+    detailed: bool,
 ) -> Result<ato_host_facts::HostFacts> {
     let validated = validate_bundle_for_derivation(bundle, derivation_ref)?;
+    if !detailed {
+        eprintln!(
+            "Checking {} ({}) on this machine…",
+            validated.application.title,
+            validated.realization.label()
+        );
+    }
     let requirements = ato_portable_application::portable_run::execution_requirements_for(
         &validated,
         runtime_root,
@@ -1257,6 +1341,14 @@ fn preflight_hub_route(
     let status = ato_host_facts::execution_status(&host, &requirements);
     if status.state == ato_host_facts::CapabilityState::Advertised {
         return Ok(host);
+    }
+    if !detailed {
+        bail!(
+            "{}: {} did not start. {} For host details, retry with --verbose.",
+            hub_public::ERR_CAPABILITY_UNAVAILABLE,
+            validated.application.title,
+            admission_reasons(&status.reasons)
+        );
     }
     for line in route_capability_lines(derivation_ref, &validated, &requirements, &host) {
         eprintln!("{line}");
@@ -1617,6 +1709,77 @@ fn runtime_network_serve(args: RuntimeNetworkServeArgs) -> Result<()> {
             max_tickets: args.max_attempts,
         },
     )
+}
+
+fn inspect_formation(
+    path: &Path,
+    derivation: Option<&Path>,
+    contract: Option<&Path>,
+    json: bool,
+) -> Result<()> {
+    use ato_formation::authoring::{BoundContract, BoundDerivation};
+    let evidence = ato_formation::repository_evidence::inspect(path)
+        .with_context(|| format!("inspect {}", path.display()))?;
+    let declarations = (derivation.zip(contract))
+        .map(|(d, k)| -> Result<(BoundDerivation, BoundContract)> {
+            Ok((read_inspection_json(d)?, read_inspection_json(k)?))
+        })
+        .transpose()?;
+    let execution = declarations
+        .as_ref()
+        .map(|(d, k)| ato_formation::requirements::inspection::inspect(d, k));
+    if json || !std::io::stdout().is_terminal() {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "repository": evidence, "declared_execution": execution,
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!("Source: {}", path.display());
+    let signals: std::collections::BTreeSet<_> =
+        evidence.facts.iter().map(|fact| fact.signal).collect();
+    if signals.is_empty() {
+        println!("No execution hints found.");
+    } else {
+        let signals = signals
+            .iter()
+            .map(|signal| format!("{signal:?}"))
+            .collect::<Vec<_>>();
+        println!("Execution hints: {}", signals.join(", "));
+    }
+    if !evidence.entrypoint_names.is_empty() {
+        println!("Entrypoint names: {}", evidence.entrypoint_names.join(", "));
+    }
+    if !evidence.declared_container_ports.is_empty() {
+        let ports = evidence
+            .declared_container_ports
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>();
+        println!("Declared container ports: {}", ports.join(", "));
+    }
+    if let Some(execution) = execution {
+        println!(
+            "Declared route: {} components and {} ports",
+            execution.components.len(),
+            execution.ports.len()
+        );
+    }
+    if !evidence.unscanned_files.is_empty() {
+        println!(
+            "Files not fully scanned: {}",
+            evidence.unscanned_files.join(", ")
+        );
+    }
+    println!(
+        "To build and verify this source, run: ato form {}",
+        display_path_argument(path)
+    );
+    println!("Use --json for the complete inspection.");
+    Ok(())
 }
 
 fn read_inspection_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
@@ -2194,17 +2357,56 @@ fn read_local_bundle(path: &Path, require_capsule_extension: bool) -> Result<Vec
     fs::read(path).with_context(|| format!("read Capsule file {input}"))
 }
 
+fn admission_reasons(reasons: &[ato_host_facts::Reason]) -> String {
+    let messages = reasons
+        .iter()
+        .filter(|reason| !reason.code.is_warning())
+        .map(|reason| reason.message.as_str())
+        .collect::<Vec<_>>();
+    if messages.is_empty() {
+        "This machine does not meet the route's requirements.".to_owned()
+    } else {
+        messages.join("\n")
+    }
+}
+
 fn run_capsule(args: RunArgs) -> Result<()> {
     // `capsules/<owner>/<name>[:tag|@digest]` is a Hub reference only when no
     // such local path exists: an existing file keeps exactly its old meaning.
-    let hub = hub_public::resolve_for_run(&args.capsule, &args.api_url, &ato_home()?)?;
+    let detailed = args.verbose || !std::io::stderr().is_terminal();
+    if !detailed
+        && !args.capsule.exists()
+        && let Some(reference) = args
+            .capsule
+            .to_str()
+            .filter(|value| value.starts_with("capsules/"))
+    {
+        eprintln!("Looking up {reference} on the Hub…");
+    }
+    let hub = hub_public::resolve_for_run(&args.capsule, &args.api_url, &ato_home()?)
+        .map_err(|error| {
+            if !args.verbose
+                && error.downcast_ref::<reqwest::Error>().is_some_and(|error| error.is_connect() || error.is_timeout())
+                && let Ok(url) = reqwest::Url::parse(&args.api_url)
+            {
+                let origin = url.origin().ascii_serialization();
+                return anyhow::anyhow!(
+                    "Could not fetch the Capsule from the Ato Hub at {origin}. Check your connection and the --api-url, then retry. Use --verbose for connection details"
+                );
+            }
+            error
+        })?;
     if let Some(resolved) = &hub {
-        eprintln!(
-            "Resolved {} [{}] -> {}",
-            resolved.reference.reference(),
-            resolved.reference.query(),
-            resolved.digest
-        );
+        if detailed {
+            eprintln!(
+                "Resolved {} [{}] -> {}",
+                resolved.reference.reference(),
+                resolved.reference.query(),
+                resolved.digest
+            );
+        } else {
+            eprintln!("Found {} on the Hub.", resolved.reference.reference());
+        }
     }
     let local_path = hub
         .as_ref()
@@ -2214,6 +2416,11 @@ fn run_capsule(args: RunArgs) -> Result<()> {
         .with_context(|| format!("invalid .capsule file {}", local_path.display()))?;
     match bundle {
         CapsuleBundleDocument::ComputationV2(bundle) => {
+            if args.list_bindings {
+                bail!(
+                    "--list-bindings requires a portable application bundle. Authored computation bundles declare their bindings in capsule.toml"
+                );
+            }
             if args.list_derivations {
                 // A computation-root wire v2 bundle declares no Derivation; the
                 // listing surface is the portable application's, and silently
@@ -2307,6 +2514,7 @@ fn install_local_application(args: AppInstallArgs) -> Result<()> {
     start_local_instance(AppStartArgs {
         instance: instance.instance_id.clone(),
         bindings: Vec::new(),
+        list_bindings: false,
         no_open: false,
         verification_receipt: args.verification_receipt,
         approve_source_build: args.allow_native_source_build,
@@ -2365,7 +2573,15 @@ fn start_local_instance(args: AppStartArgs) -> Result<()> {
     let bundle_bytes = store.bundle_bytes(&instance)?;
     let bundle = portable_export_bundle(&bundle_bytes)?;
     let selected = validate_bundle_for_derivation(&bundle, &instance.selected_derivation_ref)?;
-    resolve_application_bindings(&selected.application, &bindings)?;
+    if args.list_bindings {
+        return print_application_bindings(&selected.application, false);
+    }
+    resolve_application_bindings(&selected.application, &bindings).with_context(|| {
+        format!(
+            "Check the app's declared connection IDs with `ato app start {} --list-bindings`",
+            instance.instance_id
+        )
+    })?;
     // The state this Run will actually receive is observed before a Run exists.
     // A snapshot reference in the Instance metadata is never evidence by itself:
     // if the live state no longer observes the saved digests, start fails with
@@ -2854,6 +3070,7 @@ fn portable_instance_worker_claimed(
             bindings: Some(&launch.bindings),
             run_id: Some(&claimed.run_id),
             host_facts: None,
+            show_progress: false,
         },
         launch.allow_unsigned_native,
         if launch.approve_source_build {
@@ -3397,12 +3614,49 @@ fn check_requested_derivation(
     Ok(())
 }
 
+fn print_application_bindings(
+    application: &ato_portable_application::ValidatedApplication,
+    json: bool,
+) -> Result<()> {
+    if json || !std::io::stdout().is_terminal() {
+        println!("{}", serde_json::to_string_pretty(&application.bindings)?);
+    } else if application.bindings.is_empty() {
+        println!("{} declares no runtime connections.", application.title);
+    } else {
+        println!("Runtime connections for {}:", application.title);
+        for binding in &application.bindings {
+            let required = if binding.required {
+                "required"
+            } else {
+                "optional"
+            };
+            println!("  {}  {}  {required}", binding.id, binding.protocol);
+        }
+        println!("Supply a value for this Run with --bind BINDING_ID=VALUE.");
+    }
+    Ok(())
+}
+
 fn run_portable_application(
     args: RunArgs,
     bundle_bytes: &[u8],
     bundle: ato_objects::PortableApplicationBundle,
     hub: Option<&hub_public::ResolvedHubCapsule>,
 ) -> Result<()> {
+    let detailed = args.verbose || !std::io::stderr().is_terminal();
+    if args.list_bindings {
+        check_requested_derivation(&bundle, args.derivation.as_deref())?;
+        let route = match &args.derivation {
+            Some(reference) => reference,
+            None => bundle
+                .index
+                .derivations
+                .first()
+                .context("the Capsule declares no routes")?,
+        };
+        let application = validate_bundle_for_derivation(&bundle, route)?.application;
+        return print_application_bindings(&application, args.json);
+    }
     if args.list_derivations {
         // Listing reads the same bytes a Run would and probes the same host
         // facts, but starts nothing and keeps no Run scratch.
@@ -3492,6 +3746,17 @@ fn run_portable_application(
         // A Hub Run keeps its existing preflight so the refusal code and the
         // diagnosis stay the Hub's; a local bundle is admitted here.
         if hub.is_none() && !candidate.runnable {
+            if !detailed {
+                let reasons = candidate
+                    .admission
+                    .as_ref()
+                    .map_or(&[][..], |admission| admission.reasons.as_slice());
+                bail!(
+                    "{} did not start. {} For host details, retry with --verbose.",
+                    candidate.display_name.as_deref().unwrap_or("The app"),
+                    admission_reasons(reasons)
+                );
+            }
             for line in derivation_selection::candidate_capability_lines(candidate) {
                 eprintln!("{line}");
             }
@@ -3501,8 +3766,15 @@ fn run_portable_application(
                 &args.capsule.display().to_string(),
             ));
         }
-        for line in derivation_selection::render_permissions(candidate) {
-            eprintln!("{line}");
+        if detailed {
+            for line in derivation_selection::render_permissions(candidate) {
+                eprintln!("{line}");
+            }
+        } else if !candidate.permissions.is_empty() {
+            eprintln!("Requested permissions:");
+            for permission in &candidate.permissions {
+                eprintln!("  - {}: {}", permission.kind, permission.detail);
+            }
         }
         if derivation_selection::needs_permission_confirmation(
             chosen_from_menu,
@@ -3521,6 +3793,7 @@ fn run_portable_application(
             &selected_derivation,
             runtime.path(),
             &resolved.reference.reference(),
+            detailed,
         )?),
         None => None,
     };
@@ -3538,6 +3811,7 @@ fn run_portable_application(
         PortableRuntimeState {
             bindings: Some(&bindings),
             host_facts: host_facts.as_ref(),
+            show_progress: !detailed,
             ..PortableRuntimeState::default()
         },
         // The person running this bundle explicitly allowed an unsigned/ad-hoc
@@ -3570,11 +3844,17 @@ fn run_portable_application(
                 .with_context(|| format!("write verification receipt {}", path.display()))?;
             copy_scenario_sidecars(&runtime_root, &scenario_sidecar_directory(path))?;
         }
-        println!("Capsule: {}", receipt.contract_ref);
-        println!("Route: {}", receipt.derivation_ref);
-        println!("Runtime: {}", runtime.label());
-        if let Some(bundle) = &receipt.bundle_sha256 {
-            println!("Bundle: {bundle}");
+        if args.verbose || !std::io::stdout().is_terminal() {
+            println!("Capsule: {}", receipt.contract_ref);
+            println!("Route: {}", receipt.derivation_ref);
+            println!("Runtime: {}", runtime.label());
+            if let Some(bundle) = &receipt.bundle_sha256 {
+                println!("Bundle: {bundle}");
+            }
+        } else if args.no_open {
+            println!("Verified the app. The temporary Run will now stop.");
+        } else {
+            println!("App ready.");
         }
         if runtime.local_window {
             println!("Surface: local desktop window");
@@ -4194,6 +4474,7 @@ struct PortableRuntimeState<'a> {
     /// Host facts the caller already measured for this Run. `None` lets the
     /// common admission probe for itself.
     host_facts: Option<&'a ato_host_facts::HostFacts>,
+    show_progress: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4212,7 +4493,11 @@ fn start_and_verify_portable_application(
     let binding_environment = resolve_application_bindings(
         &validated.application,
         runtime_state.bindings.unwrap_or(&empty_bindings),
-    )?;
+    )
+    .context("Use --list-bindings to see the app's declared connection IDs")?;
+    if runtime_state.show_progress {
+        eprintln!("Starting and checking {}…", validated.application.title);
+    }
     start_portable_attempt(
         bundle_bytes,
         &bundle,
@@ -4423,9 +4708,9 @@ fn ato_home() -> Result<PathBuf> {
 }
 
 fn parse_binding(value: &str) -> Result<(String, String), String> {
-    let (name, value) = value
-        .split_once('=')
-        .ok_or_else(|| "expected BINDING_ID=VALUE".to_owned())?;
+    let (name, value) = value.split_once('=').ok_or_else(|| {
+        "expected BINDING_ID=VALUE, for example database_url=https://db.example".to_owned()
+    })?;
     if name.is_empty() || value.is_empty() {
         return Err("binding id and value must be non-empty".to_owned());
     }
@@ -4924,7 +5209,9 @@ mod tests {
             capsule: PathBuf::from("."),
             derivation: None,
             list_derivations: false,
+            list_bindings: false,
             json: false,
+            verbose: false,
             accept_permissions: false,
             bindings: Vec::new(),
             no_open: false,
