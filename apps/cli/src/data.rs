@@ -21,7 +21,10 @@ pub struct DataArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum DataCommand {
-    /// Report the Coordinator's health.
+    /// Check whether the selected Coordinator is reachable and healthy.
+    #[command(
+        after_long_help = "A public health endpoint works without logging in. An explicitly supplied or saved Coordinator credential is accepted for servers that require one."
+    )]
     Health(CoordinatorArgs),
     /// Inspect or create Resources.
     Resource {
@@ -428,20 +431,35 @@ fn request(
     path: &str,
     body: Option<Value>,
 ) -> Result<Value> {
+    let token = bearer(coordinator)?;
+    decode_response(send_request(coordinator, method, path, body, Some(&token))?)
+}
+
+fn send_request(
+    coordinator: &CoordinatorArgs,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<Value>,
+    token: Option<&str>,
+) -> Result<reqwest::blocking::Response> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
         .context("build coordinator client")?;
-    let mut request = client
-        .request(method, format!("{}{path}", base(coordinator)))
-        .header("authorization", format!("Bearer {}", bearer(coordinator)?));
+    let mut request = client.request(method, format!("{}{path}", base(coordinator)));
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
     if let Some(origin) = &coordinator.origin {
         request = request.header("origin", origin);
     }
     if let Some(body) = body {
         request = request.json(&body);
     }
-    let response = request.send().context("coordinator request failed")?;
+    Ok(request.send()?)
+}
+
+fn decode_response(response: reqwest::blocking::Response) -> Result<Value> {
     let status = response.status();
     let value: Value = response.json().unwrap_or(Value::Null);
     if !status.is_success() {
@@ -460,10 +478,42 @@ fn print_json(value: &Value) -> Result<()> {
 }
 
 fn health(coordinator: &CoordinatorArgs) -> Result<()> {
-    let value = request(coordinator, reqwest::Method::GET, "/health", None)?;
+    let origin = base(coordinator);
+    let token = match &coordinator.token {
+        Some(token) => Ok(Some(token.clone())),
+        None => crate::auth_device::load_credential(&origin)
+            .map(|credential| credential.map(|credential| credential.token)),
+    };
+    let response = send_request(
+        coordinator,
+        reqwest::Method::GET,
+        "/health",
+        None,
+        token.as_ref().ok().and_then(|token| token.as_deref()),
+    )
+    .map_err(|error| {
+        if error.downcast_ref::<reqwest::Error>().is_some_and(|error| error.is_connect() || error.is_timeout()) {
+            anyhow::anyhow!("Could not reach the Coordinator at {origin}. Check that it is running and retry with the correct --coordinator URL")
+        } else {
+            error.context(format!("Could not check Coordinator health at {origin}"))
+        }
+    })?;
+    if matches!(
+        response.status(),
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        let status = response.status();
+        token.with_context(|| format!("Reached the Coordinator at {origin}, but could not load its credential (HTTP {status})"))?;
+        bail!(
+            "Reached the Coordinator at {origin}, but it refused access (HTTP {status}). Check the Coordinator credential or run `ato login --api-url {origin}`"
+        );
+    }
+    let value = decode_response(response)
+        .with_context(|| format!("Coordinator health check failed at {origin}"))?;
     if coordinator.json {
         return print_json(&value);
     }
+    println!("Coordinator: {origin}");
     println!(
         "status: {}",
         value
@@ -471,20 +521,11 @@ fn health(coordinator: &CoordinatorArgs) -> Result<()> {
             .and_then(Value::as_str)
             .unwrap_or("unknown")
     );
-    println!(
-        "schema_version: {}",
-        value
-            .get("schema_version")
-            .and_then(Value::as_i64)
-            .unwrap_or_default()
-    );
-    println!(
-        "resources: {}",
-        value
-            .get("resources")
-            .and_then(Value::as_i64)
-            .unwrap_or_default()
-    );
+    for key in ["schema_version", "resources"] {
+        if let Some(number) = value.get(key).and_then(Value::as_i64) {
+            println!("{key}: {number}");
+        }
+    }
     Ok(())
 }
 
