@@ -24,6 +24,8 @@ pub(super) struct Entry {
     pub(super) changed_at_ms: u64,
     pub(super) attempts: Vec<Attempt>,
     pub(super) approval: Option<Approval>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) native_artifact_authorization: Option<String>,
     pub(super) publication: Option<Value>,
 }
 
@@ -105,6 +107,7 @@ impl Store {
             changed_at_ms: unix_millis(),
             attempts: Vec::new(),
             approval: None,
+            native_artifact_authorization: None,
             publication: None,
         };
         self.save(&entry)?;

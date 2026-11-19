@@ -2,6 +2,7 @@
 
 mod formation;
 mod mcp;
+mod native;
 mod operator;
 mod store;
 mod verify;
@@ -46,6 +47,8 @@ pub(super) enum PublicationCommand {
     },
     /// Start the bounded verification job.
     Start(Id),
+    /// Authorize verification of this exact ad-hoc signed native bundle on a terminal.
+    AuthorizeNative(Id),
     /// Read the current stage and verification report.
     Status(Id),
     /// Wait briefly for a state change, then return the current status.
@@ -180,6 +183,7 @@ struct Prepare {
     oci_archives: Vec<formation::OciArchiveInput>,
     browser_task: Option<String>,
     browser_interactive: Option<bool>,
+    native_window: Option<native::Task>,
     target_host: Option<String>,
     #[serde(default)]
     unsupported_required: Vec<String>,
@@ -208,6 +212,8 @@ struct Plan {
     browser_contract: Option<BrowserContractV0>,
     browser_interactive: bool,
     browser_models: Option<BrowserModels>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_window: Option<native::NativePlan>,
     target_host: String,
     derivations: Vec<String>,
     declared_routes: Vec<DeclaredRoute>,
@@ -324,6 +330,9 @@ pub(super) fn run(command: PublicationCommand) -> Result<()> {
             )?
         }
         PublicationCommand::Start(args) => start(&store, &args.preparation_id)?,
+        PublicationCommand::AuthorizeNative(args) => {
+            authorize_native(&store, &args.preparation_id)?
+        }
         PublicationCommand::Status(args) => status(&store, &args.preparation_id)?,
         PublicationCommand::Wait(args) => wait(&store, &args.preparation_id, args.wait_ms)?,
         PublicationCommand::Cancel(args) => cancel(&store, &args.preparation_id)?,
@@ -416,6 +425,15 @@ fn prepare(store: &Store, workspace: &Path, mut request: Prepare) -> Result<Valu
         !browser_interactive || browser_contract.is_some(),
         "A browser session needs a frozen browser acceptance task"
     );
+    ensure!(
+        browser_contract.is_none() || request.native_window.is_none(),
+        "Choose either a browser task or a native window task"
+    );
+    let native_window = request
+        .native_window
+        .take()
+        .map(native::NativePlan::freeze)
+        .transpose()?;
     let browser_models = browser_contract
         .as_ref()
         .map(|_| browser_models(browser_interactive))
@@ -534,6 +552,9 @@ fn prepare(store: &Store, workspace: &Path, mut request: Prepare) -> Result<Valu
         .into_iter()
         .map(|value| format!("Required condition has no configured verifier: {value}"))
         .collect();
+    if native_window.is_some() && !formed.derivations.iter().any(native::supports) {
+        blockers.push("A native window task requires a macOS local-window route with a bundled .tar.gz and bundle-level signature verification".into());
+    }
     for check in &request.http_checks {
         if !contract.requirements.iter().any(|bound| {
             bound.id == check.id
@@ -638,14 +659,18 @@ fn prepare(store: &Store, workspace: &Path, mut request: Prepare) -> Result<Valu
         source_ref,
         artifact_sha256: bundle_sha256(&bytes),
         artifact_size: bytes.len() as u64,
-        effective_contract_ref: effective_contract_ref(
-            &base_contract_ref,
-            browser_contract.as_ref(),
-        ),
+        effective_contract_ref: native_window
+            .as_ref()
+            .map(|plan| plan.effective_contract(&base_contract_ref))
+            .transpose()?
+            .unwrap_or_else(|| {
+                effective_contract_ref(&base_contract_ref, browser_contract.as_ref())
+            }),
         base_contract_ref,
         browser_contract,
         browser_interactive,
         browser_models,
+        native_window,
         target_host,
         derivations: formed.bundle.index.derivations,
         declared_routes,
@@ -707,7 +732,7 @@ fn sensitive_path(path: &str) -> bool {
     })
 }
 
-fn read_limited(file: fs::File, maximum: u64) -> Result<Vec<u8>> {
+fn read_limited(file: impl Read, maximum: u64) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     file.take(maximum + 1).read_to_end(&mut bytes)?;
     ensure!(
@@ -838,7 +863,7 @@ fn view(entry: &Entry) -> Result<Value> {
     } else {
         None
     };
-    Ok(json!({
+    let mut result = json!({
         "preparation_id": entry.id, "phase": entry.phase, "issue": entry.issue,
         "plan": entry.plan, "attempts": entry.attempts,
         "recipient_scope": entry.plan.destination.recipient_scope(),
@@ -846,7 +871,72 @@ fn view(entry: &Entry) -> Result<Value> {
         "verified_derivation": verified_derivation(entry),
         "approval": entry.approval, "publication": entry.publication,
         "unverified": "Results are scoped to the listed attempt environments. Browser page text, action inputs, raw evidence and the link key are excluded from verification proof. Credential and private-data absence is unconfirmed by automated inspection."
-    }))
+    });
+    if entry.plan.native_window.is_some() {
+        result["native_artifact_authorized"] = json!(
+            entry
+                .native_artifact_authorization
+                .as_ref()
+                .is_some_and(|known| known == &entry.plan.artifact_sha256)
+        );
+        if entry.phase == Phase::Prepared && entry.native_artifact_authorization.is_none() {
+            result["native_authorization_command"] =
+                json!(["ato", "publish", "authorize-native", &entry.id]);
+        }
+        if entry.publication.is_some()
+            && entry
+                .attempts
+                .iter()
+                .find(|attempt| attempt.valid_pass(&entry.plan))
+                .is_some_and(Attempt::native_local_override)
+        {
+            result["publication"]["recipient"]["native_local_override_required"] = json!(true);
+            result["publication"]["recipient"]["native_launch_note"] = json!(
+                "This artifact needed local ad-hoc signature authorization. Review the exact bundle before choosing --allow-unsigned-native."
+            );
+        }
+    }
+    Ok(result)
+}
+
+fn authorize_native(store: &Store, id: &str) -> Result<Value> {
+    ensure!(
+        io::stdin().is_terminal() && io::stdout().is_terminal(),
+        "Native verification authorization requires a user-operated terminal"
+    );
+    let entry = store.read(id)?;
+    ensure!(
+        entry.phase == Phase::Prepared
+            && entry.plan.native_window.is_some()
+            && entry.plan.blockers.is_empty(),
+        "This preparation cannot accept a native verification authorization"
+    );
+    store.artifact(&entry)?;
+    let digest = &entry.plan.artifact_sha256;
+    println!(
+        "Review the frozen native bundle {} ({digest}).",
+        store.directory(id)?.join("artifact.capsule").display()
+    );
+    println!("This allows a valid ad-hoc signature for verification of this artifact on this Mac.");
+    let phrase = format!("verify {}", &digest[7..19]);
+    print!("To authorize local verification, type {phrase}: ");
+    io::stdout().flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    ensure!(
+        answer.trim() == phrase,
+        "Native verification authorization was not granted"
+    );
+    let _lock = store.edit(id)?;
+    let mut current = store.read(id)?;
+    ensure!(
+        current.phase == Phase::Prepared && current.plan.artifact_sha256 == *digest,
+        "The native preparation changed before authorization"
+    );
+    store.artifact(&current)?;
+    current.native_artifact_authorization = Some(digest.clone());
+    store.save(&current)?;
+    view(&current)
 }
 
 fn approved_report(store: &Store, entry: &Entry, reference: &str) -> Result<()> {

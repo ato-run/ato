@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use ato_formation::browser::{BrowserBudget, BrowserVerdict, BrowserVerificationReceipt};
 use ato_formation::request::{AttemptStatus, OutcomeState};
 use ato_formation::verify::{ReceiptOutcome, VerificationTargetKind};
@@ -26,7 +26,7 @@ use ato_runtime_attempt::realize::StopClass;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{Entry, Phase, Plan, Store, browser_models};
+use super::{Entry, Phase, Plan, Store, browser_models, native};
 use crate::{ato_home, browser_verifier_command, hub, unix_millis};
 
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -58,6 +58,8 @@ pub(super) struct Attempt {
     mechanical_receipt_ref: Option<String>,
     mechanical: Vec<Condition>,
     browser: Option<BrowserProof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_window: Option<native::Proof>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -144,6 +146,12 @@ impl Attempt {
         &self.derivation_ref
     }
 
+    pub(super) fn native_local_override(&self) -> bool {
+        self.native_window
+            .as_ref()
+            .is_some_and(|proof| proof.local_override)
+    }
+
     pub(super) fn valid_pass(&self, plan: &Plan) -> bool {
         if self.verdict != Verdict::Pass
             || self.execution != AttemptRecordState::Finished
@@ -170,6 +178,11 @@ impl Attempt {
             .collect::<BTreeSet<_>>();
         if expected != observed {
             return false;
+        }
+        match (&plan.native_window, &self.native_window) {
+            (Some(plan), Some(proof)) if proof.passed(plan, &self.attempt_id) => {}
+            (None, None) => {}
+            _ => return false,
         }
         match (&plan.browser_contract, &self.browser) {
             (None, None) => true,
@@ -226,6 +239,7 @@ impl Attempt {
             mechanical_receipt_ref: None,
             mechanical: Vec::new(),
             browser: None,
+            native_window: None,
         }
     }
 }
@@ -348,7 +362,8 @@ fn verify_job(store: &Store, id: &str, directory: &Path, cancelled: &AtomicBool)
         sandbox_shim: &shim,
         sandbox_subcommand: "__portable-sandbox-exec",
         host: None,
-        native_local_override: false,
+        native_local_override: entry.plan.native_window.is_some()
+            && entry.native_artifact_authorization.as_ref() == Some(&entry.plan.artifact_sha256),
         ato_home: &home,
         native_source_consent: NativeSourceConsent::Unavailable,
     };
@@ -366,6 +381,7 @@ fn verify_job(store: &Store, id: &str, directory: &Path, cancelled: &AtomicBool)
         }
         let attempt_id = format!("publication-{id}-{}", index + 1);
         let route_id = route.derivation_ref.as_str();
+        let native_plan = entry.plan.native_window.as_ref();
         let mut recorded = Attempt::unavailable(
             &entry,
             attempt_id.clone(),
@@ -382,6 +398,14 @@ fn verify_job(store: &Store, id: &str, directory: &Path, cancelled: &AtomicBool)
         let bindings = resolve_application_bindings(&route.application, &BTreeMap::new());
         if !target_matches {
             recorded.issue = Some("requested_verification_host_is_unavailable".into());
+        } else if native_plan.is_some() && !native::supports(route) {
+            recorded.issue = Some("native_window_requires_bundled_macos_local_window_route".into());
+        } else if route.realization == PortableRealizationKind::NativeDesktop
+            && native_plan.is_none()
+        {
+            recorded.issue = Some("native_window_acceptance_task_required".into());
+        } else if native_plan.is_some() && !native::available() {
+            recorded.issue = Some("macos_window_capture_or_accessibility_unavailable".into());
         } else if bindings.is_err() {
             recorded.issue =
                 Some("verification_requires_binding_values_no_private_inputs_are_accepted".into());
@@ -417,7 +441,7 @@ fn verify_job(store: &Store, id: &str, directory: &Path, cancelled: &AtomicBool)
             let runtime = directory.join("scratch").join(&attempt_id);
             fs::create_dir_all(&runtime)?;
             let spec = route.attempt_spec(None);
-            let outcome = run_attempt(
+            let mut outcome = run_attempt(
                 &AttemptRequest {
                     request_id: id,
                     attempt_id: &attempt_id,
@@ -430,7 +454,11 @@ fn verify_job(store: &Store, id: &str, directory: &Path, cancelled: &AtomicBool)
                     network: NetworkPolicy::Denied,
                     browser: browser.as_ref(),
                     attempt_root: &runtime,
-                    continuation: Continuation::Stop,
+                    continuation: if native_plan.is_some() {
+                        Continuation::HandOff
+                    } else {
+                        Continuation::Stop
+                    },
                     receipt: ReceiptContext {
                         target: VerificationTargetKind::CliLocal,
                         bundle_sha256: Some(&entry.plan.artifact_sha256),
@@ -451,6 +479,27 @@ fn verify_job(store: &Store, id: &str, directory: &Path, cancelled: &AtomicBool)
                 },
                 &journal,
             );
+            let mut native_issue = None;
+            if let Some(mut live) = outcome.live.take() {
+                let proof = native_plan
+                    .zip(
+                        outcome
+                            .attempt
+                            .receipt
+                            .as_ref()
+                            .and_then(|receipt| receipt.execution.as_ref()),
+                    )
+                    .context("Missing owned native window evidence")
+                    .and_then(|(plan, execution)| {
+                        native::verify(plan, &attempt_id, &mut live, execution, &control, cancelled)
+                    });
+                let _cleanup = control.cleanup();
+                outcome.stop = Some(StopClass::of(&live.stop()));
+                match proof {
+                    Ok(proof) => recorded.native_window = Some(proof),
+                    Err(_) => native_issue = Some("native_window_evidence_unavailable".into()),
+                }
+            }
             recorded.execution = outcome.attempt_record;
             recorded.cleanup_confirmed = match outcome.stop {
                 Some(StopClass::Confirmed) => recorded.execution == AttemptRecordState::Finished,
@@ -461,12 +510,14 @@ fn verify_job(store: &Store, id: &str, directory: &Path, cancelled: &AtomicBool)
                 }
                 _ => false,
             };
-            recorded.issue = outcome.attempt.failure.as_ref().map(|error| {
-                format!(
-                    "{}:{}",
-                    safe_identifier(&error.stage),
-                    safe_identifier(&error.code)
-                )
+            recorded.issue = native_issue.or_else(|| {
+                outcome.attempt.failure.as_ref().map(|error| {
+                    format!(
+                        "{}:{}",
+                        safe_identifier(&error.stage),
+                        safe_identifier(&error.code)
+                    )
+                })
             });
             if let Some(receipt) = &outcome.attempt.receipt {
                 ensure!(
@@ -545,9 +596,19 @@ fn verify_job(store: &Store, id: &str, directory: &Path, cancelled: &AtomicBool)
                 || recorded
                     .browser
                     .as_ref()
-                    .is_some_and(|proof| proof.verdict == Verdict::Fail);
+                    .is_some_and(|proof| proof.verdict == Verdict::Fail)
+                || recorded
+                    .native_window
+                    .as_ref()
+                    .is_some_and(native::Proof::failed);
             let verified = outcome.attempt.status == AttemptStatus::Verified
                 && recorded.cleanup_confirmed
+                && native_plan.is_none_or(|plan| {
+                    recorded
+                        .native_window
+                        .as_ref()
+                        .is_some_and(|proof| proof.passed(plan, &attempt_id))
+                })
                 && !cancelled.load(Ordering::Relaxed);
             recorded.verdict = if verified {
                 Verdict::Pass
@@ -556,9 +617,18 @@ fn verify_job(store: &Store, id: &str, directory: &Path, cancelled: &AtomicBool)
             } else {
                 Verdict::Inconclusive
             };
+            if recorded
+                .native_window
+                .as_ref()
+                .is_some_and(native::Proof::failed)
+            {
+                recorded.issue = Some("native_window_criterion_not_met".into());
+            }
             if recorded.verdict == Verdict::Pass && !recorded.valid_pass(&entry.plan) {
                 recorded.verdict = Verdict::Inconclusive;
-                recorded.issue = Some("mandatory_evidence_unavailable".into());
+                recorded
+                    .issue
+                    .get_or_insert_with(|| "mandatory_evidence_unavailable".into());
             }
             if recorded.cleanup_confirmed {
                 // The common executor already confirmed cessation. Remove only

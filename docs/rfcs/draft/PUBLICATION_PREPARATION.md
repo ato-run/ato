@@ -39,6 +39,32 @@ An optional Browser Contract v0 is fixed before execution, with the effective
 Contract referring to the original portable Contract and the browser condition.
 Unrecognized required checks prevent approval.
 
+A macOS desktop preparation can freeze a `native_window` task with a
+`criterion` and one to four exact button labels in `press`. Its
+`ato.capsule/2` route declares `ato.native@1`,
+`ato.native.presentation = "local-window"`, a bundled `.app` tarball and
+`signature_target = "bundle"`. The original K and D remain fixed.
+`/ready` observes that the Run owns an on-screen window. The desktop
+criterion uses separate evidence from the window.
+
+The verification worker on macOS 14 or later needs an active desktop session,
+Accessibility authorization and Screen Recording authorization. Seatbelt
+keeps the executable and source read-only, scopes writable state to the
+attempt, and blocks network and child process creation. The window stays on
+the host's WindowServer. The verifier limits capture to the selected process's
+single on-screen window and sends `AXPress` only to a unique enabled button
+in its accessibility tree. ScreenCaptureKit and Vision collect before/after
+OCR evidence for the pinned local Ollama judge. A durable report includes
+the judge decision, citations and OCR digests. The raw pictures and
+transcribed text are discarded.
+
+A valid Developer ID bundle uses its declared signature policy. When a
+valid ad-hoc signature is allowed by the route, `ato publish authorize-native
+<preparation-id>` records the owner's terminal consent for the fixed
+artifact before verification. Upload still needs report approval and
+confirmed stop. The recipient must make its own decision about running an
+ad-hoc signed artifact.
+
 The local worker verifies declared Derivations within one fixed budget, using
 the normal portable executor and attempt journal. An isolated verification Run
 uses fresh state, with no credentials, saved Instances, or external dependency
@@ -147,8 +173,9 @@ This lane accepts self-contained portable bundles and portable authoring
 manifests and can form Static Web and pinned single-process Python routes
 from source. Candidate exploration uses the available declared routes
 within the fixed time and attempt budget. Static Web, Linux Python
-processes and process service groups, single OCI containers, and OCI service
-groups have bounded verification launch paths.
+processes and process service groups, single OCI containers, OCI service
+groups, and bundled macOS local-window apps have bounded verification
+launch paths.
 
 The Linux process route requires bubblewrap PID and mount namespaces plus
 Landlock network policy. The worker resolves and measures an installed
@@ -175,7 +202,7 @@ HTTP surface. Cleanup has a separate budget. The worker leaves a
 preparation inconclusive if removal of owned containers or networks cannot
 be confirmed.
 
-Native Desktop still needs bounded launch and
-verified teardown for this workflow. The frozen upload is limited to 8 MiB.
+The native window lane accepts bundled `.tar.gz` applications.
+The frozen upload is limited to 8 MiB.
 The review receipt remains in the local preparation store. Hosting review
 receipts and admission enforcement in the Hub require server support.

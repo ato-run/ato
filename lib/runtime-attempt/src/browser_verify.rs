@@ -102,6 +102,10 @@ impl OllamaJudgeConfig {
         format!("ollama/sha256-{}", self.digest)
     }
 
+    pub fn pinned_endpoint(&self) -> (&str, &str, &str) {
+        (&self.endpoint, &self.model, &self.digest)
+    }
+
     fn settings(&self) -> [(String, String); 3] {
         [
             ("ATO_OLLAMA_JUDGE_URL".into(), self.endpoint.clone()),
