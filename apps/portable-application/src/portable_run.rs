@@ -1187,7 +1187,12 @@ impl PortableBundleExecutor<'_> {
         } else {
             oci_runtime.clone()
         };
-        let adapter = local_oci_adapter(hydrated, spec, &runtime_root, bounded)?;
+        let adapter = local_oci_adapter(hydrated, spec, &runtime_root, bounded)?
+            .with_scratch_volumes(ato_adapter_oci::ScratchVolumes::parse(
+                runtime
+                    .get(crate::OCI_SCRATCH_VOLUMES_RUNTIME)
+                    .map(String::as_str),
+            )?)?;
         if relayed {
             let service = ServiceStart {
                 name: step.id.clone(),
@@ -1316,7 +1321,12 @@ impl PortableBundleExecutor<'_> {
             let runtime_root = oci_runtime.join(&step.id);
             services.push(ServiceStart {
                 name: step.id.clone(),
-                adapter: local_oci_adapter(hydrated, spec, &runtime_root, bounded)?,
+                adapter: local_oci_adapter(hydrated, spec, &runtime_root, bounded)?
+                    .with_scratch_volumes(ato_adapter_oci::ScratchVolumes::parse(
+                        runtime
+                            .get(crate::OCI_SCRATCH_VOLUMES_RUNTIME)
+                            .map(String::as_str),
+                    )?)?,
                 runtime_root,
                 networks: Vec::new(),
                 guards: Vec::new(),

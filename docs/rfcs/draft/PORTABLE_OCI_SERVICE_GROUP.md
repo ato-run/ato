@@ -41,7 +41,7 @@ A route with more than one serving step is admitted only when:
 - the route-level `runtimes` holds only the shared `oci.platform`; each step
   holds a digest-pinned `oci.image` and positive `oci.memory_bytes`,
   `oci.cpu_limit_millis`, `oci.pids_limit`, optionally `oci.entrypoint` and
-  `oci.workspace_mount`, and no other key;
+  `oci.workspace_mount` and the local Adapter's `oci.scratch_volumes`;
 - per-service and aggregate limits stay within 4 GiB memory, 4000 CPU
   millis and 1024 pids (`ato_ipc::oci_service_group`, the single authority for
   both the profile and the launch spec);
@@ -57,6 +57,16 @@ A route with more than one serving step is admitted only when:
   with `ato.tcp-egress@1` has `effects = "requires-confirmation"` or
   `"non-repeatable"`;
 - there is no workspace build or compiler.
+
+A local OCI HTTP route may name disposable image volumes in a runtime fact
+`oci.scratch_volumes`, a JSON string array of one to eight sorted, distinct,
+absolute guest paths. This fact belongs to the selected D. Each path must
+exactly cover an otherwise unassigned VOLUME of the verified image. Overlapping
+paths, the workspace, saved data, component inputs, and system mounts are
+rejected. Each scratch volume is a fresh 64 MiB nodev/nosuid/noexec tmpfs
+charged to its container memory limit and removed with that container. This
+does not add portable saved data. The hosted launch schemas do not project this
+fact; an unassigned image VOLUME continues to be refused by those runners.
 
 Host networking, privileged mode, the Docker socket, arbitrary host mounts and
 runtime builds have no field in the model and cannot be expressed.
