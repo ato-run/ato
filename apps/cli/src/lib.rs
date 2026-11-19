@@ -18,6 +18,8 @@ mod model_cache;
 mod object_transport;
 mod portable_dependency;
 mod run_bindings;
+mod run_data;
+mod run_worker;
 pub mod workspace;
 mod workspace_control;
 pub mod zip_store;
@@ -121,7 +123,7 @@ Authored project upload
     name = "ato",
     version,
     about = "Run, create, and share Capsule applications",
-    long_about = "Run, create, and share Capsule applications.\n\nTry an app:       ato run ./application.capsule\nInstall locally:  ato app install ./application.capsule\nBuild from HTML:  ato form ./site --out ./formed\nShare a bundle:   ato hub push ./application.capsule --hub-url <URL>"
+    long_about = "Run, create, and share Capsule applications.\n\nOpen an app:      ato run ./application.capsule\nManage app data:  ato app storage\nBuild from HTML:  ato form ./site --out ./formed\nShare a bundle:   ato hub push ./application.capsule --hub-url <URL>"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -130,14 +132,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Try a local or Hub Capsule in a temporary Run.
+    /// Open a local or Hub app and choose what to keep when it stops.
     #[command(
-        after_long_help = "Try a Capsule: ato run ./application.capsule\nCtrl-C stops the temporary Run. No local Instance is kept after it ends.\nTo keep a local Instance and its supported saved data, use ato app install ./application.capsule."
+        after_long_help = "Open an app: ato run ./application.capsule\nCtrl-C stops the app. Decide whether to keep its managed local data, then use the same command to reopen it.\nWithout a terminal, use --on-exit save or --on-exit discard. An omitted policy keeps the working copy for later recovery.\nSee data and cache usage with ato app storage."
     )]
     Run(RunArgs),
-    /// Install apps locally and list, start, or stop their Instances.
+    /// Manage app data, the bundle cache, and installed Instances.
     #[command(
-        after_long_help = "Install: ato app install ./application.capsule\nFind the Instance ID: ato app list\nStop or restart: ato app stop <INSTANCE> / ato app start <INSTANCE>\nStopping keeps the Instance and its supported saved data. Use ato run ./application.capsule for a temporary trial."
+        after_long_help = "Open an app with ato run ./application.capsule. View saved data and the bundle cache with ato app storage.\nUse ato app list to find installed Instances, then ato app stop <INSTANCE> or ato app start <INSTANCE>."
     )]
     App {
         #[command(subcommand)]
@@ -304,6 +306,8 @@ enum Commands {
     PortablePeerShim(PortablePeerShimArgs),
     #[command(name = "__portable-instance-worker", hide = true)]
     PortableInstanceWorker(PortableInstanceWorkerArgs),
+    #[command(name = "__portable-run-worker", hide = true)]
+    PortableRunWorker { directory: PathBuf },
     /// 6b-D2 experimental: build a frozen source's root Dockerfile with a
     /// private builder into a verified OCI archive and an authored OCI route.
     #[command(name = "__source-oci-build", hide = true)]
@@ -428,7 +432,8 @@ enum LlmCommands {
 enum AppCommands {
     /// Install a local or Hub Capsule as an independent Instance and open it.
     #[command(
-        after_long_help = "Example: ato app install ./application.capsule\nFind the Instance ID with ato app list. Stop and restart it with ato app stop and ato app start.\nStopping keeps the Instance and its supported saved data. Use ato run ./application.capsule for a temporary trial."
+        display_order = 90,
+        after_long_help = "Compatibility command for creating and starting a separately managed Instance. The existing workflow remains supported.\nFind the Instance ID with ato app list. Stop and restart it with ato app stop and ato app start."
     )]
     Install(AppInstallArgs),
     /// List apps installed or imported on this machine and their Run status.
@@ -453,6 +458,22 @@ enum AppCommands {
     },
     /// Export the immutable Application and this Instance's saved snapshot.
     Export(AppExportArgs),
+    /// Show local Run data, pending data, and downloaded bundle sizes.
+    Storage,
+    /// Decide what to do with an earlier Run's pending data.
+    Recover {
+        /// ID from ato app storage.
+        data_id: String,
+        #[arg(value_enum)]
+        policy: run_data::ExitPolicy,
+    },
+    /// Delete a saved local Run state. Downloaded bundles stay cached.
+    DataRemove {
+        /// ID from ato app storage.
+        data_id: String,
+    },
+    /// Delete cached bundles. Saved and pending data are kept.
+    CacheClear,
 }
 
 #[derive(Subcommand)]
@@ -552,6 +573,18 @@ struct RunArgs {
     /// Verify the temporary Run, stop it and exit without opening a browser.
     #[arg(long, visible_alias = "verify-only")]
     no_open: bool,
+    /// Keep the app running without opening a browser.
+    #[arg(long, conflicts_with_all = ["no_open", "inspection"])]
+    headless: bool,
+    /// Choose what to do with the local working copy after a successful stop.
+    #[arg(long, value_enum, conflicts_with_all = ["no_open", "inspection"])]
+    on_exit: Option<run_data::ExitPolicy>,
+    /// Start with independent data and resolve the requested app revision again.
+    #[arg(long, conflicts_with_all = ["data_id", "no_open", "inspection"])]
+    fresh: bool,
+    /// Continue this ID from ato app storage at its saved app revision.
+    #[arg(long, conflicts_with_all = ["no_open", "inspection"])]
+    data_id: Option<String>,
     /// Write the shared Contract verification receipt as canonical JSON.
     #[arg(long)]
     verification_receipt: Option<PathBuf>,
@@ -1232,6 +1265,10 @@ pub fn run() -> Result<()> {
             AppCommands::Stop { instance } => stop_local_instance(&instance),
             AppCommands::Inspect { instance } => inspect_local_instance(&instance),
             AppCommands::Export(args) => export_local_instance(args),
+            AppCommands::Storage => run_data::storage(),
+            AppCommands::Recover { data_id, policy } => run_data::recover(&data_id, policy),
+            AppCommands::DataRemove { data_id } => run_data::remove(&data_id),
+            AppCommands::CacheClear => run_data::clear_cache(),
         },
         Commands::ExportPlan(args) => export_plan(args),
         Commands::Export(args) => export_portable(args),
@@ -1289,6 +1326,7 @@ pub fn run() -> Result<()> {
         #[cfg(unix)]
         Commands::PortablePeerShim(args) => portable_peer_shim(args),
         Commands::PortableInstanceWorker(args) => portable_instance_worker(args),
+        Commands::PortableRunWorker { directory } => run_worker::worker(directory),
         Commands::SourceOciBuild(args) => source_oci_build(args),
         Commands::SourceOciAcquireBase(args) => source_oci_acquire_base(args),
     }
@@ -1508,7 +1546,7 @@ fn preflight_portable_route(
     routes: usize,
     detailed: bool,
 ) -> Result<ato_host_facts::HostFacts> {
-    if !detailed {
+    if !detailed || !args.no_open {
         eprintln!(
             "Checking {} ({}) on this machine…",
             validated.application.title,
@@ -2599,11 +2637,21 @@ fn admission_reasons(reasons: &[ato_host_facts::Reason]) -> String {
     }
 }
 
-fn run_capsule(args: RunArgs) -> Result<()> {
+fn run_capsule(mut args: RunArgs) -> Result<()> {
     // `capsules/<owner>/<name>[:tag|@digest]` is a Hub reference only when no
     // such local path exists: an existing file keeps exactly its old meaning.
     let detailed = args.verbose || !std::io::stderr().is_terminal();
-    if !detailed
+    let data = if args.no_open || args.list_bindings || args.list_derivations {
+        None
+    } else {
+        Some(run_data::select(&args)?)
+    };
+    let saved = data.as_ref().and_then(|data| data.selected.as_ref());
+    if let Some(saved) = saved {
+        args.derivation = Some(saved.derivation().to_owned());
+    }
+    if !args.no_open
+        && saved.is_none()
         && !args.capsule.exists()
         && let Some(reference) = args
             .capsule
@@ -2612,7 +2660,23 @@ fn run_capsule(args: RunArgs) -> Result<()> {
     {
         eprintln!("Looking up {reference} on the Hub…");
     }
-    let hub = hub_public::resolve_for_run(&args.capsule, &args.api_url, &ato_home()?)
+    let pulled = if let Some(saved) = saved {
+        saved.source()
+    } else {
+        hub_public::resolve_for_run_with_progress(
+            &args.capsule,
+            &args.api_url,
+            &ato_home()?,
+            !args.no_open && !args.list_bindings && !args.list_derivations,
+        )
+        .map(|hub| {
+            let path = hub
+                .as_ref()
+                .map_or(&args.capsule, |resolved| &resolved.bundle_path);
+            (path.clone(), hub)
+        })
+    };
+    let (local_path, hub) = pulled
         .map_err(|error| {
             if !args.verbose
                 && error.downcast_ref::<reqwest::Error>().is_some_and(|error| error.is_connect() || error.is_timeout())
@@ -2637,14 +2701,14 @@ fn run_capsule(args: RunArgs) -> Result<()> {
             eprintln!("Found {} on the Hub.", resolved.reference.reference());
         }
     }
-    let local_path = hub
-        .as_ref()
-        .map_or(&args.capsule, |resolved| &resolved.bundle_path);
-    let bytes = read_local_bundle(local_path, true)?;
+    let bytes = read_local_bundle(&local_path, true)?;
     let bundle = decode_capsule_bundle_document(&bytes)
         .with_context(|| format!("invalid .capsule file {}", local_path.display()))?;
     match bundle {
         CapsuleBundleDocument::ComputationV2(bundle) => {
+            if args.data_id.is_some() || args.fresh || args.on_exit.is_some() || args.headless {
+                bail!("These Run data options require a portable application bundle (wire v3/v4)");
+            }
             if args.list_bindings {
                 bail!(
                     "--list-bindings requires a portable application bundle. Authored computation bundles declare their bindings in capsule.toml"
@@ -2668,10 +2732,10 @@ fn run_capsule(args: RunArgs) -> Result<()> {
             run_computation_bundle(args, bundle)
         }
         CapsuleBundleDocument::PortableApplicationV3(bundle) => {
-            run_portable_application(args, &bytes, bundle, hub.as_ref())
+            run_portable_application(args, &bytes, bundle, hub.as_ref(), data)
         }
         CapsuleBundleDocument::PortableApplicationV4(bundle) => {
-            run_portable_application(args, &bytes, bundle, hub.as_ref())
+            run_portable_application(args, &bytes, bundle, hub.as_ref(), data)
         }
     }
 }
@@ -3908,10 +3972,11 @@ fn print_application_bindings(
 }
 
 fn run_portable_application(
-    args: RunArgs,
+    mut args: RunArgs,
     bundle_bytes: &[u8],
     bundle: ato_objects::PortableApplicationBundle,
     hub: Option<&hub_public::ResolvedHubCapsule>,
+    data: Option<run_data::Selection>,
 ) -> Result<()> {
     let detailed = args.verbose || !std::io::stderr().is_terminal();
     if args.list_bindings {
@@ -4024,9 +4089,15 @@ fn run_portable_application(
     }
     use ato_portable_application::portable_run::{NativeSourceConsent, preflight_local_run};
     let validated = validate_bundle_for_derivation(&bundle, &selected_derivation)?;
+    let has_managed_data =
+        !validated.derivation.state.is_empty() || bundle.index.instance_snapshot_ref.is_some();
+    let managed_root = (data.is_some() && has_managed_data)
+        .then(run_data::planned_runtime_root)
+        .transpose()?;
+    let preflight_root = managed_root.as_deref().unwrap_or(runtime.path());
     let host = preflight_portable_route(
         &validated,
-        runtime.path(),
+        preflight_root,
         &args,
         hub,
         bundle.index.derivations.len(),
@@ -4060,7 +4131,7 @@ fn run_portable_application(
     };
     if let Some(failure) = preflight_local_run(
         &validated,
-        runtime.path(),
+        preflight_root,
         &cache,
         &host,
         native_source_consent,
@@ -4071,15 +4142,35 @@ fn run_portable_application(
     let cancelled: &AtomicBool = &shutdown;
     let binding_environment = run_bindings::resolve(
         &validated.application,
-        args.bindings,
-        args.binding_env,
+        std::mem::take(&mut args.bindings),
+        std::mem::take(&mut args.binding_env),
         cancelled,
     )?;
     if cancelled.load(Ordering::Relaxed) {
         bail!("the Run was cancelled. No workload was started");
     }
+    if let Some(data) = data {
+        if has_managed_data {
+            let mut entry = match data.selected {
+                Some(selected) => selected,
+                None => run_data::LockedEntry::create(data.target, &validated, bundle_bytes)?,
+            };
+            let (draft, bundle_path) = entry.begin(&validated, &bundle, bundle_bytes)?;
+            eprintln!("Starting and checking {}…", validated.application.title);
+            let launch = run_worker::Launch {
+                bundle_path,
+                digest: bundle_sha256(bundle_bytes),
+                derivation: selected_derivation,
+                binding_environment,
+                allow_unsigned_native: args.allow_unsigned_native,
+                allow_native_source_build: args.allow_native_source_build,
+            };
+            return run_worker::foreground(&args, hub, &mut entry, &draft, launch, cancelled);
+        }
+        eprintln!("This route declares no managed local app data.");
+    }
     let runtime_root = runtime.keep();
-    if !detailed {
+    if !detailed || !args.no_open {
         eprintln!("Starting and checking {}…", validated.application.title);
     }
     // Retain the normal attempt evidence once the requested Run proceeds to
@@ -4138,7 +4229,7 @@ fn run_portable_application(
         if args.no_open || runtime.base_url().is_empty() {
             return Ok(());
         }
-        if !runtime.local_window {
+        if !args.headless && !runtime.local_window {
             open_browser(runtime.base_url())?;
         }
         println!("Press Ctrl-C to stop the local realization.");
@@ -4151,7 +4242,9 @@ fn run_portable_application(
             if runtime.local_window && runtime.live.exited()?.is_some() {
                 return Ok(());
             }
-            if runtime.stops_when_a_service_exits {
+            if validated.realization == PortableRealizationKind::LocalProcess
+                || runtime.stops_when_a_service_exits
+            {
                 runtime.try_wait()?;
             }
             #[cfg(not(unix))]
@@ -5463,6 +5556,10 @@ mod tests {
             bindings: Vec::new(),
             binding_env: Vec::new(),
             no_open: false,
+            headless: false,
+            on_exit: None,
+            fresh: false,
+            data_id: None,
             verification_receipt: None,
             allow_native_source_build: false,
             allow_unsigned_native: false,
