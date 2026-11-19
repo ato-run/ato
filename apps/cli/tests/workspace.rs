@@ -151,12 +151,22 @@ fn checkpoint_subcommand_validates_a_checkpoint_file() {
     let checkpoint = browser_checkpoint("board", &["board", "todo"]);
     let path = directory.path().join("checkpoint.toml");
     std::fs::write(&path, toml::to_string(&checkpoint).unwrap()).unwrap();
-    Command::cargo_bin("ato")
-        .unwrap()
-        .args(["workspace", "checkpoint", "--json", path.to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("\"active_pane\": \"board\""));
+    let verify = |command| {
+        let output = Command::cargo_bin("ato")
+            .unwrap()
+            .args(["workspace", command, "--json", path.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["active_pane"], "board");
+        value
+    };
+    assert_eq!(verify("checkpoint"), verify("verify-checkpoint"));
 }
 
 #[test]

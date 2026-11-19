@@ -39,9 +39,16 @@ pub struct WorkspaceArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum WorkspaceCommand {
-    /// Validate a workspace file and every capsule it names; print the plan.
+    /// Validate a workspace definition and every Capsule it names.
+    #[command(
+        after_long_help = "Example: ato workspace inspect ./workspace.toml\nFor a saved session, use ato workspace verify-checkpoint <FILE>."
+    )]
     Inspect(InspectArgs),
     /// Verify a saved workspace checkpoint. Create one with open --checkpoint-out.
+    #[command(
+        visible_alias = "verify-checkpoint",
+        after_long_help = "Save a checkpoint: ato workspace open <WORKSPACE> --checkpoint-out checkpoint.toml\nVerify a checkpoint: ato workspace verify-checkpoint checkpoint.toml\nResume it: ato workspace open <WORKSPACE> --checkpoint checkpoint.toml"
+    )]
     Checkpoint(CheckpointArgs),
     /// Start the workspace shell and its pane servers on loopback.
     ///
@@ -58,7 +65,7 @@ pub struct OpenArgs {
     /// Resume from this workspace checkpoint.
     #[arg(long)]
     pub checkpoint: Option<PathBuf>,
-    /// Write a checkpoint here on stop. Verify the file with `ato workspace checkpoint`.
+    /// Write a checkpoint here on stop. Verify the file with `ato workspace verify-checkpoint`.
     #[arg(long)]
     pub checkpoint_out: Option<PathBuf>,
     /// Print the shell URL without opening a browser.
