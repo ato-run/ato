@@ -412,19 +412,6 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
                 ),
             );
         }
-        if self.validated.realization == PortableRealizationKind::OciContainer
-            && host.connector_choice() == Some(ato_host_facts::ConnectorChoice::Relay)
-        {
-            // A single container has no group network for a relay to join, so
-            // this Run has no materialization for it. Refusing here is honest;
-            // silently trying the bridge would fail later, less clearly.
-            return refused(
-                "oci_container_relay_unsupported",
-                "this OCI container route needs a relay on this host (a VM-backed or rootless \
-                 daemon), which this Run does not implement for a single container; a service \
-                 group route runs through the relay, and a native Linux daemon runs directly",
-            );
-        }
         if self.validated.realization == PortableRealizationKind::NativeDesktop {
             if self.validated.native.is_none() {
                 return refused(
@@ -838,19 +825,6 @@ impl PortableBundleExecutor<'_> {
         host: &ato_host_facts::HostFacts,
     ) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
-        // A single container has no group network to join, so the relay
-        // materialization is not implemented for it. Admission refuses that
-        // combination first; this is the same decision, stated where the
-        // container would have been started.
-        if host.connector_choice() == Some(ato_host_facts::ConnectorChoice::Relay) {
-            return Err(launch(
-                anyhow::anyhow!(
-                    "a single OCI container route needs a relay on this host, which this Run does \
-                     not implement; use a service group route or a native Linux daemon"
-                ),
-                &workspace,
-            ));
-        }
         let step = &route.derivation.steps[0];
         let port = &route.derivation.ports[0];
         let guest_port = port.guest_port.context("OCI route omitted guest_port")?;
@@ -905,8 +879,26 @@ impl PortableBundleExecutor<'_> {
             labels: BTreeMap::new(),
         };
         let oci_runtime = self.runtime_root.join("oci");
-        let handle = local_oci_adapter(hydrated, spec)
-            .and_then(|adapter| adapter.spawn(&workspace, &oci_runtime))
+        let adapter = local_oci_adapter(hydrated, spec)?;
+        if host.connector_choice() == Some(ato_host_facts::ConnectorChoice::Relay) {
+            let service = ServiceStart {
+                name: step.id.clone(),
+                adapter,
+                runtime_root: oci_runtime.join(&step.id),
+                networks: Vec::new(),
+                guards: Vec::new(),
+            };
+            return self.run_oci_network(
+                workspace,
+                oci_runtime,
+                vec![service],
+                host,
+                port,
+                host_port,
+            );
+        }
+        let handle = adapter
+            .spawn(&workspace, &oci_runtime)
             .map_err(|error| oci_launch_failure(error, &workspace, &oci_runtime))?;
         let base = format!("http://127.0.0.1:{host_port}");
         let mut execution = evidence("oci", Some("docker".to_owned()), None, None, &base);
@@ -1018,10 +1010,43 @@ impl PortableBundleExecutor<'_> {
                 guards: Vec::new(),
             });
         }
+        self.run_oci_network(
+            workspace,
+            oci_runtime,
+            services,
+            host,
+            surface_port,
+            host_port,
+        )
+    }
+
+    fn run_oci_network(
+        &self,
+        workspace: PathBuf,
+        oci_runtime: PathBuf,
+        services: Vec<ServiceStart>,
+        host: &ato_host_facts::HostFacts,
+        surface_port: &ato_formation::authoring::BoundPort,
+        host_port: u16,
+    ) -> Result<Realized, RealizeFailure> {
+        let route = self.validated;
+        let derivation = &route.derivation;
+        let platform = derivation
+            .runtimes
+            .get(OCI_PLATFORM_RUNTIME)
+            .context("OCI route omitted platform")?;
         // Which materialization reaches the Ports is a fact about the daemon,
         // recorded in this Run's evidence. A native Linux daemon keeps the
         // direct bridge; a VM-backed or rootless one needs the Run's relay.
         let connector_choice = host.connector_choice();
+        let platform_emulated = matches!(
+            host.docker.platforms.get(platform.as_str()),
+            Some(ato_host_facts::PlatformSupport::Emulated { .. })
+        );
+        // A fresh database can spend over a minute initializing its state
+        // under instruction emulation before it opens its first socket.
+        let service_timeout =
+            std::time::Duration::from_secs(if platform_emulated { 180 } else { 60 });
         let relay = match connector_choice {
             Some(ato_host_facts::ConnectorChoice::Relay) => {
                 let destinations = derivation
@@ -1050,7 +1075,9 @@ impl PortableBundleExecutor<'_> {
                     services,
                     StopBudget::DEFAULT,
                     relay,
-                    &mut |name, group| wait_until_service_accepts_tcp(route, name, group),
+                    &mut |name, group| {
+                        wait_until_service_accepts_tcp(route, name, group, service_timeout)
+                    },
                 )
             })
             .map_err(|error| oci_launch_failure(error, &workspace, &oci_runtime))?;
@@ -1093,8 +1120,9 @@ impl PortableBundleExecutor<'_> {
             .services()
             .find(|(name, _)| *name == surface_port.from)
             .map(|(_, handle)| handle);
+        let single = route.realization == PortableRealizationKind::OciContainer;
         let mut execution = evidence(
-            "oci_service_group",
+            if single { "oci" } else { "oci_service_group" },
             Some("docker".to_owned()),
             None,
             None,
@@ -1110,21 +1138,23 @@ impl PortableBundleExecutor<'_> {
             execution.connector = Some(group.connector_kind().as_str().to_owned());
             execution.relay_image_digest = Some(relay.image_digest);
             execution.relay_container_id = Some(relay.container_id);
-            execution.platform_emulated = Some(matches!(
-                host.docker.platforms.get(platform.as_str()),
-                Some(ato_host_facts::PlatformSupport::Emulated { .. })
-            ));
+            execution.platform_emulated = Some(platform_emulated);
         }
-        execution.services = group
-            .services()
-            .map(
-                |(name, handle)| ato_formation::verify::VerificationServiceEvidence {
-                    name: name.to_owned(),
-                    container_id: handle.container_id().to_owned(),
-                    image: handle.image().to_owned(),
-                },
-            )
-            .collect();
+        if single && self.offline() {
+            execution.embedded_oci_image_loaded = execution.image.clone();
+        }
+        if !single {
+            execution.services = group
+                .services()
+                .map(
+                    |(name, handle)| ato_formation::verify::VerificationServiceEvidence {
+                        name: name.to_owned(),
+                        container_id: handle.container_id().to_owned(),
+                        image: handle.image().to_owned(),
+                    },
+                )
+                .collect();
+        }
         Ok(Realized {
             candidate: Box::new(OciCandidate::new(
                 LaunchedOci::Group(group),
@@ -1465,12 +1495,13 @@ impl PortableBundleExecutor<'_> {
     }
 }
 
-/// The service accepts TCP on its first Port within 60s, and no service of
+/// The service accepts TCP on its first Port before its deadline, and no service of
 /// the group has exited meanwhile.
 fn wait_until_service_accepts_tcp(
     route: &ValidatedPortableApplication,
     name: &str,
     group: &ato_adapter_oci::OciServiceGroup,
+    timeout: std::time::Duration,
 ) -> Result<()> {
     let guest_port = route
         .derivation
@@ -1479,7 +1510,7 @@ fn wait_until_service_accepts_tcp(
         .find(|port| port.from == name)
         .and_then(|port| port.guest_port)
         .context("OCI service serves no Port")?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + timeout;
     loop {
         if let Some((service, code)) = group.exited_service()? {
             bail!("OCI service `{service}` exited before the group was ready: {code}");
@@ -1491,7 +1522,8 @@ fn wait_until_service_accepts_tcp(
         }
         anyhow::ensure!(
             std::time::Instant::now() < deadline,
-            "OCI service `{name}` did not accept TCP on {guest_port} within 60s"
+            "OCI service `{name}` did not accept TCP on {guest_port} within {}s",
+            timeout.as_secs()
         );
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
