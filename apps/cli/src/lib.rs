@@ -285,16 +285,31 @@ enum LlmCommands {
 
 #[derive(Subcommand)]
 enum AppCommands {
-    /// Install a local or Hub capsule as an independent Instance and open it.
+    /// Install a local or Hub Capsule as an independent Instance and open it.
+    #[command(
+        after_long_help = "Use `ato app list` to find the new Instance. Stop and restart it with `ato app stop` and `ato app start`. Use `ato run` for a temporary trial."
+    )]
     Install(AppInstallArgs),
+    /// List apps installed or imported on this machine and their Run status.
+    List {
+        /// Output the list as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Import an immutable portable bundle as a new independent Instance.
     Import(AppImportArgs),
     /// Start a new durable Run for an imported Instance.
     Start(AppStartArgs),
     /// Stop the active Run without deleting the Instance.
-    Stop { instance: String },
+    Stop {
+        /// Local Instance ID from `ato app list`.
+        instance: String,
+    },
     /// Print Instance metadata and its active Run, if any.
-    Inspect { instance: String },
+    Inspect {
+        /// Local Instance ID from `ato app list`.
+        instance: String,
+    },
     /// Export the immutable Application and this Instance's saved snapshot.
     Export(AppExportArgs),
 }
@@ -411,23 +426,31 @@ struct ReformArgs {
 
 #[derive(Debug, Args)]
 struct AppInstallArgs {
+    /// Portable application file or Hub reference (capsules/<owner>/<name>).
     capsule: PathBuf,
+    /// Select a declared route. Find its reference with `ato run <CAPSULE> --list-derivations`.
     #[arg(long)]
     derivation: Option<String>,
+    /// Ato API origin for resolving Hub references.
     #[arg(long, env = "ATO_API_URL", default_value = auth_device::DEFAULT_API_URL)]
     api_url: String,
+    /// Approve downloading a managed Rust toolchain and building the declared native route.
     #[arg(long)]
     allow_native_source_build: bool,
+    /// Approve the selected route's declared local override for an unsigned native artifact.
     #[arg(long)]
     allow_unsigned_native: bool,
+    /// Accept the selected route's declared permissions without an interactive prompt.
     #[arg(long)]
     accept_permissions: bool,
+    /// Write the first Run's verification receipt as canonical JSON.
     #[arg(long)]
     verification_receipt: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
 struct AppImportArgs {
+    /// Local portable application .capsule file.
     capsule: PathBuf,
     /// Select one declared DerivationRef. Required when the bundle has more than one route.
     #[arg(long)]
@@ -448,11 +471,12 @@ struct AppStartArgs {
     /// Allow this Run's declared local unsigned-native override.
     #[arg(long)]
     allow_unsigned_native: bool,
+    /// Local Instance ID from `ato app list`.
     instance: String,
-    /// Rebind one declared runtime connection for this Run. Values are not persisted.
-    #[arg(long = "bind", value_parser = parse_binding)]
+    /// Set a declared runtime connection as BINDING_ID=VALUE for this Run only.
+    #[arg(long = "bind", value_name = "BINDING_ID=VALUE", value_parser = parse_binding)]
     bindings: Vec<(String, String)>,
-    /// Leave the durable Run active without opening its Surface.
+    /// Start the Run and leave it active without opening its Surface. Stop it with `ato app stop`.
     #[arg(long)]
     no_open: bool,
     /// Copy the Run-scoped canonical verification receipt to this path.
@@ -834,6 +858,7 @@ pub fn run() -> Result<()> {
         Commands::App { command } => match command {
             AppCommands::Install(args) => install_local_application(args),
             AppCommands::Import(args) => import_local_application(args),
+            AppCommands::List { json } => list_local_instances(json),
             AppCommands::Start(args) => start_local_instance(args),
             AppCommands::Stop { instance } => stop_local_instance(&instance),
             AppCommands::Inspect { instance } => inspect_local_instance(&instance),
@@ -2270,6 +2295,42 @@ fn prevent_worker_from_inheriting_parent_stdio() -> Result<()> {
     Ok(())
 }
 
+fn list_local_instances(json: bool) -> Result<()> {
+    #[derive(serde::Serialize)]
+    struct InstanceSummary {
+        instance_id: String,
+        application_id: String,
+        created_at: String,
+        status: &'static str,
+    }
+
+    let store = local_application_store()?;
+    let entries = store
+        .instances()?
+        .into_iter()
+        .map(|instance| {
+            let active = store.active_run(&instance.instance_id)?;
+            Ok(InstanceSummary {
+                instance_id: instance.instance_id,
+                application_id: instance.application_id,
+                created_at: instance.created_at,
+                status: active.as_ref().map_or("stopped", |run| run.status.as_str()),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+    } else if entries.is_empty() {
+        println!("No local apps. Install one with: ato app install <CAPSULE>");
+    } else {
+        println!("{:<46} STATUS", "INSTANCE");
+        for entry in entries {
+            println!("{:<46} {}", entry.instance_id, entry.status);
+        }
+    }
+    Ok(())
+}
+
 fn inspect_local_instance(instance_id: &str) -> Result<()> {
     let store = local_application_store()?;
     let instance = store.instance(instance_id)?;
@@ -2313,6 +2374,7 @@ fn export_local_instance(args: AppExportArgs) -> Result<()> {
 
 fn stop_local_instance(instance_id: &str) -> Result<()> {
     let store = local_application_store()?;
+    store.instance(instance_id)?;
     let active = store
         .active_run(instance_id)?
         .context("local Instance has no active Run")?;

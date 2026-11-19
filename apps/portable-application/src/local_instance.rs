@@ -424,13 +424,48 @@ impl LocalApplicationStore {
             if let (Some(snapshot), Some(restored)) = (saved.as_ref(), restored.as_ref()) {
                 observe_restored_content(&instance_root, snapshot, restored)?;
             }
-            create_canonical(&instance_root.join("instance.json"), &instance)
+            replace_canonical(&instance_root.join("instance.json"), &instance)
         })();
         if let Err(error) = prepared {
             let _ = fs::remove_dir_all(&instance_root);
             return Err(error);
         }
         Ok(instance)
+    }
+
+    /// List published Instance metadata, including Instances made by older CLIs.
+    pub fn instances(&self) -> Result<Vec<LocalInstanceMetadata>, LocalInstanceError> {
+        let root = self.root.join("instances");
+        let io_error = |source| LocalInstanceError::Io {
+            path: root.clone(),
+            source,
+        };
+        let mut instances = Vec::new();
+        for entry in fs::read_dir(&root).map_err(io_error)? {
+            let entry = entry.map_err(io_error)?;
+            if !entry.file_type().map_err(io_error)?.is_dir() {
+                continue;
+            }
+            let filename = entry.file_name();
+            let Some(instance_id) = filename.to_str().filter(|name| validate_id(name).is_ok())
+            else {
+                continue;
+            };
+            match self.instance(instance_id) {
+                Ok(instance) => instances.push(instance),
+                // The directory can exist before import publishes metadata.
+                Err(LocalInstanceError::UnknownInstance(_)) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        instances.sort_unstable_by(|a, b| {
+            b.created_at
+                .len()
+                .cmp(&a.created_at.len())
+                .then_with(|| b.created_at.cmp(&a.created_at))
+                .then_with(|| a.instance_id.cmp(&b.instance_id))
+        });
+        Ok(instances)
     }
 
     pub fn instance(&self, instance_id: &str) -> Result<LocalInstanceMetadata, LocalInstanceError> {
