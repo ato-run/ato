@@ -232,7 +232,9 @@ fn push(args: PushArgs) -> Result<()> {
 }
 
 fn pull(args: PullArgs) -> Result<()> {
-    let link = SharedLink::parse(&args.link).context("invalid capsulehub link")?;
+    let link = SharedLink::parse(&args.link).context(
+        "Use the complete share URL printed by `ato hub push`, including its # fragment",
+    )?;
     let base = link.base_url().context("invalid capsulehub link base")?;
     ensure_transport_allowed(&base, args.allow_loopback_http)?;
 

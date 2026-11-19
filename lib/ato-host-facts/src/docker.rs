@@ -200,8 +200,9 @@ impl DockerFacts {
         if !self.cli_present {
             return vec![Reason::new(
                 ReasonCode::DockerBinaryMissing,
-                "the docker CLI is not on PATH, so no container route can run here; install \
-                 Docker (or point PATH at its CLI) and re-run `ato pack`",
+                "The Docker CLI was not found on PATH. Install Docker, make sure `docker` is on PATH, \
+                 and start Docker Desktop or Docker Engine. Run `docker info` to check that the \
+                 daemon is reachable, then retry the original command.",
             )];
         }
         if !self.daemon_reachable {
@@ -228,8 +229,9 @@ impl DockerFacts {
             return vec![Reason::new(
                 code,
                 format!(
-                    "the docker CLI is installed but no daemon answered ({detail}); start Docker \
-                     Desktop or Docker Engine and re-run"
+                    "the Docker CLI could not reach the daemon ({detail}). Check that Docker Desktop or \
+                     Docker Engine is running and that `docker info` succeeds, then retry the \
+                     original command."
                 ),
             )];
         }
@@ -255,7 +257,7 @@ impl DockerFacts {
         vec![Reason::new(
             ReasonCode::DockerUnavailable,
             "the daemon answered but the facts needed to reach its container network were not \
-             available; re-run with `ato --verbose` to see the probe",
+             available; check the active Docker context with `docker context show` and `docker info`",
         )]
     }
 
@@ -903,6 +905,11 @@ mod tests {
             missing.bridge_reasons()[0].code,
             ReasonCode::DockerBinaryMissing
         );
+
+        let recovery = &missing.bridge_reasons()[0].message;
+        assert!(recovery.contains("`docker info`"));
+        assert!(recovery.contains("retry the original command"));
+        assert!(!recovery.contains("ato pack"));
 
         let unreachable = fixture(
             Err(

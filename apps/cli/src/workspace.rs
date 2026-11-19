@@ -41,7 +41,7 @@ pub struct WorkspaceArgs {
 pub enum WorkspaceCommand {
     /// Validate a workspace file and every capsule it names; print the plan.
     Inspect(InspectArgs),
-    /// Validate a workspace checkpoint file (no runtime is started).
+    /// Verify a saved workspace checkpoint. Create one with open --checkpoint-out.
     Checkpoint(CheckpointArgs),
     /// Start the workspace shell and its pane servers on loopback.
     ///
@@ -58,7 +58,7 @@ pub struct OpenArgs {
     /// Resume from this workspace checkpoint.
     #[arg(long)]
     pub checkpoint: Option<PathBuf>,
-    /// Write the next checkpoint here on stop.
+    /// Write a checkpoint here on stop. Verify the file with `ato workspace checkpoint`.
     #[arg(long)]
     pub checkpoint_out: Option<PathBuf>,
     /// Print the shell URL without opening a browser.
