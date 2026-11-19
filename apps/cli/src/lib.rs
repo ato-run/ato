@@ -55,7 +55,7 @@ use ato_materializer_vm_snapshot::{
 };
 use ato_objects::{
     BranchOrigin, BundleMaterialization, CapsuleBundle, CapsuleBundleDocument, CapsuleSelector,
-    GraphMaterialization, GraphRestoreCapability, LocalCapsuleRepository,
+    GraphMaterialization, GraphRestoreCapability, LocalCapsuleRepository, MemoryObjectStore,
     PortableApplicationBundle, PortableDependencyProfile, PortableOciArchive, RecordId,
     ReferenceRegistry, decode_capsule_bundle_document, encode_bundle,
     export_bundle_with_materializations, export_object_graph, import_bundle, resolve_computation,
@@ -307,10 +307,13 @@ enum DesktopCommands {
 
 #[derive(Debug, Args)]
 struct InitArgs {
+    /// Path to an existing project directory containing a schema 1 capsule.toml.
+    #[arg(value_name = "DIRECTORY")]
     capsule: String,
+    /// Seal the initial state without starting a Run. Start later with `ato resume`.
     #[arg(long)]
     initial_only: bool,
-    #[arg(long = "bind", value_parser = parse_binding)]
+    #[arg(long = "bind", value_name = "BINDING_ID=VALUE", value_parser = parse_binding)]
     bindings: Vec<(String, String)>,
 }
 
@@ -1211,7 +1214,7 @@ fn portable_peer_shim(args: PortablePeerShimArgs) -> Result<()> {
 }
 
 fn desktop_inspect(project: &str) -> Result<()> {
-    let path = project_path(project, false)?;
+    let path = project_path(project)?;
     let view = desktop_control::inspect(&path)?;
     println!("{}", serde_json::to_string(&view)?);
     Ok(())
@@ -1556,19 +1559,38 @@ fn form(args: FormArgs) -> Result<()> {
 }
 
 fn init(args: InitArgs) -> Result<()> {
-    let project = project_path(&args.capsule, true)?;
-    let repository = LocalCapsuleRepository::open(&project)?;
-    if repository.head("main")?.is_some() {
+    let project = Path::new(&args.capsule);
+    let config = load_config(project).with_context(|| {
+        format!(
+            "`ato init` needs a valid schema 1 capsule.toml in {}. See `ato init --help`",
+            project.display()
+        )
+    })?;
+    let project = project_path(&args.capsule)?;
+    let bindings: BTreeMap<_, _> = args.bindings.into_iter().collect();
+    preflight(&project, &config, &bindings)?;
+
+    let report_repository = || {
+        format!(
+            "Capsule initialization failed. {} may contain files from this attempt",
+            project.join(".capsule").display()
+        )
+    };
+    let repository = LocalCapsuleRepository::open(&project).with_context(report_repository)?;
+    if repository
+        .head("main")
+        .with_context(report_repository)?
+        .is_some()
+    {
         bail!(
             "Capsule is already initialized at {}",
             repository.root().display()
         );
     }
-    let config = load_config(&project)?;
-    let bindings: BTreeMap<_, _> = args.bindings.iter().cloned().collect();
-    preflight(&repository, &config, &bindings)?;
-    let initial = initial_computation(&repository, config)?;
-    repository.create_branch("main", &initial, None)?;
+    let initial = initial_computation(&repository, config).with_context(report_repository)?;
+    repository
+        .create_branch("main", &initial, None)
+        .with_context(report_repository)?;
     println!("{initial}");
     if !args.initial_only {
         start_durable(
@@ -1578,7 +1600,14 @@ fn init(args: InitArgs) -> Result<()> {
             &bindings,
             None,
             &cli_materializers,
-        )?;
+        )
+        .with_context(|| {
+            format!(
+                "Capsule initialized at {}, but its Run could not start. Fix the error and retry with `ato resume {}`",
+                repository.root().display(),
+                display_path_argument(&project)
+            )
+        })?;
         // The CLI exits here, so the run is reparented to init and reaped by
         // it. Nothing to wait on.
     }
@@ -1587,7 +1616,7 @@ fn init(args: InitArgs) -> Result<()> {
 
 fn resume(args: ResumeArgs) -> Result<()> {
     let selector: CapsuleSelector = args.selector.parse()?;
-    let project = project_path(&selector.capsule, false)?;
+    let project = project_path(&selector.capsule)?;
     let repository = LocalCapsuleRepository::open(project)?;
     let selected = repository.resolve(&selector)?;
     let selected_state = load_runtime_state(&selected, repository.objects())?;
@@ -1643,7 +1672,7 @@ fn resume(args: ResumeArgs) -> Result<()> {
 }
 
 fn stop(capsule: &str) -> Result<()> {
-    let project = project_path(capsule, false)?;
+    let project = project_path(capsule)?;
     let repository = LocalCapsuleRepository::open(project)?;
     let sealed =
         ato_local_execution::stop_and_seal(&repository)?.context("Capsule has no active Run")?;
@@ -1653,7 +1682,7 @@ fn stop(capsule: &str) -> Result<()> {
 
 fn encap(args: EncapArgs) -> Result<()> {
     let selector: CapsuleSelector = args.selector.parse()?;
-    let project = project_path(&selector.capsule, false)?;
+    let project = project_path(&selector.capsule)?;
     let repository = LocalCapsuleRepository::open(project)?;
     let target = repository.resolve(&selector)?;
     let state = load_runtime_state(&target, repository.objects())?;
@@ -1730,7 +1759,7 @@ fn encode_materializations(
 fn upload(args: UploadArgs) -> Result<()> {
     let token = auth_device::resolve_token(args.auth_token, &args.api_url)?;
     let selector: CapsuleSelector = args.selector.parse()?;
-    let project = project_path(&selector.capsule, false)?;
+    let project = project_path(&selector.capsule)?;
     let repository = LocalCapsuleRepository::open(project)?;
     let target = repository.resolve(&selector)?;
     let state = load_runtime_state(&target, repository.objects())?;
@@ -4028,14 +4057,14 @@ fn reference_registry() -> Result<ReferenceRegistry> {
 }
 
 fn preflight(
-    repository: &LocalCapsuleRepository,
+    project: &Path,
     config: &ato_local_execution::authoring::AuthoringConfig,
     bindings: &BTreeMap<String, String>,
 ) -> Result<()> {
     let registry = adapter_registry()?;
     let context = AdapterContext {
-        workspace: repository.project(),
-        objects: repository.objects(),
+        workspace: project,
+        objects: &MemoryObjectStore::default(),
     };
     for instance in
         ato_local_execution::authoring::adapter_instances(config, bindings, false, false)?
@@ -4047,15 +4076,21 @@ fn preflight(
     Ok(())
 }
 
-fn project_path(value: &str, create: bool) -> Result<PathBuf> {
+fn project_path(value: &str) -> Result<PathBuf> {
     let path = PathBuf::from(value);
-    if create {
-        fs::create_dir_all(&path)?;
-    }
     if !path.is_dir() {
         bail!("local Capsule project does not exist: {}", path.display());
     }
     Ok(path.canonicalize()?)
+}
+
+fn display_path_argument(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    #[cfg(not(windows))]
+    let path = path.replace('\'', "'\\''");
+    #[cfg(windows)]
+    let path = path.replace('\'', "''");
+    format!("'{path}'")
 }
 
 fn ato_home() -> Result<PathBuf> {
