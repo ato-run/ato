@@ -52,6 +52,13 @@ pub(super) fn resolve(
         }
     }
     validate_supplied_application_bindings(application, &values)?;
+    for binding in &application.bindings {
+        if let Some(value) = values.get(&binding.id)
+            && let Err(reason) = validate_value(binding, value)
+        {
+            bail!("Invalid value for `{}`. {reason}", binding.id);
+        }
+    }
     let missing = application
         .bindings
         .iter()
@@ -79,47 +86,69 @@ pub(super) fn resolve(
     }
 
     for binding in missing {
-        if cancelled.load(Ordering::Relaxed) {
-            bail!("the Run was cancelled. No workload was started");
-        }
-        let (purpose, example) = describe(binding);
         let id = &binding.id;
-        let value = if let Some(example) = example {
-            eprint!("{id} ({purpose}, for example {example}): ");
-            io::stderr().flush()?;
-            read_visible(cancelled)?
-        } else {
-            let prompt =
-                format!("{id} ({purpose}, input hidden. Use --bind-env for multiline values): ");
-            match read_hidden(&prompt) {
-                Ok(value) => value,
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::Interrupted | io::ErrorKind::UnexpectedEof
-                    ) =>
-                {
-                    bail!("the Run was cancelled. No workload was started")
-                }
-                Err(error) => {
-                    return Err(error).with_context(|| {
+        loop {
+            if cancelled.load(Ordering::Relaxed) {
+                bail!("the Run was cancelled. No workload was started");
+            }
+            let (purpose, example) = describe(binding);
+            let value = if let Some(example) = example {
+                eprint!("{id} ({purpose}, for example {example}): ");
+                io::stderr().flush()?;
+                read_visible(cancelled)?.context("Input ended. No workload was started")?
+            } else {
+                let prompt = format!(
+                    "{id} ({purpose}, input hidden. Use --bind-env for multiline values): "
+                );
+                match read_hidden(&prompt) {
+                    Ok(value) => value,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::Interrupted | io::ErrorKind::UnexpectedEof
+                        ) =>
+                    {
+                        bail!("the Run was cancelled. No workload was started")
+                    }
+                    Err(error) => {
+                        return Err(error).with_context(|| {
                         format!(
                             "Could not read `{id}` without echo. Use --bind-env {id}=ATO_BIND_{}",
                             id.to_ascii_uppercase()
                         )
                     });
+                    }
                 }
+            };
+            match validate_value(binding, &value) {
+                Ok(()) => {
+                    values.insert(id.clone(), value);
+                    break;
+                }
+                Err(reason) => eprintln!("Invalid value for `{id}`. {reason} Try again."),
             }
-        };
-        if value.is_empty() {
-            bail!("a value is required for `{id}`. No workload was started");
         }
-        values.insert(id.clone(), value);
     }
     resolve_application_bindings(application, &values).map_err(Into::into)
 }
 
-fn read_visible(cancelled: &AtomicBool) -> Result<String> {
+fn validate_value(binding: &ApplicationBindingV1, value: &str) -> Result<(), &'static str> {
+    if value.is_empty() {
+        return Err("A value is required.");
+    }
+    if value.len() > 64 * 1024 || value.contains('\0') {
+        return Err("Enter at most 64 KiB without NUL characters.");
+    }
+    if binding.protocol == OPENAI_EMBEDDING_BASE_URL_PROTOCOL
+        && !reqwest::Url::parse(value)
+            .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.has_host())
+    {
+        return Err("Enter a complete HTTP or HTTPS URL.");
+    }
+    Ok(())
+}
+
+pub(super) fn read_visible(cancelled: &AtomicBool) -> Result<Option<String>> {
     // The portable Run handles Ctrl-C itself. Wait for either the line or
     // cancellation so a blocking terminal read does not swallow Ctrl-C.
     let (send, receive) = mpsc::channel();
@@ -127,12 +156,12 @@ fn read_visible(cancelled: &AtomicBool) -> Result<String> {
         let mut value = String::new();
         let result = io::stdin()
             .read_line(&mut value)
-            .map(|_| value.trim_end_matches(['\r', '\n']).to_owned());
+            .map(|bytes| (bytes > 0).then(|| value.trim_end_matches(['\r', '\n']).to_owned()));
         let _ = send.send(result);
     })?;
     loop {
         if cancelled.load(Ordering::Relaxed) {
-            bail!("the Run was cancelled. No workload was started");
+            bail!("Input was cancelled");
         }
         match receive.recv_timeout(Duration::from_millis(50)) {
             Ok(value) => return Ok(value?),
@@ -149,6 +178,7 @@ fn describe(binding: &ApplicationBindingV1) -> (&'static str, Option<&'static st
         "ato.config@1" => ("app setting", Some("example-value")),
         OPENAI_EMBEDDING_BASE_URL_PROTOCOL => ("service base URL", Some("https://api.example/v1")),
         "ato.secret@1" => ("secret such as a password or token", None),
+        "ato.secret-refresh@1" => ("refresh credential", None),
         OPENAI_EMBEDDING_API_KEY_PROTOCOL => ("API key", None),
         ato_formation::authoring::TCP_EGRESS_PROTOCOL => ("outbound connection setting", None),
         _ => ("value requested by the app", None),

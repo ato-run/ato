@@ -469,6 +469,35 @@ pub fn preflight_local_run(
     if failure.is_some() {
         return failure;
     }
+    if matches!(
+        route.realization,
+        PortableRealizationKind::LocalProcess | PortableRealizationKind::ProcessServiceGroup
+    ) {
+        let reason = match host.os.as_str() {
+            "macos" if !host.native.sandbox_tool => Some(
+                "This machine cannot apply the macOS process sandbox. Start Ato outside any parent sandbox or use a supported Linux host.",
+            ),
+            "linux" if !ato_sandbox::is_sandbox_supported() => Some(
+                "This Linux host cannot apply Landlock. Use a Linux host with Landlock enabled.",
+            ),
+            "linux"
+                if !route.derivation.state.is_empty()
+                    && !ato_sandbox::bubblewrap_containment_available() =>
+            {
+                Some(
+                    "This route needs bubblewrap to mount its state safely. Install bubblewrap and run it on a Linux host that permits its namespaces.",
+                )
+            }
+            "macos" | "linux" => None,
+            _ => Some("Local process routes are supported on macOS and Linux."),
+        };
+        if let Some(reason) = reason {
+            return refused(
+                "process_sandbox_unavailable",
+                format!("portable process sandbox admission failed. {reason}"),
+            );
+        }
+    }
     let mut python_versions = BTreeSet::new();
     match route.realization {
         PortableRealizationKind::LocalProcess => {
