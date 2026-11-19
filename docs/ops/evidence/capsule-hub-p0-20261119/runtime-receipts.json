@@ -149,6 +149,44 @@
       "agentMetricsVerified": false
     }
   },
+  "grafana": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/4",
+      "bundle_sha256": "sha256:9b9aca078e5d399f3b4cb2f902aeac4816620f8ade9642c848f47de163864d03",
+      "contract_ref": "sha256:01e12515a2d1ad8025759e044a81df403d4143ad46a7776be759cb733dbbbd96",
+      "derivation_ref": "sha256:54f6b45921e55f18ccc52d224aec4980eb1273a1766ed196ad4181f8f4c434c7",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "oci",
+        "runtime_executable": "docker",
+        "image": "docker.io/grafana/grafana@sha256:1c88285f1dd391a62232c010e6c224846e6a73bdc583b3365be2eba614b7919e",
+        "platform": "linux/amd64",
+        "platform_emulated": true,
+        "connector": "relay",
+        "relay_image_digest": "sha256:3e66ad944f585ee3a547dfd6db569e2c05383cbca66b1ba1639e10fa1620f0cd",
+        "attempt_id": "run-63209-1795076439315334000"
+      },
+      "observations": [
+        {
+          "id": "grafana-http",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/api/health",
+            "status": 200,
+            "body_sha256": "sha256:00e65159c0229d20bfa71a7092943af86ba5c07fe6c292c4c53cc08424c78399"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "create and retrieve a dashboard and its text panel",
+      "panels": 1
+    }
+  },
   "memos": {
     "receipt_excerpt": {
       "schema": "ato.contract-verification-receipt/4",
@@ -185,6 +223,44 @@
     "operations": {
       "operation": "create and read a private memo",
       "saved": true
+    }
+  },
+  "siyuan": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/4",
+      "bundle_sha256": "sha256:bbd36d2104d31a74c73474ab05a63195f98c945f6b9eb50bb447119a880b7df9",
+      "contract_ref": "sha256:f3146d364c3ad9bb61115fdc93318489ea4eafadd948b9c2dd8b2c7412f12787",
+      "derivation_ref": "sha256:1e6cc1c2283d52252b4a47aa72637bec664b98939a94b88407dcd965463daa56",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "oci",
+        "runtime_executable": "docker",
+        "image": "docker.io/b3log/siyuan@sha256:61bef308dd8ebb54249e10f335cf3d1d3b221047bd4a9614d44534d37078fc55",
+        "platform": "linux/amd64",
+        "platform_emulated": true,
+        "connector": "relay",
+        "relay_image_digest": "sha256:3e66ad944f585ee3a547dfd6db569e2c05383cbca66b1ba1639e10fa1620f0cd",
+        "attempt_id": "run-62279-1795076279147753000"
+      },
+      "observations": [
+        {
+          "id": "siyuan-serves",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/check-auth",
+            "status": 200,
+            "body_sha256": "sha256:c8bca2ff80c5e04d53ff08be330e7950bbdcc4732859c93e5676aa46e1cab33d"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "create notebook, create and read Markdown note",
+      "verified": true
     }
   },
   "homepage": {
@@ -270,7 +346,7 @@
       },
       "execution": {
         "realization": "native_desktop",
-        "attempt_id": "run-65474-1795064050768574000",
+        "attempt_id": "run-2250-1795074466626607000",
         "runtime_name": "AppFlowy",
         "native": {
           "artifact_ref": "sha256:132641eb6c28c0399137b058e93cdc748f4416a7b1e012f6a3073850a8786070",

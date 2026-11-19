@@ -2,7 +2,7 @@
 
 2026年11月19日 12:21 JST 時点で、依頼時の301件のうちP0全58件（既存調査分34件、新規調査分24件）を `koh0920` 名前空間に公開した。Hub全体では既存7件を含めて65件になった。台帳にはアプリごとの詳細ページ、実行方式、最新バンドルのSHA-256、ContractRef、DerivationRef、起動条件を記録した。[staging Capsule Hub](https://stg-app.ato.run/capsules) · [全58件の台帳](evidence/capsule-hub-p0-20261119/catalog.csv)
 
-同日追試でP0全58件でstgの配信digestを指定して起動を試みた結果、主要操作の完了は15件、起動時のContractまでの確認は2件、起動未確認は41件だった。Dockerを使わず主要操作まで確認したのはExcalidraw、Mermaid、Super Productivity、LibreOffice。[アプリ別の結果](evidence/capsule-hub-p0-20261119/runtime.csv)
+同日追試でP0全58件でstgの配信digestを指定して起動を試みた結果、主要操作の完了は17件、起動時のContractまでの確認は2件、起動未確認は39件だった。Dockerを使わず主要操作まで確認したのはExcalidraw、Mermaid、Super Productivity、LibreOffice。[アプリ別の結果](evidence/capsule-hub-p0-20261119/runtime.csv)
 
 ## 初回公開時の確認結果（12:21 JST）
 
@@ -58,6 +58,8 @@ CLIの根拠は[OCIのVOLUME検査](../../extensions/adapters/oci/src/lib.rs)、
 | Super Productivity | 上流v20.0.0の署名済みパッケージに含まれるWeb版をPython 3.12で配信し、日本語のタスクを追加した。再読み込み後に件名を照合した。日本語と英語を収録している。 |
 | Gitea | 初期化した管理者で非公開リポジトリとIssueを作り、Issueを番号指定で読み出して件名を確認した。 |
 | Homepage | 公式サンプル設定からサービス一覧を読み込み、ダッシュボードのリンク先を設定と照合した。 |
+| SiYuan | アクセスコードで認証し、ノートブックとMarkdown文書を作成した。ブロックAPIから保存された本文を取得し照合した。初回に表示する画面を上流の認証ページに合わせた。 |
+| Grafana | 管理者でダッシュボードとテキストパネルを作成し、保存されたパネルの本文をAPIで照合した。既存のstg配信digestとDで動作した。 |
 | Redmine | 管理者で非公開プロジェクトとチケットを作成し、保存された件名とプロジェクトIDを取得した。 |
 | code-server | 認証後に検証用ファイルをブラウザーのVS Codeで開いて編集・保存した。ディスク上の内容と、ページ再読み込み後のエディターの表示を照合した。[再読み込み後の画面](evidence/capsule-hub-p0-20261119/code-server-saved.png) |
 | PostgreSQL | stgからLinux/arm64のDを選び、Adminer上で一時テーブルを作成した。7と11を挿入し、SQLの集計結果が18であることを確認した。 |
@@ -99,3 +101,15 @@ LibreOfficeは共通の一時ディレクトリが書き込み不可のとき、
 HomepageのHost検証はポート番号も照合するため、固定設定の初版はRunごとに異なる公開ポートを拒否した。新版はループバックのHostと同一Originを確認した要求を、固定ポートで待ち受ける上流に渡す。GiteaとRedmineでは初回DBの初期化と管理者パスワードのbindingを追加した。RedmineのDB・添付ファイルは保存領域に置き、同梱のアプリ本体は起動時の一時領域に展開している。[HomepageのHost検証](https://github.com/gethomepage/homepage/blob/main/src/utils/auth.js)
 
 Super Productivityは旧版のネイティブ画面の観測から、Web画面を実際に配信する新しいContractに更新した。ブラウザーのオリジン単位で保存するため、別のRunへの移動はアプリのエクスポートを使う。タスク追加と同一オリジンの再読み込みを確認した。
+
+### 初回に起動できなかったアプリの切り分け
+
+| アプリ | 追試で分かったこと |
+|---|---|
+| LibreOffice | 修正したCLIとstgの署名済みバンドルからWriterを起動し、編集・保存・読み戻しに成功した。 |
+| Formbricks | 修正候補でPostgreSQLとキャッシュが待受を開始し、Webプロセスが起動した。WebイメージはCube・HubのURLと認証を要求し、環境検査で終了した。上流v3.17.1のWebとpgvectorに固定した別候補をpackした。[上流の版別Compose](https://github.com/formbricks/formbricks/blob/v3.17.1/docker/docker-compose.yml) |
+| Plane | PostgreSQLとキャッシュを起動。RabbitMQの専用一時領域を構成した後も、AMD64版Erlangの起動時に `prim_tty:isatty` で終了した。 |
+| GitLab CE・ONLYOFFICE Docs | 固定digestのイメージ取得でストリームの途中終了を観測した。部分取得と再開を試行。主要操作の証跡は未取得。 |
+| RustDesk | macOS版の署名済みアプリは起動中に終了コード255で停止。許可された使い捨て端末間での接続・入力転送は未確認。[LinuxServerの検証用クライアントイメージ](https://github.com/linuxserver/docker-rustdesk) |
+
+Stirling-PDFのmacOS版はウィンドウのContractを満たした後、JavaバックエンドがJettyの一時ディレクトリを作れず終了した。AppFlowyのウィンドウと同様、文書操作は未確認。AFFiNEとOpenCodeのmacOS版は署名済みパッケージから起動を試し、いずれもElectronからIOKitを呼ぶ箇所で終了した。AFFiNEのパッケージ内のWeb画面も単独ではデスクトップ側の `nbstore` を必要とした。
