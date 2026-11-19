@@ -227,6 +227,15 @@ pub fn admit_with_model_delivery(
                 );
             }
         }
+        // Startup observes the selected route's own Port. It adds no network
+        // or authority grant. Host conditions were checked above, and the D
+        // digest of a user-invoked Run is checked below.
+        EffectAuthorization::UserInvoked { .. }
+            if spec
+                .derivation
+                .requirements
+                .within(&Default::default())
+                .is_ok() => {}
         _ if !spec.derivation.requirements.is_empty() => {
             return refused(
                 "execution_authority_required",
@@ -540,7 +549,7 @@ mod tests {
     /// A person who accepted the requirements the CLI listed (for example a
     /// native source build's fixed crate egress) authorizes those
     /// requirements for that exact D. A plain user-invoked Run still refuses
-    /// any declared requirement, and an authorization names one D only.
+    /// additional authority, and an authorization names one D only.
     #[test]
     fn a_user_authorization_covers_the_declared_requirements_of_that_d() {
         let contract = BoundContract {
@@ -597,6 +606,46 @@ mod tests {
             .as_deref(),
             Some("authorization_mismatch")
         );
+    }
+
+    #[test]
+    fn a_startup_observation_needs_no_additional_grant() {
+        let mut route = derivation(EffectClass::Pure);
+        route.requirements = serde_json::from_value(serde_json::json!({
+            "startup": {"port":"app.http", "path":"/ready", "timeout_ms":10000}
+        }))
+        .unwrap();
+        let contract = BoundContract {
+            schema: "ato.contract/1".into(),
+            requirements: vec![],
+        };
+        let spec = AttemptSpec {
+            contract: &contract,
+            contract_ref: "sha256:k",
+            derivation: &route,
+            derivation_ref: "sha256:d",
+            shape: CandidateShape::Process,
+            input_refs: Default::default(),
+            instance_snapshot_ref: None,
+            scenarios: vec![],
+        };
+        for (requested, expected) in [
+            ("sha256:d", None),
+            ("sha256:other", Some("authorization_mismatch")),
+        ] {
+            assert_eq!(
+                admit(
+                    &spec,
+                    EffectAuthorization::UserInvoked {
+                        derivation_ref: requested
+                    },
+                    None
+                )
+                .map(|failure| failure.code)
+                .as_deref(),
+                expected
+            );
+        }
     }
 
     #[test]
