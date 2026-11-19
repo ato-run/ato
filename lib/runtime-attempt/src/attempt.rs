@@ -544,6 +544,7 @@ fn realize_and_verify(
                 }
                 attempt.browser_verification = Some(browse(
                     candidate.endpoints(),
+                    &spec.derivation.ports,
                     &bounded_browser,
                     request.runtime_id,
                     request.attempt_id,
@@ -1013,6 +1014,7 @@ fn browser_failure(
 /// endpoint the realization reports — never a guessed guest port.
 fn browse(
     endpoints: &BTreeMap<String, String>,
+    ports: &[ato_formation::authoring::BoundPort],
     browser: &BrowserVerification,
     runtime_id: &str,
     attempt_id: &str,
@@ -1022,6 +1024,21 @@ fn browse(
         endpoint,
         attempt_id: Some(attempt_id.to_owned()),
     };
+    let declared_http: Vec<_> = ports
+        .iter()
+        .filter(|port| port.protocol == ato_formation::authoring::HTTP_PROTOCOL)
+        .collect();
+    if let [surface] = declared_http.as_slice() {
+        if let Some(base) = endpoints.get(&surface.id) {
+            return verify_in_browser(browser, target(format!("{base}/")));
+        }
+        return BrowserVerificationReceipt::unavailable(
+            &browser.contract,
+            target(String::new()),
+            "none",
+            "browser_endpoint_unavailable: the declared HTTP surface was not realized",
+        );
+    }
     match endpoints.values().collect::<Vec<_>>().as_slice() {
         [base] => verify_in_browser(browser, target(format!("{base}/"))),
         all => BrowserVerificationReceipt::unavailable(
@@ -1099,6 +1116,49 @@ pub fn bounded(reason: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn browser_uses_the_declared_http_surface_with_extra_observation_ports() {
+        let ports = [
+            ato_formation::authoring::BoundPort {
+                id: "app.http".into(),
+                protocol: ato_formation::authoring::HTTP_PROTOCOL.into(),
+                from: "web".into(),
+                guest_port: Some(8080),
+                client_address_transport: None,
+            },
+            ato_formation::authoring::BoundPort {
+                id: "backend.tcp".into(),
+                protocol: "ato.tcp@1".into(),
+                from: "backend".into(),
+                guest_port: Some(8081),
+                client_address_transport: None,
+            },
+        ];
+        let browser = super::BrowserVerification {
+            contract: ato_formation::browser::BrowserContractV0::from_prompt(
+                "Observe the web surface",
+            )
+            .unwrap(),
+            verifier: None,
+            budget: Default::default(),
+        };
+        let mut endpoints = std::collections::BTreeMap::from([
+            ("app.http".into(), "http://127.0.0.1:48080".into()),
+            ("backend.tcp".into(), "http://127.0.0.1:48081".into()),
+        ]);
+        let receipt = super::browse(&endpoints, &ports, &browser, "runtime", "attempt");
+        assert_eq!(receipt.target.endpoint, "http://127.0.0.1:48080/");
+        endpoints.remove("app.http");
+        let receipt = super::browse(&endpoints, &ports, &browser, "runtime", "attempt");
+        assert!(receipt.target.endpoint.is_empty());
+        assert!(
+            receipt
+                .reason
+                .unwrap()
+                .starts_with("browser_endpoint_unavailable")
+        );
+    }
+
     use ato_formation::authoring::{
         BoundContract, BoundRequirement, HTTP_CONTRACT_VERIFIER,
         INSTANCE_SNAPSHOT_CONTRACT_VERIFIER, WORKSPACE_CONTRACT_VERIFIER,

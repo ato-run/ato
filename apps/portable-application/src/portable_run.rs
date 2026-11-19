@@ -35,6 +35,7 @@ use crate::{
 use anyhow::{Context, Result, bail, ensure};
 use ato_adapter_oci::{
     DockerOciAdapter, OciEndpoint, OciMount, OciNetwork, OciResourceLimits, OciSpec, StopBudget,
+    command_control::CommandControl,
 };
 use ato_adapter_process::{
     ProcessAdapter, ProcessHandle, ProcessSpec, StopBudget as ProcessStopBudget,
@@ -50,7 +51,7 @@ use ato_runtime_attempt::build_sandbox::NetworkPolicy;
 use ato_runtime_attempt::control::{AttemptPhase, ExecutionControl};
 use ato_runtime_attempt::data_plane::{ModelCache, ModelSetEntry, ModelSetManifest, env_name};
 use ato_runtime_attempt::launch::oci::{
-    LaunchedOci, OciCandidate, ServiceStart, start_service_group,
+    LaunchedOci, OciCandidate, ServiceStart, abandon_group, start_service_group,
 };
 use ato_runtime_attempt::launch::process_executor::state_path_env_name;
 #[cfg(unix)]
@@ -559,7 +560,7 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
 
     fn realize_controlled(
         &self,
-        _attempt_id: &str,
+        attempt_id: &str,
         _attempt_root: &Path,
         control: &ExecutionControl,
     ) -> Result<Realized, RealizeFailure> {
@@ -575,6 +576,9 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
                 cfg!(target_os = "linux")
                     && route.derivation.runtimes.contains_key(PYTHON_RUNTIME)
                     && route.model_sets.is_empty()
+            }
+            PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup => {
+                cfg!(target_os = "linux") && self.offline()
             }
             _ => false,
         };
@@ -611,17 +615,67 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
                 ));
             }
         }
-        self.realize_bundle(Some(control))
+        self.realize_bundle(attempt_id, Some(control))
     }
 
-    fn realize(&self, _attempt_id: &str, _attempt_root: &Path) -> Result<Realized, RealizeFailure> {
-        self.realize_bundle(None)
+    fn realize(&self, attempt_id: &str, _attempt_root: &Path) -> Result<Realized, RealizeFailure> {
+        self.realize_bundle(attempt_id, None)
+    }
+}
+
+struct BoundedOciRun {
+    command: CommandControl,
+    daemon_socket: PathBuf,
+    ownership_labels: BTreeMap<String, String>,
+}
+
+impl BoundedOciRun {
+    fn new(
+        attempt_id: &str,
+        control: &ExecutionControl,
+        host: &ato_host_facts::HostFacts,
+    ) -> Result<Self> {
+        use ato_formation::failure::{FailureStage, FormationFailure};
+        let daemon_socket = match &host.docker.endpoint {
+            ato_host_facts::EndpointKind::Unix(socket) if host.docker.bridge_reachable() => {
+                PathBuf::from(socket)
+            }
+            _ => {
+                return Err(FormationFailure::new(
+                    "oci_native_daemon_required",
+                    FailureStage::Admission,
+                    "Bounded OCI verification requires a local Linux Docker Engine with a directly reachable bridge",
+                ).into());
+            }
+        };
+        let command = CommandControl::new(control.deadline_ms())
+            .cap(control.remaining(AttemptPhase::Launch)?);
+        Ok(Self {
+            command,
+            daemon_socket,
+            ownership_labels: BTreeMap::from([(
+                "run.ato.dev/publication-attempt".into(),
+                crate::bundle_sha256(attempt_id.as_bytes())[7..].into(),
+            )]),
+        })
+    }
+
+    fn remaining(&self) -> Result<std::time::Duration> {
+        self.command.remaining().map_err(|_| {
+            ato_formation::failure::FormationFailure::new(
+                "round_deadline_exceeded",
+                ato_formation::failure::FailureStage::Admission,
+                "The bounded OCI startup deadline elapsed",
+            )
+            .into()
+        })
     }
 }
 
 impl PortableBundleExecutor<'_> {
     fn realize_bundle(
         &self,
+        attempt_id: &str,
         control: Option<&ExecutionControl>,
     ) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
@@ -635,6 +689,16 @@ impl PortableBundleExecutor<'_> {
         // One measurement of this host, used for both the connector choice and
         // the evidence that records it.
         let host = self.host_facts();
+        let bounded_oci = if matches!(
+            route.realization,
+            PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup
+        ) {
+            control
+                .map(|control| BoundedOciRun::new(attempt_id, control, &host))
+                .transpose()?
+        } else {
+            None
+        };
         let state_mounts =
             resolve_portable_state_mounts(route, self.runtime_root, self.filesystem_state)?;
         let input_mounts = if route.model_sets.is_empty() {
@@ -657,12 +721,20 @@ impl PortableBundleExecutor<'_> {
             PortableRealizationKind::LocalProcess => {
                 self.start_process(workspace, &state_mounts, &input_mounts, control)?
             }
-            PortableRealizationKind::OciContainer => {
-                self.start_container(&hydrated, workspace, &state_mounts, &host)?
-            }
-            PortableRealizationKind::OciServiceGroup => {
-                self.start_service_group(&hydrated, workspace, &state_mounts, &host)?
-            }
+            PortableRealizationKind::OciContainer => self.start_container(
+                &hydrated,
+                workspace,
+                &state_mounts,
+                &host,
+                bounded_oci.as_ref(),
+            )?,
+            PortableRealizationKind::OciServiceGroup => self.start_service_group(
+                &hydrated,
+                workspace,
+                &state_mounts,
+                &host,
+                bounded_oci.as_ref(),
+            )?,
             PortableRealizationKind::ProcessServiceGroup => {
                 self.start_process_group(workspace, &state_mounts, &input_mounts)?
             }
@@ -1018,6 +1090,7 @@ impl PortableBundleExecutor<'_> {
         workspace: PathBuf,
         state_mounts: &[PortableStateMount],
         host: &ato_host_facts::HostFacts,
+        bounded: Option<&BoundedOciRun>,
     ) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
         // A single container has no group network to join, so the relay
@@ -1077,11 +1150,12 @@ impl PortableBundleExecutor<'_> {
             mounts,
             limits: oci_limits(runtime)?,
             stop_timeout_seconds: 5,
-            // A local Run is not Runner-owned; recovery never scans it.
-            labels: BTreeMap::new(),
+            labels: bounded
+                .map(|run| run.ownership_labels.clone())
+                .unwrap_or_default(),
         };
         let oci_runtime = self.runtime_root.join("oci");
-        let handle = local_oci_adapter(hydrated, spec)
+        let handle = local_oci_adapter(hydrated, spec, &oci_runtime, bounded)
             .and_then(|adapter| adapter.spawn(&workspace, &oci_runtime))
             .map_err(|error| oci_launch_failure(error, &workspace, &oci_runtime))?;
         let base = format!("http://127.0.0.1:{host_port}");
@@ -1115,6 +1189,7 @@ impl PortableBundleExecutor<'_> {
         workspace: PathBuf,
         state_mounts: &[PortableStateMount],
         host: &ato_host_facts::HostFacts,
+        bounded: Option<&BoundedOciRun>,
     ) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
         let derivation = &route.derivation;
@@ -1183,13 +1258,15 @@ impl PortableBundleExecutor<'_> {
                 mounts,
                 limits: oci_limits(runtime)?,
                 stop_timeout_seconds: 5,
-                // A local Run is not Runner-owned; recovery never scans it.
-                labels: BTreeMap::new(),
+                labels: bounded
+                    .map(|run| run.ownership_labels.clone())
+                    .unwrap_or_default(),
             };
+            let runtime_root = oci_runtime.join(&step.id);
             services.push(ServiceStart {
                 name: step.id.clone(),
-                adapter: local_oci_adapter(hydrated, spec)?,
-                runtime_root: oci_runtime.join(&step.id),
+                adapter: local_oci_adapter(hydrated, spec, &runtime_root, bounded)?,
+                runtime_root,
                 networks: Vec::new(),
                 guards: Vec::new(),
             });
@@ -1218,7 +1295,17 @@ impl PortableBundleExecutor<'_> {
             }
             _ => None,
         };
-        let mut group = OciNetwork::create(&route.derivation_ref.to_string(), &BTreeMap::new())
+        let label = route.derivation_ref.as_str();
+        let network = if bounded.is_some() {
+            services
+                .first()
+                .context("OCI service group has no service")?
+                .adapter
+                .create_internal_network(label)
+        } else {
+            OciNetwork::create(label, &BTreeMap::new())
+        };
+        let mut group = network
             .and_then(|network| {
                 start_service_group(
                     network,
@@ -1226,7 +1313,7 @@ impl PortableBundleExecutor<'_> {
                     services,
                     StopBudget::DEFAULT,
                     relay,
-                    &mut |name, group| wait_until_service_accepts_tcp(route, name, group),
+                    &mut |name, group| wait_until_service_accepts_tcp(route, name, group, bounded),
                 )
             })
             .map_err(|error| oci_launch_failure(error, &workspace, &oci_runtime))?;
@@ -1245,25 +1332,32 @@ impl PortableBundleExecutor<'_> {
                 .into_iter()
                 .map(|observation| observation.port_id),
         );
-        for port_id in observation_ports {
-            if port_id == surface_port.id || observation_endpoints.contains_key(&port_id) {
-                continue;
+        let expose_observations = (|| -> Result<()> {
+            for port_id in observation_ports {
+                if port_id == surface_port.id || observation_endpoints.contains_key(&port_id) {
+                    continue;
+                }
+                if let Some(run) = bounded {
+                    run.remaining()?;
+                }
+                let port = derivation
+                    .ports
+                    .iter()
+                    .find(|port| port.id == port_id)
+                    .context("observation names undeclared service Port")?;
+                let guest_port = port
+                    .guest_port
+                    .context("observation Port omitted guest port")?;
+                let address = group
+                    .expose(port.from.as_str(), guest_port)
+                    .context("expose the observation's service Port")?;
+                observation_endpoints.insert(port.id.clone(), format!("http://{address}"));
             }
-            let port = derivation
-                .ports
-                .iter()
-                .find(|port| port.id == port_id)
-                .context("observation names undeclared service Port")?;
-            let guest_port = port
-                .guest_port
-                .context("observation Port omitted guest port")?;
-            // The observation reaches the Port the way this Run reaches any
-            // Port: the group's connector decides, and hands back an address
-            // the observation path can dial.
-            let address = group
-                .expose(port.from.as_str(), guest_port)
-                .context("expose the observation's service Port")?;
-            observation_endpoints.insert(port.id.clone(), format!("http://{address}"));
+            Ok(())
+        })();
+        if let Err(error) = expose_observations {
+            let failure = abandon_group(group, StopBudget::DEFAULT, error);
+            return Err(oci_launch_failure(failure, &workspace, &oci_runtime));
         }
         let surface = group
             .services()
@@ -1647,6 +1741,7 @@ fn wait_until_service_accepts_tcp(
     route: &ValidatedPortableApplication,
     name: &str,
     group: &ato_adapter_oci::OciServiceGroup,
+    bounded: Option<&BoundedOciRun>,
 ) -> Result<()> {
     let guest_port = route
         .derivation
@@ -1657,19 +1752,30 @@ fn wait_until_service_accepts_tcp(
         .context("OCI service serves no Port")?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
+        if let Some(run) = bounded {
+            run.remaining()?;
+        }
         if let Some((service, code)) = group.exited_service()? {
             bail!("OCI service `{service}` exited before the group was ready: {code}");
         }
         // Readiness is a connection to the logical Port through the Run's
         // connector, not a dial to a container address.
         if group.connect(name, guest_port).is_ok() {
+            if let Some(run) = bounded {
+                run.remaining()?;
+            }
             return Ok(());
         }
         anyhow::ensure!(
             std::time::Instant::now() < deadline,
             "OCI service `{name}` did not accept TCP on {guest_port} within 60s"
         );
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        let interval = std::time::Duration::from_millis(100);
+        let pause = match bounded {
+            Some(run) => interval.min(run.remaining()?),
+            None => interval,
+        };
+        std::thread::sleep(pause);
     }
 }
 
@@ -1691,12 +1797,18 @@ fn free_loopback_port() -> Result<u16> {
 fn local_oci_adapter(
     bundle: &ato_objects::PortableApplicationBundle,
     spec: OciSpec,
+    runtime: &Path,
+    bounded: Option<&BoundedOciRun>,
 ) -> Result<DockerOciAdapter> {
     if !bundle
         .portability
         .as_ref()
         .is_some_and(|portability| portability.profile == PortableDependencyProfile::Offline)
     {
+        ensure!(
+            bounded.is_none(),
+            "Bounded OCI startup requires embedded images"
+        );
         return DockerOciAdapter::new(spec);
     }
     let archive = bundle
@@ -1710,21 +1822,36 @@ fn local_oci_adapter(
         })
         .context("offline OCI image archive is missing")?;
     let verified = crate::oci_archive::verify_oci_archive(archive)?;
-    DockerOciAdapter::new_offline(spec, verified.bytes, verified.config_reference)
+    let adapter = DockerOciAdapter::new_offline(spec, verified.bytes, verified.config_reference)?;
+    if let Some(run) = bounded {
+        run.remaining()?;
+        fs::create_dir_all(runtime)?;
+        return Ok(adapter
+            .with_isolated_owner(
+                &run.daemon_socket,
+                &runtime.canonicalize()?.join("docker-client"),
+            )?
+            .with_control(run.command.clone()));
+    }
+    Ok(adapter)
 }
 
 /// Preserve partial execution separately from a failure that started nothing.
 fn oci_launch_failure(error: anyhow::Error, workspace: &Path, runtime: &Path) -> RealizeFailure {
     let mut resources =
-        if let Some(left) = error.downcast_ref::<ato_adapter_oci::SpawnCleanupUnconfirmed>() {
-            let mut ids = vec![format!("container:{}", left.container)];
-            ids.extend(left.networks.iter().map(|name| format!("network:{name}")));
-            Some(ids)
+        if let Some(left) = error.downcast_ref::<ato_adapter_oci::NetworkCleanupUnconfirmed>() {
+            Some(vec![format!("network:{}", left.network)])
         } else {
-            error
-                .downcast_ref::<ato_runtime_attempt::launch::oci::OciStartFailure>()
-                .filter(|failure| !failure.confirmed())
-                .map(|failure| failure.resources())
+            if let Some(left) = error.downcast_ref::<ato_adapter_oci::SpawnCleanupUnconfirmed>() {
+                let mut ids = vec![format!("container:{}", left.container)];
+                ids.extend(left.networks.iter().map(|name| format!("network:{name}")));
+                Some(ids)
+            } else {
+                error
+                    .downcast_ref::<ato_runtime_attempt::launch::oci::OciStartFailure>()
+                    .filter(|failure| !failure.confirmed())
+                    .map(|failure| failure.resources())
+            }
         };
     if let Some(resources) = resources.as_mut() {
         resources.push(format!("scratch:{}", workspace.display()));
