@@ -87,10 +87,10 @@ async function main(): Promise<number> {
   const judgeKey = secrets.JEV_API_KEY ?? "";
 
   const sequence = sequencer();
-  const browser: BrowserDriver = agentKey
+  const browser = (request.operation_session || agentKey)
     ? new StagehandDriver({
         agentModel,
-        agentApiKey: agentKey,
+        agentApiKey: request.operation_session ? null : agentKey,
         scratchDir: request.scratch_dir,
         chromePath: process.env.ATO_BROWSER_CHROME_PATH || undefined,
         sequence,
@@ -103,7 +103,9 @@ async function main(): Promise<number> {
     judge = null;
   }
 
-  const result = await verify(request, { browser, judge, sequence });
+  const operator = request.operation_session && browser instanceof StagehandDriver ? browser : undefined;
+  const result = await verify(request, { browser, judge, sequence, ...(operator ? { operator } : {}) });
+  if (operator) result.verifier.agent_model = "structured_mcp_operator";
   await writeAll(JSON.stringify(result) + "\n");
   return 0;
 }

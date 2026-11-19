@@ -52,6 +52,12 @@ pub enum BrowserVerifierCommand {
     /// The helper inside the verifier sandbox (`browser_sandbox`). The only
     /// form a Runtime Network worker uses or advertises.
     Contained(BrowserVerifierSandboxSpec),
+    /// The same contained helper with a preparation-owned action mailbox.
+    Interactive {
+        spec: BrowserVerifierSandboxSpec,
+        directory: PathBuf,
+        cancel_file: PathBuf,
+    },
     /// A process on the host, as it is: the host filesystem is visible to it
     /// and to its browser. Development and tests only — never advertised as
     /// a capability, and recorded as `containment: none` in every receipt.
@@ -77,14 +83,14 @@ impl BrowserVerifierCommand {
     }
 
     pub fn is_contained(&self) -> bool {
-        matches!(self, Self::Contained(_))
+        matches!(self, Self::Contained(_) | Self::Interactive { .. })
     }
 
     /// Can this verifier run here? A contained one only when its sandbox
     /// starts; an uncontained one was chosen explicitly.
     pub fn usable(&self) -> bool {
         match self {
-            Self::Contained(spec) => spec.usable(),
+            Self::Contained(spec) | Self::Interactive { spec, .. } => spec.usable(),
             Self::Uncontained { .. } => true,
         }
     }
@@ -92,7 +98,7 @@ impl BrowserVerifierCommand {
     /// What a receipt calls this verifier. No host path.
     fn describe(&self) -> &'static str {
         match self {
-            Self::Contained(_) => "contained-node-helper",
+            Self::Contained(_) | Self::Interactive { .. } => "contained-node-helper",
             Self::Uncontained { .. } => "uncontained-helper",
         }
     }
@@ -123,11 +129,12 @@ pub fn verify_in_browser(
         );
     };
     let chrome = match command {
-        BrowserVerifierCommand::Contained(spec) => spec.chrome_sandbox(),
+        BrowserVerifierCommand::Contained(spec)
+        | BrowserVerifierCommand::Interactive { spec, .. } => spec.chrome_sandbox(),
         BrowserVerifierCommand::Uncontained { .. } => None,
     };
     let evidence = match command {
-        BrowserVerifierCommand::Contained(_) => {
+        BrowserVerifierCommand::Contained(_) | BrowserVerifierCommand::Interactive { .. } => {
             contained_evidence(chrome.unwrap_or(ChromeSandbox::Disabled))
         }
         BrowserVerifierCommand::Uncontained { .. } => uncontained_evidence(),
@@ -151,7 +158,17 @@ pub fn verify_in_browser(
         );
     }
     sweep_orphaned_scratch();
-    let scratch = match new_scratch() {
+    let operation_directory = match command {
+        BrowserVerifierCommand::Interactive { directory, .. } => Some(directory.as_path()),
+        _ => None,
+    };
+    if operation_directory.is_some() && target.attempt_id.is_none() {
+        return unavailable(
+            target,
+            "browser_verifier_unavailable: an interactive session needs an attempt identity".into(),
+        );
+    }
+    let scratch = match new_scratch(operation_directory) {
         Ok(scratch) => scratch,
         Err(error) => {
             return unavailable(
@@ -161,7 +178,9 @@ pub fn verify_in_browser(
         }
     };
     let scratch_seen_by_helper = match command {
-        BrowserVerifierCommand::Contained(_) => GUEST_SCRATCH.to_owned(),
+        BrowserVerifierCommand::Contained(_) | BrowserVerifierCommand::Interactive { .. } => {
+            GUEST_SCRATCH.to_owned()
+        }
         BrowserVerifierCommand::Uncontained { .. } => scratch.path().to_string_lossy().into_owned(),
     };
     let request = BrowserVerificationRequest {
@@ -170,19 +189,22 @@ pub fn verify_in_browser(
         url: target.endpoint.clone(),
         budget: verification.budget,
         scratch_dir: scratch_seen_by_helper,
+        operation_session: operation_directory.and(target.attempt_id.clone()),
     };
     let timeout = Duration::from_millis(verification.budget.wall_clock_ms) + SHUTDOWN_GRACE;
     // A contained helper's browser is started by this worker, beside the
     // helper's sandbox, on the helper's request.
     let launcher = match (command, chrome) {
-        (BrowserVerifierCommand::Contained(spec), Some(chrome)) => {
-            match BrowserLauncher::start(spec, scratch.path(), chrome) {
-                Ok(launcher) => Some(launcher),
-                Err(error) => {
-                    return unavailable(target, format!("browser_verifier_unavailable: {error:#}"));
-                }
+        (
+            BrowserVerifierCommand::Contained(spec)
+            | BrowserVerifierCommand::Interactive { spec, .. },
+            Some(chrome),
+        ) => match BrowserLauncher::start(spec, scratch.path(), chrome) {
+            Ok(launcher) => Some(launcher),
+            Err(error) => {
+                return unavailable(target, format!("browser_verifier_unavailable: {error:#}"));
             }
-        }
+        },
         _ => None,
     };
     let output = run_helper(command, &request, scratch.path(), timeout);
@@ -227,7 +249,8 @@ pub fn verify_in_browser(
 
 /// A fresh scratch directory, marked with this process's id so a later
 /// verification can tell an orphan (its worker died) from a live one.
-fn new_scratch() -> std::io::Result<tempfile::TempDir> {
+fn new_scratch(operation_directory: Option<&Path>) -> std::io::Result<tempfile::TempDir> {
+    // Keep the Unix launcher socket out of a long preparation-ID path.
     let parent = std::env::temp_dir().join(SCRATCH_PARENT);
     std::fs::create_dir_all(&parent)?;
     let scratch = tempfile::Builder::new().prefix("v-").tempdir_in(&parent)?;
@@ -237,6 +260,13 @@ fn new_scratch() -> std::io::Result<tempfile::TempDir> {
     )?;
     for sub in ["home", "tmp"] {
         std::fs::create_dir_all(scratch.path().join(sub))?;
+    }
+    if let Some(directory) = operation_directory {
+        std::fs::create_dir(scratch.path().join("operator"))?;
+        std::fs::create_dir_all(directory)?;
+        let mut location = tempfile::NamedTempFile::new_in(directory)?;
+        serde_json::to_writer(location.as_file_mut(), &scratch.path())?;
+        location.persist(directory.join("location.json"))?;
     }
     Ok(scratch)
 }
@@ -324,7 +354,8 @@ fn run_helper(
         })
         .collect();
     let mut process = match command {
-        BrowserVerifierCommand::Contained(spec) => {
+        BrowserVerifierCommand::Contained(spec)
+        | BrowserVerifierCommand::Interactive { spec, .. } => {
             let argv = spec.argv(scratch, &settings).map_err(|error| {
                 format!("browser_verifier_unavailable: cannot build the verifier sandbox ({error})")
             })?;
@@ -429,6 +460,16 @@ fn run_helper(
 
     let deadline = Instant::now() + timeout;
     let status = loop {
+        if let BrowserVerifierCommand::Interactive { cancel_file, .. } = command
+            && cancel_file.exists()
+        {
+            kill_group(group);
+            let _ = child.wait();
+            return Err(
+                "browser_verification_cancelled: the contained verifier and browser were stopped"
+                    .into(),
+            );
+        }
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) if Instant::now() >= deadline => break None,
