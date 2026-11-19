@@ -348,9 +348,101 @@ impl DockerCommand {
     }
 }
 
+/// Run-private tmpfs mounts explicitly selected for image-declared VOLUMEs.
+#[derive(Default, Debug, PartialEq, Eq)]
+pub struct ScratchVolumes(Vec<String>);
+
+impl ScratchVolumes {
+    pub fn parse(declared: Option<&str>) -> Result<Self> {
+        let Some(raw) = declared else {
+            return Ok(Self::default());
+        };
+        ensure!(
+            raw.len() <= 4096,
+            "scratch volume declaration exceeds 4096 bytes"
+        );
+        let paths: Vec<String> = serde_json::from_str(raw)
+            .context("oci.scratch_volumes expects a JSON array of guest paths")?;
+        ensure!(
+            serde_json::to_string(&paths)? == raw,
+            "scratch volumes must use canonical JSON array encoding"
+        );
+        ensure!(
+            (1..=8).contains(&paths.len()),
+            "declare between one and eight scratch volumes"
+        );
+        ensure!(
+            paths.windows(2).all(|w| w[0] < w[1]),
+            "scratch volumes must be sorted and unique"
+        );
+        for path in &paths {
+            ensure!(
+                valid_guest_path(path)
+                    && path.len() <= 256
+                    && path
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b)),
+                "invalid scratch volume path {path:?}"
+            );
+        }
+        let mounts = Self(paths);
+        mounts.check_conflicts(
+            [
+                "/tmp",
+                "/proc",
+                "/sys",
+                "/dev",
+                "/.ato-data",
+                "/etc/hosts",
+                "/etc/hostname",
+                "/etc/resolv.conf",
+            ]
+            .into_iter(),
+        )?;
+        Ok(mounts)
+    }
+
+    pub fn check_conflicts<'a>(&self, occupied: impl Iterator<Item = &'a str>) -> Result<()> {
+        let overlap = |a: &str, b: &str| Path::new(a).starts_with(b) || Path::new(b).starts_with(a);
+        for fixed in occupied {
+            ensure!(
+                !self.0.iter().any(|path| overlap(path, fixed)),
+                "scratch volume overlaps mount {fixed}"
+            );
+        }
+        for (i, path) in self.0.iter().enumerate() {
+            ensure!(
+                !self.0[..i].iter().any(|other| overlap(path, other)),
+                "scratch volumes overlap at {path}"
+            );
+        }
+        Ok(())
+    }
+
+    fn authorize(&self, uncovered: Vec<String>) -> Result<()> {
+        for path in &self.0 {
+            ensure!(
+                uncovered.iter().any(|v| v.trim_end_matches('/') == path),
+                "scratch volume {path} is not an uncovered VOLUME of the pinned image"
+            );
+        }
+        let missing: Vec<_> = uncovered
+            .into_iter()
+            .filter(|v| !self.0.iter().any(|path| path == v.trim_end_matches('/')))
+            .collect();
+        if !missing.is_empty() {
+            return Err(anyhow::Error::new(OciVolumeUnauthorized {
+                volumes: missing,
+            }));
+        }
+        Ok(())
+    }
+}
+
 pub struct DockerOciAdapter {
     docker: DockerClient,
     spec: OciSpec,
+    scratch_volumes: ScratchVolumes,
     offline_image: Option<OfflineImage>,
     attached_terminal: bool,
     cgroup_parent: Option<String>,
@@ -366,6 +458,15 @@ struct OfflineImage {
 }
 
 impl DockerOciAdapter {
+    pub fn with_scratch_volumes(mut self, volumes: ScratchVolumes) -> Result<Self> {
+        volumes.check_conflicts(
+            std::iter::once(self.spec.workspace_mount_path.as_str())
+                .chain(self.spec.mounts.iter().map(|m| m.guest_path.as_str())),
+        )?;
+        self.scratch_volumes = volumes;
+        Ok(self)
+    }
+
     /// Reach this container's logical Ports through `connector` instead of its
     /// own address. Used for a Run whose daemon keeps the container network
     /// out of reach; the connector is the Run's, and the Run records it.
@@ -463,6 +564,7 @@ impl DockerOciAdapter {
         Ok(Self {
             docker,
             spec,
+            scratch_volumes: ScratchVolumes::default(),
             offline_image: None,
             attached_terminal: false,
             cgroup_parent: None,
@@ -694,11 +796,7 @@ impl DockerOciAdapter {
         // read-only root that no Capsule declared, so it is refused.
         let volumes = image_volumes(&self.docker, &image_for_run)?;
         let uncovered = uncovered_volumes(&volumes, &self.spec);
-        if !uncovered.is_empty() {
-            return Err(anyhow::Error::new(OciVolumeUnauthorized {
-                volumes: uncovered,
-            }));
-        }
+        self.scratch_volumes.authorize(uncovered)?;
 
         let suffix = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         // A service's alias is kept whole in its container name so an operator
@@ -736,6 +834,15 @@ impl DockerOciAdapter {
             alias,
             &image_for_run,
         )?;
+        for path in &self.scratch_volumes.0 {
+            argv.splice(
+                1..1,
+                [
+                    "--tmpfs".to_owned(),
+                    format!("{path}:rw,nosuid,nodev,noexec,size=67108864,mode=1777"),
+                ],
+            );
+        }
         if self.attached_terminal {
             // Attach before starting so even the first output is captured.
             // Every sandbox/resource/ownership argument remains unchanged.
@@ -2545,6 +2652,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn scratch_volumes_cover_only_explicit_image_volumes() {
+        let scratch = ScratchVolumes::parse(Some(r#"["/storage/uploads"]"#)).unwrap();
+        assert!(scratch.authorize(vec!["/storage/uploads/".into()]).is_ok());
+        assert!(
+            scratch
+                .authorize(vec!["/storage/uploads".into(), "/log".into()])
+                .is_err()
+        );
+        assert!(scratch.authorize(vec![]).is_err());
+        assert!(scratch.check_conflicts(["/storage"].into_iter()).is_err());
+        assert!(
+            scratch
+                .check_conflicts(["/app", "/data"].into_iter())
+                .is_ok()
+        );
+        for invalid in [
+            r#"["/tmp/log"]"#,
+            r#"["/proc"]"#,
+            r#"["/etc"]"#,
+            r#"["/etc/resolv.conf"]"#,
+            r#"[ "/uploads" ]"#,
+            r#"["/a","/a/b"]"#,
+            r#"["/a:rw"]"#,
+            r#"["/a/../b"]"#,
+            r#"["/same","/same"]"#,
+        ] {
+            assert!(ScratchVolumes::parse(Some(invalid)).is_err(), "{invalid}");
+        }
+    }
     #[test]
     fn image_volumes_need_a_declared_mount_at_exactly_their_path() {
         let state = tempfile::tempdir().unwrap();

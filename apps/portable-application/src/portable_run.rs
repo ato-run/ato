@@ -879,7 +879,13 @@ impl PortableBundleExecutor<'_> {
             labels: BTreeMap::new(),
         };
         let oci_runtime = self.runtime_root.join("oci");
-        let adapter = local_oci_adapter(hydrated, spec)?;
+        let adapter = local_oci_adapter(hydrated, spec)?.with_scratch_volumes(
+            ato_adapter_oci::ScratchVolumes::parse(
+                runtime
+                    .get(crate::OCI_SCRATCH_VOLUMES_RUNTIME)
+                    .map(String::as_str),
+            )?,
+        )?;
         if host.connector_choice() == Some(ato_host_facts::ConnectorChoice::Relay) {
             let service = ServiceStart {
                 name: step.id.clone(),
@@ -1004,7 +1010,13 @@ impl PortableBundleExecutor<'_> {
             };
             services.push(ServiceStart {
                 name: step.id.clone(),
-                adapter: local_oci_adapter(hydrated, spec)?,
+                adapter: local_oci_adapter(hydrated, spec)?.with_scratch_volumes(
+                    ato_adapter_oci::ScratchVolumes::parse(
+                        runtime
+                            .get(crate::OCI_SCRATCH_VOLUMES_RUNTIME)
+                            .map(String::as_str),
+                    )?,
+                )?,
                 runtime_root: oci_runtime.join(&step.id),
                 networks: Vec::new(),
                 guards: Vec::new(),
