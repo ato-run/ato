@@ -584,7 +584,9 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
             PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup => {
                 cfg!(target_os = "linux") && self.offline()
             }
-            _ => false,
+            PortableRealizationKind::NativeDesktop => {
+                cfg!(target_os = "macos") && supports_bounded_native_window(route)
+            }
         };
         if !supported
             || self
@@ -628,6 +630,18 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
     fn realize(&self, attempt_id: &str, _attempt_root: &Path) -> Result<Realized, RealizeFailure> {
         self.realize_bundle(attempt_id, None)
     }
+}
+
+/// The self-contained native window profile that can be verified under a deadline.
+pub fn supports_bounded_native_window(route: &ValidatedPortableApplication) -> bool {
+    use ato_formation::native_desktop::{NativeArtifactFormat, NativeSignatureTarget};
+
+    route.native.as_ref().is_some_and(|native| {
+        native.descriptor.local_window
+            && native.descriptor.bundled_artifact().is_some()
+            && native.descriptor.format == NativeArtifactFormat::TarGz
+            && native.descriptor.signature_target == NativeSignatureTarget::Bundle
+    })
 }
 
 struct BoundedOciRun {
@@ -746,7 +760,7 @@ impl PortableBundleExecutor<'_> {
                 self.start_process_group(workspace, &state_mounts, &input_mounts, control)?
             }
             PortableRealizationKind::NativeDesktop => {
-                self.start_native_desktop(workspace, &state_mounts)?
+                self.start_native_desktop(workspace, &state_mounts, control)?
             }
         };
         realized.execution.dependency_fetches = dependency_fetches;
@@ -1032,6 +1046,7 @@ impl PortableBundleExecutor<'_> {
         &self,
         workspace: PathBuf,
         state_mounts: &[PortableStateMount],
+        control: Option<&ExecutionControl>,
     ) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
         let native = route.native.as_ref().ok_or_else(|| {
@@ -1072,7 +1087,7 @@ impl PortableBundleExecutor<'_> {
             .iter()
             .map(|state| (state.id.clone(), state.host_path.clone()))
             .collect::<Vec<_>>();
-        crate::native_desktop::start(NativeStart {
+        let request = NativeStart {
             payload: acquired.payload,
             provenance: acquired.provenance,
             descriptor: &native.descriptor,
@@ -1084,7 +1099,14 @@ impl PortableBundleExecutor<'_> {
             environment: self.binding_environment,
             local_override: self.context.native_local_override,
             declares_egress: declares_runtime_egress(&route.derivation.requirements),
-        })
+        };
+        #[cfg(target_os = "macos")]
+        if let Some(control) = control {
+            return crate::native_desktop::macos::start_controlled(request, control);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = control;
+        crate::native_desktop::start(request)
     }
 }
 
@@ -2623,6 +2645,13 @@ fn python_probe(
     command: &mut Command,
     control: Option<&ExecutionControl>,
 ) -> Result<std::process::Output> {
+    probe_host_command(command, control).context("Probe the installed Python runtime")
+}
+
+pub(crate) fn probe_host_command(
+    command: &mut Command,
+    control: Option<&ExecutionControl>,
+) -> Result<std::process::Output> {
     use std::io::{Read, Seek};
     use std::process::Stdio;
     use std::time::{Duration, Instant};
@@ -2650,7 +2679,7 @@ fn python_probe(
             Ok(Some(status)) => break Ok(status),
             Err(error) => break Err(error.into()),
             Ok(None) if started.elapsed() >= allowance => {
-                break Err(anyhow::anyhow!("Python runtime probe timed out"));
+                break Err(anyhow::anyhow!("Local verification command timed out"));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(15)),
         }
@@ -2668,7 +2697,7 @@ fn python_probe(
         file.take(MAX_OUTPUT + 1).read_to_end(&mut bytes)?;
         ensure!(
             bytes.len() as u64 <= MAX_OUTPUT,
-            "Python runtime probe output exceeded its limit"
+            "Local verification command output exceeded its limit"
         );
         Ok(bytes)
     };

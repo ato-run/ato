@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use crate::process_group::ProcessServiceGroup;
 use anyhow::{Result, bail};
 use ato_host_facts::window::visible_window;
+use ato_runtime_attempt::control::{AttemptPhase, ExecutionControl};
 
 pub(super) struct WindowProbe {
     pub port: u16,
@@ -17,7 +18,11 @@ pub(super) struct WindowProbe {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 impl WindowProbe {
-    pub fn observe(group: &mut ProcessServiceGroup, pid: u32) -> Result<Self> {
+    pub fn observe(
+        group: &mut ProcessServiceGroup,
+        pid: u32,
+        control: Option<&ExecutionControl>,
+    ) -> Result<Self> {
         // Reserve before observing. Another process can neither impersonate this
         // endpoint nor replace it between readiness and Contract observation.
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
@@ -25,6 +30,10 @@ impl WindowProbe {
         listener.set_nonblocking(true)?;
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
+            let pause = match control {
+                Some(control) => control.cap(AttemptPhase::Launch, Duration::from_millis(100))?,
+                None => Duration::from_millis(100),
+            };
             if let Some(exit) = group.exited()? {
                 bail!("native_window_process_exited: {exit}");
             }
@@ -34,7 +43,7 @@ impl WindowProbe {
             if Instant::now() >= deadline {
                 bail!("native_window_not_visible: no on-screen window for pid {pid}");
             }
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(pause);
         }
         Ok(Self::serve(listener, port))
     }
