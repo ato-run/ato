@@ -2,9 +2,9 @@
   "gitea": {
     "receipt_excerpt": {
       "schema": "ato.contract-verification-receipt/4",
-      "bundle_sha256": "sha256:44085b59f875ce4b896e08ab14badb716e1f378ffdfea6f7c073edbeeec746de",
+      "bundle_sha256": "sha256:a8aad608f83d89794630a8e885715867f3afda220f167ed81341617bf32d4a85",
       "contract_ref": "sha256:e7da417e35b814598f75c0fb9a1efa36bbd714c17af5f48d375b81af6b5165b8",
-      "derivation_ref": "sha256:49541f32ec0212b9f0061550367f4d6764f6f37f14abbadfe8fc600f47f86aa6",
+      "derivation_ref": "sha256:5807ffe3e6695a0b0a99fd9c0a971b5c0243210fcc8dd950f6b2279a85000f9b",
       "fully_satisfied": true,
       "target": {
         "kind": "cli-local"
@@ -17,7 +17,7 @@
         "platform_emulated": true,
         "connector": "relay",
         "relay_image_digest": "sha256:3e66ad944f585ee3a547dfd6db569e2c05383cbca66b1ba1639e10fa1620f0cd",
-        "attempt_id": "run-63162-1795063942584541000"
+        "attempt_id": "run-91989-1795073258469040000"
       },
       "observations": [
         {
@@ -27,7 +27,47 @@
             "method": "GET",
             "path": "/api/healthz",
             "status": 200,
-            "body_sha256": "sha256:88b9c2684b2b7377a1dbf80a4b3ee07984362073d999c021edf8cece91d33950"
+            "body_sha256": "sha256:d23c60325fdabc6523692679516db6dfda7200118dc405e5b41ffe8c5c8f2616"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "create private repository, create and read issue",
+      "issue": 1
+    }
+  },
+  "stirling-pdf": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/5",
+      "bundle_sha256": "sha256:c93dea6aa315be31253f690e1de348959887f1b0a99d48b93668e07bcd6a6eaa",
+      "contract_ref": "sha256:d4248fefc073c7a81333238d2c8a8e4803ed9bc4128b22ddc8acd11ca89e8fa5",
+      "derivation_ref": "sha256:97ffd329168d5fc45d63fd1a38d82fc8810f42433780b4b74bb46408ee928542",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "native_desktop",
+        "attempt_id": "run-97830-1795073963016557000",
+        "runtime_name": "Stirling-PDF",
+        "native": {
+          "artifact_ref": "sha256:e5f5a8e26aead0846f8f419683030f254665d014f89e76452ac247925eac96ec",
+          "codesign_verify": "valid",
+          "signature_kind": "developer_id",
+          "local_override": false,
+          "entry": "Stirling PDF.app/Contents/MacOS/Stirling-PDF"
+        }
+      },
+      "observations": [
+        {
+          "id": "gui-window",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/ready",
+            "status": 200,
+            "body_sha256": "sha256:f770ef86d1833460dbf0a2f1d327f94c1f4d83246ebc4ea52fcd89b9dbe10a30"
           }
         }
       ]
@@ -147,6 +187,77 @@
       "saved": true
     }
   },
+  "homepage": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/4",
+      "bundle_sha256": "sha256:63dd11bf38215a54ed49010b00132a15daa0ffaa7f7be677626e3c1e86e789d4",
+      "contract_ref": "sha256:36454f44edbf024f87531ff259c15640b2669bc217d3367caae417f4f0c6f880",
+      "derivation_ref": "sha256:766b71882c65cde810b9df956cd4e653cec5d85478416f20f4ad1b6826189c4f",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "oci",
+        "runtime_executable": "docker",
+        "image": "ghcr.io/gethomepage/homepage@sha256:74c768ebc15c78f16f5b7b0d3fcab2176659a5ef0e387b47bc678c8d146a3c04",
+        "platform": "linux/arm64",
+        "platform_emulated": false,
+        "connector": "relay",
+        "relay_image_digest": "sha256:3e66ad944f585ee3a547dfd6db569e2c05383cbca66b1ba1639e10fa1620f0cd",
+        "attempt_id": "run-91231-1795073179967854000"
+      },
+      "observations": [
+        {
+          "id": "homepage-http",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/api/healthcheck",
+            "status": 200,
+            "body_sha256": "sha256:75a288c0d6898c5f7b054590845978a82a3ad79fcce3d43ff68a7501e5a91ee9"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "load the dashboard and match a visible service link to its configured destination",
+      "service": "My First Service"
+    }
+  },
+  "super-productivity": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/1",
+      "bundle_sha256": "sha256:b1b716d1fd5b3d15bf11cb3ce4b08fb27c7accab2e63c457d6dfdebaacf0b235",
+      "contract_ref": "sha256:1849c6ad22f42ddd0ac3c568d2f6b461ae03c8c3b166c05ba9ef0e196d5f1825",
+      "derivation_ref": "sha256:4ac04481604fdf89a40b73915f08f1c50488e3e8bd790068f0cbc1160707ea08",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "process",
+        "attempt_id": "run-88817-1795072783883109000",
+        "runtime_name": "python3.12"
+      },
+      "observations": [
+        {
+          "id": "super-productivity-web",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/",
+            "status": 200,
+            "body_sha256": "sha256:8709ecd66188ae253cb57848184441b882869c1d1287f87e66fedbe54274941d"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "タスクを追加し、ページを再読み込みして保存された日本語の件名を確認",
+      "title": "Capsule Hub 検証タスク"
+    }
+  },
   "appflowy": {
     "receipt_excerpt": {
       "schema": "ato.contract-verification-receipt/5",
@@ -221,6 +332,44 @@
       "title": "Capsule Hub 検証ノート",
       "body": "ステージングの配信版からノート本文を保存しました。",
       "sameRunReload": true
+    }
+  },
+  "redmine": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/4",
+      "bundle_sha256": "sha256:858c5f4da756bdd934e9a99db36fd23bdce6464485515d03d46b0beb4e7b3fed",
+      "contract_ref": "sha256:154598e63d6882777b59ea686969cff14f18bfb5ac9c6b38c5bc888e31d7bb89",
+      "derivation_ref": "sha256:af5232abbc5786532102f9fe8d37f5bc096466f7b4a4ca72e42e584d8df9405c",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "oci",
+        "runtime_executable": "docker",
+        "image": "docker.io/library/redmine@sha256:3f0de822aa4eb7c350da928b41f287f068852296ce041708fcbd0e71e75f4f90",
+        "platform": "linux/amd64",
+        "platform_emulated": true,
+        "connector": "relay",
+        "relay_image_digest": "sha256:3e66ad944f585ee3a547dfd6db569e2c05383cbca66b1ba1639e10fa1620f0cd",
+        "attempt_id": "run-99575-1795074190666945000"
+      },
+      "observations": [
+        {
+          "id": "redmine-http",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/login",
+            "status": 200,
+            "body_sha256": "sha256:c790a97d4cf31316c89bc5221126b5fe04e667bee6045e092e465ace5cd29592"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "非公開プロジェクトとチケットを作成し、チケットの件名と所属を再取得して照合した",
+      "issue": 1
     }
   },
   "wordpress": {
@@ -368,6 +517,47 @@
     "operations": {
       "operation": "Markdown heading converted to HTML",
       "html": "<h1 id=\"capsule-hub\">Capsule Hub</h1>"
+    }
+  },
+  "libreoffice": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/5",
+      "bundle_sha256": "sha256:c8ac826d123d1da10a2ce41ae434081b6b3952083d4dc5ff420436004ac276d7",
+      "contract_ref": "sha256:d4248fefc073c7a81333238d2c8a8e4803ed9bc4128b22ddc8acd11ca89e8fa5",
+      "derivation_ref": "sha256:17c1b764693ba25b9039fc2410030d38dca3f9432d5f9af6c574ae278db95c2b",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "native_desktop",
+        "attempt_id": "run-91490-1795073203493873000",
+        "runtime_name": "soffice",
+        "native": {
+          "artifact_ref": "sha256:de943203795e5057785f65515063e2db5eb60b0bb6d8e2534fec59e5cc5fb988",
+          "codesign_verify": "valid",
+          "signature_kind": "developer_id",
+          "local_override": false,
+          "entry": "LibreOffice.app/Contents/MacOS/soffice"
+        }
+      },
+      "observations": [
+        {
+          "id": "gui-window",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/ready",
+            "status": 200,
+            "body_sha256": "sha256:f770ef86d1833460dbf0a2f1d327f94c1f4d83246ebc4ea52fcd89b9dbe10a30"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "Writerで検証用文書を開いて本文を編集・保存し、保存したOpenDocumentの段落を照合した",
+      "saved_format": "OpenDocument Flat XML",
+      "text": "Capsule Hub Writer verified"
     }
   },
   "mermaid": {

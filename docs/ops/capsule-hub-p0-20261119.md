@@ -2,7 +2,7 @@
 
 2026年11月19日 12:21 JST 時点で、依頼時の301件のうちP0全58件（既存調査分34件、新規調査分24件）を `koh0920` 名前空間に公開した。Hub全体では既存7件を含めて65件になった。台帳にはアプリごとの詳細ページ、実行方式、最新バンドルのSHA-256、ContractRef、DerivationRef、起動条件を記録した。[staging Capsule Hub](https://stg-app.ato.run/capsules) · [全58件の台帳](evidence/capsule-hub-p0-20261119/catalog.csv)
 
-同日追試でP0全58件でstgの配信digestを指定して起動を試みた結果、主要操作の完了は10件、起動時のContractまでの確認は2件、起動未確認は46件だった。Dockerを使わず主要操作まで確認したのはExcalidrawとMermaid。[アプリ別の結果](evidence/capsule-hub-p0-20261119/runtime.csv)
+同日追試でP0全58件でstgの配信digestを指定して起動を試みた結果、主要操作の完了は15件、起動時のContractまでの確認は2件、起動未確認は41件だった。Dockerを使わず主要操作まで確認したのはExcalidraw、Mermaid、Super Productivity、LibreOffice。[アプリ別の結果](evidence/capsule-hub-p0-20261119/runtime.csv)
 
 ## 初回公開時の確認結果（12:21 JST）
 
@@ -54,6 +54,11 @@ CLIの根拠は[OCIのVOLUME検査](../../extensions/adapters/oci/src/lib.rs)、
 | アプリ | 実際に確認した操作 |
 |---|---|
 | Excalidraw | 矩形を描いてブラウザーに保存し、再読み込み後に書き出したJSONから矩形を復元できた。 |
+| LibreOffice | 起動したWriterのプロセスIDに検証用のFlat ODTを開き、段落を編集・保存した。保存されたXMLから編集後の段落を読み出した。ARM Macの署名済みアプリと、Run専用のUnixソケットを使用した。 |
+| Super Productivity | 上流v20.0.0の署名済みパッケージに含まれるWeb版をPython 3.12で配信し、日本語のタスクを追加した。再読み込み後に件名を照合した。日本語と英語を収録している。 |
+| Gitea | 初期化した管理者で非公開リポジトリとIssueを作り、Issueを番号指定で読み出して件名を確認した。 |
+| Homepage | 公式サンプル設定からサービス一覧を読み込み、ダッシュボードのリンク先を設定と照合した。 |
+| Redmine | 管理者で非公開プロジェクトとチケットを作成し、保存された件名とプロジェクトIDを取得した。 |
 | code-server | 認証後に検証用ファイルをブラウザーのVS Codeで開いて編集・保存した。ディスク上の内容と、ページ再読み込み後のエディターの表示を照合した。[再読み込み後の画面](evidence/capsule-hub-p0-20261119/code-server-saved.png) |
 | PostgreSQL | stgからLinux/arm64のDを選び、Adminer上で一時テーブルを作成した。7と11を挿入し、SQLの集計結果が18であることを確認した。 |
 | Uptime Kuma | 初回管理者でログインし、Run内部のHTTPサービスを監視対象に登録した。登録IDから再取得して名前とURLを照合した。 |
@@ -85,3 +90,12 @@ ato run --api-url https://staging.api.ato.run --derivation sha256:d4e7d04a43e19a
 | Hubの環境名エラー | PostgreSQLの公開時に実行platformと同じ `linux/arm64` を環境ラベルに渡すと、stgは `invalid_metadata` だけを返した。`linux-arm64` で成功した。 | CLIで該当する引数名・許可文字・入力例を表示し、転送前に修正できるようにする。 |
 | QGISのDMG | stgのDに固定された1,592,197,571バイトを取得し、SHA-256が一致した。CLIは展開中に2 GiBの上限で停止した。 | ダウンロード時のバイト数と展開後の上限を区別して表示し、どちらの制約で失敗したかを案内する。 |
 | 大きな配信物・取得状況 | Pandoc 3.14の公式WebAssemblyでローカル変換できた。OCIとの併載版は約22.7 MBとなり、stgの1件8 MiBの上限で拒否された。OCI取得失敗時に原因が空のCLIメッセージも確認した。 | publish前に実サイズと上限を表示する。取得中の対象と進捗、タイムアウトと実プロセスの終了状態を区別して表示する。 |
+
+
+### ワークスペース整理後の追試
+
+LibreOfficeは共通の一時ディレクトリが書き込み不可のとき、ソケット名をルート直下に組み立てていた。WriterのDでソケットをRun専用の領域へ向け、CLIのローカルウィンドウAdapterではこの領域のUnixソケットを利用できるようにした。新しいDは元のContract・Dと同じバンドルに収録した。確認には本PRのCLIを使用した。[上流のソケット実装](https://github.com/LibreOffice/core/blob/master/sal/osl/unx/pipe.cxx)
+
+HomepageのHost検証はポート番号も照合するため、固定設定の初版はRunごとに異なる公開ポートを拒否した。新版はループバックのHostと同一Originを確認した要求を、固定ポートで待ち受ける上流に渡す。GiteaとRedmineでは初回DBの初期化と管理者パスワードのbindingを追加した。RedmineのDB・添付ファイルは保存領域に置き、同梱のアプリ本体は起動時の一時領域に展開している。[HomepageのHost検証](https://github.com/gethomepage/homepage/blob/main/src/utils/auth.js)
+
+Super Productivityは旧版のネイティブ画面の観測から、Web画面を実際に配信する新しいContractに更新した。ブラウザーのオリジン単位で保存するため、別のRunへの移動はアプリのエクスポートを使う。タスク追加と同一オリジンの再読み込みを確認した。
