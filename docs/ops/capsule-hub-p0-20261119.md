@@ -52,6 +52,7 @@ CLIの根拠は[OCIのVOLUME検査](../../extensions/adapters/oci/src/lib.rs)、
 | アプリ | 実際に確認した操作 |
 |---|---|
 | Excalidraw | 矩形を描いてブラウザーに保存し、再読み込み後に書き出したJSONから矩形を復元できた。 |
+| PostgreSQL | stgからLinux/arm64のDを選び、Adminer上で一時テーブルを作成した。7と11を挿入し、SQLの集計結果が18であることを確認した。 |
 | Uptime Kuma | 初回管理者でログインし、Run内部のHTTPサービスを監視対象に登録した。登録IDから再取得して名前とURLを照合した。 |
 | WordPress | stgの配信版で初期化後、管理者でログインし、下書きを作成・再取得して本文と下書き状態を照合した。 |
 | Trilium Notes | 空のノートブックに子ノートを作成し、日本語のタイトルと本文を保存した。ページの再読み込み後、ツリーと編集画面に同じ内容が表示された。 |
@@ -71,9 +72,10 @@ ato run --api-url https://staging.api.ato.run --derivation sha256:d4e7d04a43e19a
 | 箇所 | 実測 | 対応・改善点 |
 |---|---|---|
 | CLIのOCI経路選択 | Docker Desktopでは実行可能と表示された単一コンテナを、Run開始時にrelay未対応として拒否した。 | 単一OCIにもRun専用の内部ネットワークと既存relayを割り当てた。MemosとPandocで配信済みのDをそのまま選択し、実操作とreceiptを確認した。 |
-| OCIグループの起動失敗 | PostgreSQLの初期化サーバーは `/tmp` で待ち受け、上流エントリーポイントの `psql` は `/run/postgresql` を探して終了コード2になった。 | 初期化クライアントとサーバーのソケットを合わせる。エミュレーション中は初回DB構築が従来の60秒を超えた。 |
+| OCIグループの起動失敗 | PostgreSQLの初期化サーバーは `/tmp` で待ち受け、上流エントリーポイントの `psql` は `/run/postgresql` を探して終了コード2になった。 | 初期化クライアントとサーバーのソケットを合わせたLinux/arm64のDを追加した。元のContractとamd64のDを含むバンドルをstgに公開し、arm64でSQLを実行した。 |
 | Uptime Kumaの起動観測 | 上流の `/` はダッシュボードへの転送を返し、HTTP 200を要求した初版のContractは成立しなかった。DB設定だけを表示する初期画面にも到達し得た。 | SQLiteを明示し、起動時は `/setup-database-info` の `runningSetup: false` を待つ。監視対象の登録に使うSurfaceは `/dashboard`。初版とは異なるContractRefの新版をstgに公開した。 |
 | WordPressの初期化 | 配信初版は全コアファイルのコピーで待受が間に合わず、コピーを短縮した版は未設定サイトからのHTTP 302でContractに失敗した。 | イメージ内のライブラリを参照し、既存サイトを検出して初回だけ管理者を作成する構成に更新した。stg版の配信SHA-256は `921881c75c511725a156b87fcb34b3c739226be280500d6f79fa495f4d5503cd`。初期パスワードと署名用の鍵を別々のbindingで渡す。 |
+| FormbricksとPlaneの保存先 | 取得したイメージを調べると、DBの `/var/lib/postgresql/data` に加えて、FormbricksはWeb側でSAML設定とアップロードの2か所、Planeはキュー側で `/var/lib/rabbitmq`、Web側で `/app/data` と `/app/logs` を要求した。現行のstg版はどちらもDB初期化が終了コード2で先に止まった。 | それぞれのサービスが必要とする保存先の一覧を起動前に示す。配信中のDはDBにだけ保存領域を割り当てている。 |
 | SiYuanの起動完了判定 | 純粋なDで宣言した `bootProgress` への観測だけで追加の実行権限を求められた。 | 選択したDのポートへの開始観測と、ネットワーク・権限付与を分けた。配布イメージの初期化条件は別途確認する。 |
 | macOSのDMG | 署名済みアプリのFramework内にある相対リンクを展開時に一律拒否した。 | アプリ内で解決できるリンクを復元し、対象の表記もツリーダイジェストに含めた。RustDeskは展開後に終了コード255、LibreOfficeはウインドウ観測前に終了コード0となった。 |
 | AppFlowyの表示 | macOSのウインドウ観測は成功したが初期画面は黒く、文書を編集できなかった。初回はFlutterが実ユーザーのLibraryへの書き込みを拒否された。 | FoundationのホームをRunの保存領域に指定するとプライベートDBの初期化まで進んだ。再起動後も黒画面を再現し、ログにセッション未作成が記録された。 |

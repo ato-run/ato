@@ -261,6 +261,44 @@
       "id": 6
     }
   },
+  "postgresql": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/4",
+      "bundle_sha256": "sha256:d84920b3abacbd46b55773f65577e968285f33c4dd3561864b0c1465e34a2a66",
+      "contract_ref": "sha256:10a126d6359eb17d0dfae2eb6dd439ea14947c6ba0bc4ab8392c5a4040d1d40a",
+      "derivation_ref": "sha256:f1abe5aac4f2c6f16318c283b43b25ef5eb2881859c02fa3aa4d24f05d2fbe3f",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "oci_service_group",
+        "runtime_executable": "docker",
+        "image": "docker.io/library/adminer@sha256:e3fa100aaf0e0b7d8c9bf06fa46e5bbd16f9fff0aa0e3bed5376a0fe1d7d107f",
+        "platform": "linux/arm64",
+        "platform_emulated": false,
+        "connector": "relay",
+        "relay_image_digest": "sha256:3e66ad944f585ee3a547dfd6db569e2c05383cbca66b1ba1639e10fa1620f0cd",
+        "attempt_id": "run-41797-1795067111627672000"
+      },
+      "observations": [
+        {
+          "id": "postgresql-http",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/",
+            "status": 200,
+            "body_sha256": "sha256:ca57234586a2702dcdb420b6ec4a0595caf55b522a0a93373ac3f4fb51d29e28"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "SQL through Adminer: create temporary table, insert two rows, select sum",
+      "sum": 18
+    }
+  },
   "excalidraw": {
     "receipt_excerpt": {
       "schema": "ato.contract-verification-receipt/1",
@@ -383,7 +421,7 @@
         "platform_emulated": true,
         "connector": "relay",
         "relay_image_digest": "sha256:3e66ad944f585ee3a547dfd6db569e2c05383cbca66b1ba1639e10fa1620f0cd",
-        "attempt_id": "run-32481-1795066514407311000"
+        "attempt_id": "run-42263-1795067135942691000"
       },
       "observations": [
         {
