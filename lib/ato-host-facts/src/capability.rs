@@ -41,9 +41,6 @@ pub struct ExecutionRequirements {
     pub needs_state: bool,
     /// Whether the route's realization is a container realization.
     pub needs_container: bool,
-    /// Single-container routes currently require direct access to Docker ports.
-    #[serde(skip)]
-    requires_direct_container: bool,
     /// The paths this Run will bind into the daemon (its runtime root and any
     /// state root).
     pub bound_paths: Vec<PathBuf>,
@@ -55,13 +52,6 @@ impl ExecutionRequirements {
             platform,
             needs_container: true,
             ..Self::default()
-        }
-    }
-
-    pub fn single_container(platform: Option<String>) -> Self {
-        Self {
-            requires_direct_container: true,
-            ..Self::container(platform)
         }
     }
 
@@ -318,26 +308,6 @@ impl HostFacts {
         }
     }
 
-    /// A single container cannot use the group network connector.
-    pub fn single_container_refusal(&self) -> Option<Reason> {
-        if self.connector_choice() != Some(ConnectorChoice::Relay) {
-            return None;
-        }
-        let setup = if self.docker.rootless {
-            "Docker Engine is running in rootless mode."
-        } else if !self.docker.same_kernel {
-            "Docker is running in a virtual machine on this host."
-        } else {
-            "The current Docker connection cannot reach container ports directly."
-        };
-        Some(Reason::new(
-            ReasonCode::OciContainerRelayUnsupported,
-            format!(
-                "{setup} This version of Ato cannot reach the app's ports for this single-container route on that setup. To use this route, run Ato and a compatible local Docker Engine on the same Linux system with Docker's rootless mode off."
-            ),
-        ))
-    }
-
     /// The reason list for the paths this Run binds, if any are not provably
     /// visible to the daemon.
     pub fn workspace_reasons(&self, requirements: &ExecutionRequirements) -> Vec<Reason> {
@@ -391,20 +361,17 @@ pub fn execution_status(
     }
 
     if requirements.needs_container {
-        let container = host.docker.execution_status(
-            !requirements.requires_direct_container
-                && host.connector_choice() != Some(ConnectorChoice::Direct),
-        );
+        // A relay is how this Run reaches a container Port its daemon keeps out
+        // of the process's reach. That is a fact about the daemon, not about
+        // how many containers the route declares: a single container joins the
+        // Run's own network and relay exactly like a service group does.
+        let container = host
+            .docker
+            .execution_status(host.connector_choice() != Some(ConnectorChoice::Direct));
         if container.state != CapabilityState::Advertised {
             state = CapabilityState::Unavailable;
         }
         reasons.extend(container.reasons);
-        if requirements.requires_direct_container
-            && let Some(refusal) = host.single_container_refusal()
-        {
-            state = CapabilityState::Unavailable;
-            reasons.push(refusal);
-        }
         let workspace = host.workspace_reasons(requirements);
         if !workspace.is_empty() {
             // Unknown sharing is not a promise: a bound path that cannot be
@@ -571,29 +538,17 @@ mod tests {
     }
 
     #[test]
-    fn a_single_container_requires_ports_the_host_can_reach_directly() {
+    fn a_rootless_daemon_relays_a_container_route_instead_of_refusing_it() {
         let mut host = desktop_host();
-        let requirement = ExecutionRequirements::single_container(Some("linux/amd64".to_owned()))
-            .binding("/Users/me/run");
-        for (rootless, expected) in [(false, "virtual machine"), (true, "rootless mode")] {
-            host.docker.rootless = rootless;
-            let status = execution_status(&host, &requirement);
-            assert_eq!(status.state, CapabilityState::Unavailable);
-            let reason = status
-                .reasons
-                .iter()
-                .find(|reason| reason.code == ReasonCode::OciContainerRelayUnsupported)
-                .unwrap();
-            assert!(reason.message.contains(expected), "{reason:?}");
-            assert!(reason.message.contains("same Linux system"), "{reason:?}");
-        }
-
-        host.docker.rootless = false;
-        host.docker.same_kernel = true;
-        assert_eq!(
-            execution_status(&host, &requirement).state,
-            CapabilityState::Advertised
+        host.docker.rootless = true;
+        assert!(!host.docker.bridge_reachable());
+        let status = execution_status(
+            &host,
+            &ExecutionRequirements::container(Some("linux/amd64".to_owned()))
+                .binding("/Users/me/run"),
         );
+        assert_eq!(status.state, CapabilityState::Advertised);
+        assert_eq!(host.connector_choice(), Some(ConnectorChoice::Relay));
     }
 
     #[test]

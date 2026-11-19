@@ -13,7 +13,7 @@ receipt records which one ran.
 | Sample | Route | Linux native Docker | macOS / Docker Desktop | Linux rootless Docker | Remote daemon |
 |---|---|---|---|---|---|
 | [`oci-service-group-proof`](../../samples/oci-service-group-proof) | `ato.oci@1` service group, two services, one Surface Port | `connector=direct` (verified) | `connector=relay`, `platform_emulated` for `linux/amd64` (verified) | `connector=relay` (same materialization; not verified on a rootless host) | refused: `remote_daemon_workspace_unsupported` |
-| single-container `ato.oci@1` routes | one container | `connector=direct` (verified) | refused: `oci_container_relay_unsupported` (a single container has no group network for the relay to join) | refused the same way | refused: `remote_daemon_workspace_unsupported` |
+| single-container `ato.oci@1` routes | one container | `connector=direct` (verified) | `connector=relay` (verified with Memos and Pandoc) | `connector=relay` (unverified on a rootless host) | refused: `remote_daemon_workspace_unsupported` |
 
 `ato pack` prints the answer for the host it runs on, before anything starts:
 

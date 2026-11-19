@@ -38,8 +38,6 @@ pub enum ReasonCode {
     /// The daemon is rootless. Its container network is in a user namespace the
     /// CLI cannot enter, so container IPs are not reachable either.
     DockerBridgeUnreachableRootless,
-    /// This single-container route needs Docker ports reachable directly.
-    OciContainerRelayUnsupported,
     /// The daemon is on another machine (tcp:// or ssh://). This host's
     /// workspace tree cannot be delivered to it, so a Run cannot be replayed
     /// there.
@@ -92,7 +90,6 @@ impl ReasonCode {
             Self::DockerUnavailable => "docker_unavailable",
             Self::DockerBridgeUnreachableVm => "docker_bridge_unreachable_vm",
             Self::DockerBridgeUnreachableRootless => "docker_bridge_unreachable_rootless",
-            Self::OciContainerRelayUnsupported => "oci_container_relay_unsupported",
             Self::RemoteDaemonWorkspaceUnsupported => "remote_daemon_workspace_unsupported",
             Self::DockerWorkspaceNotShared => "docker_workspace_not_shared",
             Self::NativePlatformMismatch => "native_platform_mismatch",
