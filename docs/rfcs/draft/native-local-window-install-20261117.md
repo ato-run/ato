@@ -23,7 +23,7 @@ separate human-visible acceptance check, not implied by window readiness.
 
 A local-window route has one filesystem state slot delivered by path. Its HOME
 and working directory are that slot; artifacts remain read-only. Runtime network
-is denied. The local-window adapter allows only the five Metal/IOSurface IOKit
+is denied. A local window can bind and connect Unix sockets inside its fresh Run scratch tmp directory. The adapter exposes that directory relative to the state working directory as `ATO_NATIVE_IPC_DIR`, to fit short Unix socket path limits. The local-window adapter allows only the five Metal/IOSurface IOKit
 user-client classes from macOS's GPU profile and registration of the app's own
 `com.apple.axserver` local Mach service (accessibility in its PID namespace). The host display is shared, not contained, and receipts say so.
 Artifacts, managed toolchains and source caches are materialization outside
