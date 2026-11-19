@@ -41,7 +41,8 @@ A route with more than one serving step is admitted only when:
 - the route-level `runtimes` holds only the shared `oci.platform`; each step
   holds a digest-pinned `oci.image` and positive `oci.memory_bytes`,
   `oci.cpu_limit_millis`, `oci.pids_limit`, optionally `oci.entrypoint` and
-  `oci.workspace_mount`, and no other key;
+  `oci.workspace_mount`, `oci.user`, and `oci.working_dir`. An explicit working
+  directory is an absolute, traversal-free path inside that service;
 - per-service and aggregate limits stay within 4 GiB memory, 4000 CPU
   millis and 1024 pids (`ato_ipc::oci_service_group`, the single authority for
   both the profile and the launch spec);
