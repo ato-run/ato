@@ -46,6 +46,71 @@ const MAX_RESULT_BYTES: usize = 4 * 1024 * 1024;
 /// Where verification scratch directories live, one per verification.
 const SCRATCH_PARENT: &str = "ato-browser-verify";
 
+/// Owner configuration for a local, independently served evaluation model.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OllamaJudgeConfig {
+    endpoint: String,
+    model: String,
+    digest: String,
+}
+
+impl OllamaJudgeConfig {
+    pub fn new(endpoint: &str, model: String, digest: String) -> anyhow::Result<Self> {
+        let url = reqwest::Url::parse(endpoint)?;
+        anyhow::ensure!(
+            url.scheme() == "http"
+                && matches!(url.host_str(), Some("127.0.0.1" | "[::1]"))
+                && url.port().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.path() == "/"
+                && url.query().is_none()
+                && url.fragment().is_none(),
+            "The Ollama judge requires an HTTP loopback origin with an explicit port"
+        );
+        let (name, tag) = model.split_once(':').unwrap_or_default();
+        anyhow::ensure!(
+            !name.is_empty()
+                && !tag.is_empty()
+                && tag != "cloud"
+                && !tag.ends_with("-cloud")
+                && model.len() <= 128
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_./-".contains(&b))
+                && tag
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b)),
+            "Select a preinstalled local Ollama model with an explicit tag"
+        );
+        anyhow::ensure!(
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "Pin the 64-character lowercase digest returned by Ollama"
+        );
+        Ok(Self {
+            endpoint: url.origin().ascii_serialization(),
+            model,
+            digest,
+        })
+    }
+
+    pub fn identity(&self) -> String {
+        format!("ollama/sha256-{}", self.digest)
+    }
+
+    fn settings(&self) -> [(String, String); 3] {
+        [
+            ("ATO_OLLAMA_JUDGE_URL".into(), self.endpoint.clone()),
+            ("ATO_OLLAMA_JUDGE_MODEL".into(), self.model.clone()),
+            ("ATO_OLLAMA_JUDGE_DIGEST".into(), self.digest.clone()),
+        ]
+    }
+}
+
 /// How to start the verifier helper.
 #[derive(Debug, Clone)]
 pub enum BrowserVerifierCommand {
@@ -57,6 +122,7 @@ pub enum BrowserVerifierCommand {
         spec: BrowserVerifierSandboxSpec,
         directory: PathBuf,
         cancel_file: PathBuf,
+        ollama_judge: Option<OllamaJudgeConfig>,
     },
     /// A process on the host, as it is: the host filesystem is visible to it
     /// and to its browser. Development and tests only — never advertised as
@@ -345,7 +411,7 @@ fn run_helper(
     scratch: &Path,
     timeout: Duration,
 ) -> Result<Vec<u8>, String> {
-    let settings: Vec<(String, String)> = FORWARDED_SETTINGS
+    let mut settings: Vec<(String, String)> = FORWARDED_SETTINGS
         .iter()
         .filter_map(|name| {
             std::env::var(name)
@@ -353,6 +419,14 @@ fn run_helper(
                 .map(|value| ((*name).to_owned(), value))
         })
         .collect();
+    let local_judge = if let BrowserVerifierCommand::Interactive { ollama_judge, .. } = command {
+        ollama_judge.as_ref()
+    } else {
+        None
+    };
+    if let Some(judge) = local_judge {
+        settings.extend(judge.settings());
+    }
     let mut process = match command {
         BrowserVerifierCommand::Contained(spec)
         | BrowserVerifierCommand::Interactive { spec, .. } => {
@@ -396,7 +470,12 @@ fn run_helper(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(unix)]
-    let secrets = secrets_pipe(&secrets_payload()).map_err(|error| {
+    let secrets = secrets_pipe(&if local_judge.is_some() {
+        b"{}".to_vec()
+    } else {
+        secrets_payload()
+    })
+    .map_err(|error| {
         format!("browser_verifier_unavailable: cannot hand the verifier its keys ({error})")
     })?;
     #[cfg(unix)]

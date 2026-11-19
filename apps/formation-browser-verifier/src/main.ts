@@ -11,6 +11,7 @@ import { closeSync, readFileSync } from "node:fs";
 
 import { agentKeyVariable, StagehandDriver, DEFAULT_AGENT_MODEL, type BrowserDriver } from "./browser.ts";
 import { DEFAULT_JEV_MODEL, JevJudge, type Judge } from "./judge.ts";
+import { OllamaJudge } from "./local-judge.ts";
 import { RequestSchema } from "./protocol.ts";
 import { sequencer, verify } from "./verify.ts";
 
@@ -98,7 +99,10 @@ async function main(): Promise<number> {
     : new UnconfiguredDriver(agentModel);
   let judge: Judge | null = null;
   try {
-    judge = judgeKey ? new JevJudge(judgeKey, process.env.ATO_JEV_MODEL || DEFAULT_JEV_MODEL) : null;
+    const localJudgeUrl = process.env.ATO_OLLAMA_JUDGE_URL;
+    judge = request.operation_session && localJudgeUrl
+      ? new OllamaJudge(localJudgeUrl, process.env.ATO_OLLAMA_JUDGE_MODEL ?? "", process.env.ATO_OLLAMA_JUDGE_DIGEST ?? "")
+      : judgeKey ? new JevJudge(judgeKey, process.env.ATO_JEV_MODEL || DEFAULT_JEV_MODEL) : null;
   } catch {
     judge = null;
   }
