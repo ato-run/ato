@@ -84,6 +84,15 @@ fn advertisement_and_supported_kinds_have_the_same_opt_in_boundary() {
         with_explicit_runtime_placement_capability(base, true)
             .contains(&EXPLICIT_RUNNER_ASSIGNMENT_RUNTIME_FEATURE)
     );
+    let volume = runtime_launch::volume::RUNNER_PERSISTENT_VOLUME_FEATURE;
+    let maintenance = runtime_launch::volume_maintenance::EXPLICIT_STATE_VOLUME_MAINTENANCE_FEATURE;
+    let relocation = runtime_launch::volume_maintenance::STATE_VOLUME_RELOCATION_FEATURE;
+    let owned = with_explicit_runtime_placement_capability(vec![volume], true);
+    assert!(owned.contains(&maintenance));
+    assert!(owned.contains(&relocation));
+    let shared = with_explicit_runtime_placement_capability(vec![volume], false);
+    assert!(!shared.contains(&maintenance));
+    assert!(!shared.contains(&relocation));
     let all = vec![
         PORTABLE_CAPSULE_LEASE_KIND,
         "runtime_launch",
@@ -93,13 +102,13 @@ fn advertisement_and_supported_kinds_have_the_same_opt_in_boundary() {
     assert_eq!(explicit_runtime_placement_kinds(all.clone(), false), all);
     assert_eq!(
         explicit_runtime_placement_kinds(all, true),
-        vec!["runtime_launch"]
+        vec!["runtime_launch", "state_volume_maintenance"]
     );
     assert!(explicit_runtime_placement_kinds(vec![PORTABLE_CAPSULE_LEASE_KIND], true).is_empty());
     let mut cfg = config();
     cfg.require_explicit_runtime_placement = true;
     assert!(
-        supported_lease_kinds(&cfg, true)
+        supported_lease_kinds(&cfg, false)
             .iter()
             .all(|kind| *kind == "runtime_launch")
     );
@@ -161,8 +170,36 @@ fn non_runtime_commands() -> Vec<Value> {
     vec![
         json!({"kind":"activity_browser_executor_v0","activity_id":"activity-fixture","activity_run_id":"run-fixture"}),
         json!({"kind":"portable_capsule_v2","bundle_id":"bnd_fixture","transport_digest":format!("sha256:{}","11".repeat(32)),"expected_root_computation_ref":format!("blake3:{}","22".repeat(32)),"run_id":"run-fixture","session_id":"run:run-fixture","exported_port_id":"web","surface_contract_version":"1","session_surface":{},"accepted_session_surfaces":[{}]}),
-        json!({"kind":"state_volume_maintenance","run_id":"run-fixture","compute_instance_id":"instance-fixture","operation_id":"vop_fixture","operation":"delete","state_key":"data","volume_ref":"svol_01M2SVCGR0VP000000000000V1","writer_fence":1}),
     ]
+}
+
+fn volume_wire() -> Value {
+    json!({"kind":"state_volume_maintenance","run_id":"run-fixture","compute_instance_id":"instance-fixture","operation_id":"vop_fixture","operation":"checkpoint","state_key":"data","volume_ref":"svol_01M2SVCGR0VP000000000000V1","writer_fence":1})
+}
+
+#[test]
+fn explicit_volume_maintenance_only_accepts_the_named_runner() {
+    for required in [false, true] {
+        let mut cfg = config();
+        cfg.require_explicit_runtime_placement = required;
+        for (assigned, expected) in [
+            (None, !required),
+            (Some("runner-owned"), true),
+            (Some("runner-other"), false),
+            (Some(""), false),
+        ] {
+            let mut wire = volume_wire();
+            if let Some(assigned) = assigned {
+                wire["explicit_runner_id"] = json!(assigned);
+            }
+            let lease = lease(wire);
+            validate_lease(&lease, SystemTime::now()).unwrap();
+            assert_eq!(
+                validate_explicit_runner_placement(&cfg, &lease.command).is_ok(),
+                expected
+            );
+        }
+    }
 }
 #[test]
 fn all_other_lease_kinds_are_refused_only_when_operator_restricts_placement() {
@@ -197,6 +234,7 @@ fn both_entries_refuse_before_storage_preparing_directory_or_network_side_effect
         fixed_tcp: runtime_launch::network_broker::FixedTcpRegistry::new("").unwrap(),
     };
     let mut commands = non_runtime_commands();
+    commands.push(volume_wire());
     commands.push(runtime_wire(PROCESS));
     let mut mismatch = runtime_wire(PROCESS);
     mismatch["explicit_runner_id"] = json!("runner-other");
@@ -220,6 +258,16 @@ fn both_entries_refuse_before_storage_preparing_directory_or_network_side_effect
             assert!(
                 error.to_string().contains("explicit_runner_assignment"),
                 "{error:#}"
+            );
+        }
+        if let LeaseCommand::VolumeMaintenance(command) = &lease.command {
+            let error = worker
+                .execute_volume_maintenance_lease(&lease, command)
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("explicit_runner_assignment_required")
             );
         }
         assert!(!worker.config.work_root.exists());

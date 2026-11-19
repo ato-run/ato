@@ -21,6 +21,9 @@ use super::state_artifact::{StateArtifactTransport, materialize_working_copy, pa
 use super::volume::VolumeStore;
 
 pub const STATE_VOLUME_MAINTENANCE_LEASE_KIND: &str = "state_volume_maintenance";
+pub const EXPLICIT_STATE_VOLUME_MAINTENANCE_FEATURE: &str =
+    "runtime_feature=explicit_state_volume_maintenance_v1";
+pub const STATE_VOLUME_RELOCATION_FEATURE: &str = "runtime_feature=state_volume_relocation_v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -41,9 +44,26 @@ pub struct VolumeMaintenanceLeaseCommand {
     pub state_key: String,
     pub volume_ref: String,
     pub writer_fence: u64,
+    #[serde(default)]
+    pub explicit_runner_id: Option<String>,
+    /// Present only on a restore into a new, never-mounted candidate.
+    #[serde(default)]
+    pub candidate_capacity_bytes: Option<u64>,
 }
 
 impl VolumeMaintenanceLeaseCommand {
+    pub fn validate_runner_assignment(&self, runner_id: &str, required: bool) -> Result<()> {
+        ensure!(
+            self.candidate_capacity_bytes.is_none() || required,
+            "a relocation candidate requires explicit Runner placement"
+        );
+        super::lease::validate_runner_assignment(
+            self.explicit_runner_id.as_deref(),
+            runner_id,
+            required,
+        )
+    }
+
     pub fn validate(&self, lease_run_id: &str) -> Result<()> {
         ensure!(
             self.run_id == lease_run_id,
@@ -61,6 +81,17 @@ impl VolumeMaintenanceLeaseCommand {
             is_volume_ref(&self.volume_ref),
             "volume operation names an invalid volume"
         );
+        if let Some(capacity) = self.candidate_capacity_bytes {
+            ensure!(
+                self.operation == VolumeOperationKind::Restore
+                    && capacity > 0
+                    && self
+                        .explicit_runner_id
+                        .as_deref()
+                        .is_some_and(|id| !id.is_empty()),
+                "a relocation candidate requires a restore, capacity and explicit Runner"
+            );
+        }
         ensure!(
             !self.state_key.is_empty()
                 && self.state_key.len() <= 64
@@ -99,6 +130,28 @@ pub fn perform(
         granted.volume_ref == command.volume_ref,
         "the operation was granted a different volume than its lease names"
     );
+
+    if let Some(capacity) = command.candidate_capacity_bytes {
+        ensure!(
+            command.operation == VolumeOperationKind::Restore
+                && granted.status == super::volume::VolumeStatus::Provisioning,
+            "a relocation candidate is only provisioned with its restore grant"
+        );
+        let revision = grant
+            .revision_ref
+            .as_deref()
+            .context("a relocation candidate was granted without a revision")?;
+        ensure!(
+            grant.artifact_digest.is_some(),
+            "a relocation candidate was granted without an artifact digest"
+        );
+        return store
+            .restore_candidate(&command.volume_ref, capacity, revision, &|staging| {
+                materialize_working_copy(transport, &grant, staging)
+            })
+            .map_err(anyhow::Error::new)
+            .context("failed to restore the relocation candidate");
+    }
 
     let volume = store
         .open_existing(&command.volume_ref)
