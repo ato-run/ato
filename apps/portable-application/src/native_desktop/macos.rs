@@ -458,7 +458,7 @@ pub(crate) fn prepare(
     if !request.descriptor.local_window {
         ensure_ports_free(request.ports)?;
     }
-    let sandbox = sandbox_plan(
+    let mut sandbox = sandbox_plan(
         &extracted.root,
         &request.workspace,
         &request.state_paths,
@@ -469,6 +469,12 @@ pub(crate) fn prepare(
             &ports
         },
     );
+    if request.descriptor.local_window {
+        // App-local IPC lives in new Run scratch, never in saved state or host /tmp.
+        sandbox.policy = sandbox
+            .policy
+            .with_ipc_socket_paths([scratch_root.join("tmp")]);
+    }
     let mut profile =
         ato_sandbox::render_seatbelt_profile(&sandbox.policy).map_err(|error| NativeRefusal {
             code: "native_sandbox_unavailable",
@@ -497,6 +503,23 @@ pub(crate) fn prepare(
         sandbox,
         profile,
     })
+}
+
+/// Unix socket names are bounded by sockaddr_un.sun_path. A GUI's working
+/// directory is its own state home. Use a relative spelling of its Run-private
+/// socket directory so a long cache or installation prefix costs no bytes.
+fn ipc_path_from_home(home: &Path, directory: &Path) -> Option<PathBuf> {
+    let home = home.canonicalize().ok()?;
+    let directory = directory.canonicalize().ok()?;
+    let common = home.ancestors().find(|p| directory.starts_with(p))?;
+    let mut relative: PathBuf = home
+        .strip_prefix(common)
+        .ok()?
+        .components()
+        .map(|_| "..")
+        .collect();
+    relative.push(directory.strip_prefix(common).ok()?);
+    Some(relative)
 }
 
 /// The environment the workload receives. Nothing here is secret except the
@@ -932,6 +955,9 @@ pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure
         // Foundation resolves the account's passwd entry ahead of HOME.
         // Cocoa's Library/Application Support belongs in the Run's state too.
         environment.insert("CFFIXED_USER_HOME".to_owned(), home.display().to_string());
+        if let Some(path) = ipc_path_from_home(home, &scratch_root.join("tmp")) {
+            environment.insert("ATO_NATIVE_IPC_DIR".to_owned(), path.display().to_string());
+        }
         environment.insert(
             "XDG_CONFIG_HOME".to_owned(),
             home.join(".config").display().to_string(),
@@ -1254,6 +1280,23 @@ mod tests {
         )
         .unwrap();
         assert!(override_used);
+    }
+
+    #[test]
+    fn window_ipc_path_reaches_run_scratch_from_the_state_home() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("state/home");
+        let socket_dir = root.path().join("native/runtime/tmp");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&socket_dir).unwrap();
+
+        let relative = ipc_path_from_home(&home, &socket_dir).unwrap();
+        assert_eq!(relative, Path::new("../../native/runtime/tmp"));
+        assert_eq!(
+            home.join(relative).canonicalize().unwrap(),
+            socket_dir.canonicalize().unwrap()
+        );
+        assert!(ipc_path_from_home(&home, &root.path().join("missing")).is_none());
     }
 
     #[test]
