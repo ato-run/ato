@@ -87,11 +87,24 @@ pub(super) fn resolve(
 
     for binding in missing {
         let id = &binding.id;
+        let (purpose, example) = describe(binding);
+        let hidden_help = || {
+            format!(
+                "Could not read `{id}` without echo. Use --bind-env {id}=ATO_BIND_{}",
+                id.to_ascii_uppercase()
+            )
+        };
+        // Keep echo disabled while displaying an error and asking again.
+        // A user can begin retyping before the next prompt finishes printing.
+        let _echo = example
+            .is_none()
+            .then(TerminalEcho::disable)
+            .transpose()
+            .with_context(hidden_help)?;
         loop {
             if cancelled.load(Ordering::Relaxed) {
                 bail!("the Run was cancelled. No workload was started");
             }
-            let (purpose, example) = describe(binding);
             let value = if let Some(example) = example {
                 eprint!("{id} ({purpose}, for example {example}): ");
                 io::stderr().flush()?;
@@ -110,14 +123,7 @@ pub(super) fn resolve(
                     {
                         bail!("the Run was cancelled. No workload was started")
                     }
-                    Err(error) => {
-                        return Err(error).with_context(|| {
-                        format!(
-                            "Could not read `{id}` without echo. Use --bind-env {id}=ATO_BIND_{}",
-                            id.to_ascii_uppercase()
-                        )
-                    });
-                    }
+                    Err(error) => return Err(error).with_context(hidden_help),
                 }
             };
             match validate_value(binding, &value) {
@@ -186,9 +192,7 @@ fn describe(binding: &ApplicationBindingV1) -> (&'static str, Option<&'static st
 }
 
 fn read_hidden(prompt: &str) -> io::Result<String> {
-    // Turn echo off before printing the prompt. The password reader manages
-    // line editing and Ctrl-C, and the guard restores the original echo mode.
-    let _echo = TerminalEcho::disable()?;
+    // The caller keeps echo off. This reader handles editing and Ctrl-C.
     let builder = rpassword::ConfigBuilder::new().output_writer(io::stderr());
     #[cfg(unix)]
     let builder = builder.input_file_path("/dev/fd/0");
