@@ -1,0 +1,100 @@
+{
+  "監査日時": "2026-11-19T12:21:45+09:00",
+  "API": "https://staging.api.ato.run",
+  "PWA": "https://stg-app.ato.run",
+  "CLI": "ato 0.9.5",
+  "対象件数": 58,
+  "Hub一覧件数": 65,
+  "ダイジェストを照合した配信ファイル数": 58,
+  "Excalidraw旧版のreceipt抜粋": {
+    "schema": "ato.contract-verification-receipt/1",
+    "bundle_sha256": "sha256:199d8ff3ba4379dc1f72dcae6cf0a72bc6e9012898c91128865e8351c9e4d1a8",
+    "contract_ref": "sha256:f3f29b676a5f1156a39d739a115e666784a5032aebed811d334825775dbfcf02",
+    "derivation_ref": "sha256:5066d1b7005dc295c39a2c03efe84361bc6db651aad72f9ccc5bc941b77beafb",
+    "target": {
+      "kind": "cli-local"
+    },
+    "observations": [
+      {
+        "evidence": {
+          "body_sha256": "sha256:f755f822dfff0653a9e9027bb684b53b4a54d4486bff6f8374d828c14b4d3377",
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        "id": "root",
+        "outcome": "satisfied"
+      }
+    ],
+    "fully_satisfied": true,
+    "attempt_id": "run-3531-1795055847404748000",
+    "runtime_version": "Python 3.12.12"
+  },
+  "Excalidraw新版を公開して最初のRunを行う前のAPI応答抜粋": {
+    "latest": "sha256:0ca740a85f88577d1c8f4e5b9fadb614c916975296b94dac035742cb0b830fab",
+    "verification": {
+      "state": "verified",
+      "successful_runs": 1,
+      "last_run_at": "2026-11-19 02:37:30"
+    },
+    "history_versions": 2
+  },
+  "Excalidraw新版のreceipt抜粋": {
+    "schema": "ato.contract-verification-receipt/1",
+    "bundle_sha256": "sha256:0ca740a85f88577d1c8f4e5b9fadb614c916975296b94dac035742cb0b830fab",
+    "contract_ref": "sha256:c1b0214838a26aed029b6cab17eae8619945e829cd9643d01a9cce5bd9c6d238",
+    "derivation_ref": "sha256:7df44dd6762cd3426eea92306a8045d686551d0966f295cdeb6d3cf94bc729d3",
+    "target": {
+      "kind": "cli-local"
+    },
+    "observations": [
+      {
+        "evidence": {
+          "body_sha256": "sha256:23e4875c3c66509a91b9e5e59f45d03137e471fa965e4a4a3db4cc3fdfa25eb1",
+          "method": "GET",
+          "path": "/",
+          "status": 200
+        },
+        "id": "root",
+        "outcome": "satisfied"
+      }
+    ],
+    "fully_satisfied": true,
+    "attempt_id": "run-24959-1795058393968282000",
+    "runtime_version": "Python 3.12.12"
+  },
+  "配信物から展開したExcalidrawのブラウザ操作": {
+    "操作": [
+      "矩形をドラッグ",
+      "Save in this browser",
+      "再読み込み",
+      "Export scene"
+    ],
+    "書き出したJSONから取得": {
+      "elements": 1,
+      "type": "rectangle",
+      "width": 235
+    }
+  },
+  "Hub検索の実画面": {
+    "query": "interop-static",
+    "before": "検索に一致するカプセルはありません。\n\nさらにロードする",
+    "after": "I\nkoh0920\n/\ninterop-static\nA static web capsule that proves its own Contract with a byte-exact /proof.txt response.\n確認済み\n実行 20 回\nウェブ"
+  },
+  "CLIの再現記録": {
+    "一般publisher容量超過": "error: hub-bundle-too-large: the API refused the bundle as too large for capsules/koh0920/excalidraw (bundle_too_large)",
+    "ポートのないworker": "derivation.service.ports: every service serves at least one Port",
+    "RustDesk": {
+      "bundle": "sha256:e60610a9b9c3e5801f266ce0083ebc96621f9da51bb1bb005c5fc4f5f19b0b7c",
+      "error": "native_install_materialization_failed: disk image bundle contains a link or special file",
+      "path": "RustDesk.app/Contents/Frameworks/window_size.framework/window_size",
+      "link_target": "Versions/Current/window_size"
+    },
+    "LibreOffice": {
+      "bundle": "sha256:dd07ea8b5a11fb038552361ec2fa3cb6b245ed21d480de83101446c9e5773616",
+      "error": "native_install_materialization_failed: disk image bundle contains a link or special file",
+      "path": "LibreOffice.app/Contents/MacOS/urelibs"
+    },
+    "Grafana": "capability reason=docker_unavailable message=the docker CLI is installed but no daemon answered (docker did not answer within 5s); start Docker Desktop or Docker Engine and re-run"
+  }
+}

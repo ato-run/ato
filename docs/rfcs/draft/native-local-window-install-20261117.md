@@ -23,7 +23,7 @@ separate human-visible acceptance check, not implied by window readiness.
 
 A local-window route has one filesystem state slot delivered by path. Its HOME
 and working directory are that slot; artifacts remain read-only. Runtime network
-is denied. The local-window adapter allows only the five Metal/IOSurface IOKit
+is denied. A local window can bind and connect Unix sockets inside its fresh Run scratch tmp directory. The adapter exposes that directory relative to the state working directory as `ATO_NATIVE_IPC_DIR`, to fit short Unix socket path limits. The local-window adapter allows only the five Metal/IOSurface IOKit
 user-client classes from macOS's GPU profile and registration of the app's own
 `com.apple.axserver` local Mach service (accessibility in its PID namespace). The host display is shared, not contained, and receipts say so.
 Artifacts, managed toolchains and source caches are materialization outside
@@ -36,8 +36,11 @@ copies untrusted code into `/Applications` or changes a user's existing app.
 
 Remote DMGs are digest/length verified before a read-only, non-browsing mount.
 Only top-level real `.app` directories are copied, with bounded file count and
-2 GiB total contents. Links/devices inside these bundles fail closed; the DMG's
-usual `/Applications` shortcut is not copied or followed. Signature verification
+2 GiB total contents. Relative framework links inside an app are recreated after
+its real files and directories. Each link must resolve within that app. Dangling
+links, cycles, ancestor links, absolute targets and special files are rejected.
+The tree digest includes each link's path and literal target. The top-level
+`/Applications` shortcut is skipped. Signature verification
 covers the copied bundle. All mount exits detach; detach failures retain and
 report the mount location. Hashing streams large files. D2 compiles the pinned
 `solidcraft` GUI package with the existing managed Rust/source policy. A local
