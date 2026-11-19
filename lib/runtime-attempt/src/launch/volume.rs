@@ -317,6 +317,34 @@ impl VolumeStore {
         })
     }
 
+    /// Materialize a fresh relocation candidate from a verified State Revision.
+    /// A retry may reuse only a candidate already seeded from that revision.
+    pub fn restore_candidate(
+        &self,
+        volume_ref: &str,
+        capacity_bytes: u64,
+        revision: &str,
+        seed: &dyn Fn(&Path) -> Result<()>,
+    ) -> Result<(), VolumeError> {
+        let volume = self.attach(
+            volume_ref,
+            capacity_bytes,
+            VolumeStatus::Provisioning,
+            Some(revision),
+            seed,
+        )?;
+        if !volume.provisioned {
+            let metadata = self.verify(&self.volume_dir(volume_ref)?, volume_ref)?;
+            if metadata.seeded_from.as_deref() != Some(revision) {
+                return Err(VolumeError::Invalid {
+                    reason: "the existing candidate was seeded from a different revision"
+                        .to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Open an existing volume for maintenance (checkpoint, restore, delete):
     /// lock it and verify it is this Runner's. Never provisions — a volume
     /// that is not here is missing, never rebuilt.
@@ -429,7 +457,7 @@ impl VolumeStore {
         Ok(VolumeLock(file))
     }
 
-    fn verify(&self, dir: &Path, volume_ref: &str) -> Result<(), VolumeError> {
+    fn verify(&self, dir: &Path, volume_ref: &str) -> Result<VolumeMetadata, VolumeError> {
         let missing = |reason: &str| VolumeError::Missing {
             reason: reason.to_owned(),
         };
@@ -448,7 +476,7 @@ impl VolumeStore {
         if !data.is_dir() {
             return Err(missing("the volume data is not a directory"));
         }
-        Ok(())
+        Ok(metadata)
     }
 
     /// Temporary directory, seed, fsync, atomic rename. A Runner that dies

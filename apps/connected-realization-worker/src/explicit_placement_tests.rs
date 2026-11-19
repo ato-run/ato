@@ -86,10 +86,13 @@ fn advertisement_and_supported_kinds_have_the_same_opt_in_boundary() {
     );
     let volume = runtime_launch::volume::RUNNER_PERSISTENT_VOLUME_FEATURE;
     let maintenance = runtime_launch::volume_maintenance::EXPLICIT_STATE_VOLUME_MAINTENANCE_FEATURE;
-    assert!(with_explicit_runtime_placement_capability(vec![volume], true).contains(&maintenance));
-    assert!(
-        !with_explicit_runtime_placement_capability(vec![volume], false).contains(&maintenance)
-    );
+    let relocation = runtime_launch::volume_maintenance::STATE_VOLUME_RELOCATION_FEATURE;
+    let owned = with_explicit_runtime_placement_capability(vec![volume], true);
+    assert!(owned.contains(&maintenance));
+    assert!(owned.contains(&relocation));
+    let shared = with_explicit_runtime_placement_capability(vec![volume], false);
+    assert!(!shared.contains(&maintenance));
+    assert!(!shared.contains(&relocation));
     let all = vec![
         PORTABLE_CAPSULE_LEASE_KIND,
         "runtime_launch",

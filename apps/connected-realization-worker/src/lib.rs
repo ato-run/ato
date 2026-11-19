@@ -247,6 +247,7 @@ fn with_explicit_runtime_placement_capability(
             capabilities.push(
                 runtime_launch::volume_maintenance::EXPLICIT_STATE_VOLUME_MAINTENANCE_FEATURE,
             );
+            capabilities.push(runtime_launch::volume_maintenance::STATE_VOLUME_RELOCATION_FEATURE);
         }
     }
     capabilities

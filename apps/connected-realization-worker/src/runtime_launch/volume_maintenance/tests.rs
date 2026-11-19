@@ -18,6 +18,7 @@ type Commit = (u64, Option<String>, String, Vec<u8>);
 struct Plane {
     fence: u64,
     volume_ref: String,
+    volume_status: VolumeStatus,
     revision_ref: Option<String>,
     artifact: Option<StateArtifact>,
     commits: RefCell<Vec<Commit>>,
@@ -31,7 +32,7 @@ impl StateArtifactTransport for Plane {
             writer_fence: self.fence,
             volume: Some(GrantedVolume {
                 volume_ref: self.volume_ref.clone(),
-                status: VolumeStatus::Ready,
+                status: self.volume_status,
             }),
         })
     }
@@ -66,6 +67,7 @@ fn plane(volume_ref: &str, fence: u64) -> Plane {
     Plane {
         fence,
         volume_ref: volume_ref.to_owned(),
+        volume_status: VolumeStatus::Ready,
         revision_ref: None,
         artifact: None,
         commits: RefCell::new(Vec::new()),
@@ -82,6 +84,7 @@ fn command(operation: VolumeOperationKind, fence: u64) -> VolumeMaintenanceLease
         volume_ref: VOLUME.to_owned(),
         writer_fence: fence,
         explicit_runner_id: None,
+        candidate_capacity_bytes: None,
     }
 }
 
@@ -200,6 +203,41 @@ fn a_volume_that_is_not_here_is_never_recreated_by_maintenance() {
     .unwrap_err();
     assert!(format!("{error:#}").contains("state_volume_missing"));
     assert!(!store.data_dir(VOLUME).unwrap().exists());
+}
+
+#[test]
+fn an_explicit_candidate_restore_seeds_a_new_volume_once() {
+    let source = tempfile::tempdir().unwrap();
+    fs::write(source.path().join("value"), "checkpoint").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let destination = VolumeStore::open(root.path(), "owned-runner").unwrap();
+    let mut candidate = command(VolumeOperationKind::Restore, 4);
+    candidate.explicit_runner_id = Some("owned-runner".to_owned());
+    candidate.candidate_capacity_bytes = Some(1 << 20);
+    candidate.validate("run_vop").unwrap();
+    candidate
+        .validate_runner_assignment("owned-runner", true)
+        .unwrap();
+    assert!(
+        candidate
+            .validate_runner_assignment("owned-runner", false)
+            .is_err()
+    );
+
+    let mut grant = plane(VOLUME, 4);
+    grant.revision_ref = Some("isrev_checkpoint".to_owned());
+    grant.artifact = Some(pack_state_tree(source.path()).unwrap());
+    assert!(perform(&candidate, &destination, &grant).is_err());
+    assert!(!destination.data_dir(VOLUME).unwrap().exists());
+    grant.volume_status = VolumeStatus::Provisioning;
+    perform(&candidate, &destination, &grant).unwrap();
+    perform(&candidate, &destination, &grant).unwrap();
+    assert_eq!(read(&destination, VOLUME), "checkpoint");
+
+    grant.revision_ref = Some("isrev_other".to_owned());
+    assert!(perform(&candidate, &destination, &grant).is_err());
+    assert_eq!(read(&destination, VOLUME), "checkpoint");
+    assert!(grant.commits.borrow().is_empty());
 }
 
 #[test]
