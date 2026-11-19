@@ -421,7 +421,7 @@
         "platform_emulated": true,
         "connector": "relay",
         "relay_image_digest": "sha256:3e66ad944f585ee3a547dfd6db569e2c05383cbca66b1ba1639e10fa1620f0cd",
-        "attempt_id": "run-42263-1795067135942691000"
+        "attempt_id": "run-47988-1795067626941902000"
       },
       "observations": [
         {
@@ -435,6 +435,10 @@
           }
         }
       ]
+    },
+    "operations": {
+      "operation": "sign in, open a seeded file, edit and save its text in VS Code, reload and verify the saved text",
+      "file": "hub-proof.txt"
     }
   }
 }
