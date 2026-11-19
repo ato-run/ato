@@ -243,6 +243,11 @@ fn with_explicit_runtime_placement_capability(
 ) -> Vec<&'static str> {
     if required {
         capabilities.push(EXPLICIT_RUNNER_ASSIGNMENT_RUNTIME_FEATURE);
+        if capabilities.contains(&runtime_launch::volume::RUNNER_PERSISTENT_VOLUME_FEATURE) {
+            capabilities.push(
+                runtime_launch::volume_maintenance::EXPLICIT_STATE_VOLUME_MAINTENANCE_FEATURE,
+            );
+        }
     }
     capabilities
 }
@@ -253,20 +258,33 @@ pub(crate) fn explicit_runtime_placement_kinds(
     required: bool,
 ) -> Vec<&'static str> {
     if required {
-        kinds.retain(|kind| *kind == runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND);
+        kinds.retain(|kind| supports_explicit_runner_assignment(kind));
     }
     kinds
 }
+
+fn supports_explicit_runner_assignment(kind: &str) -> bool {
+    matches!(
+        kind,
+        runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND
+            | runtime_launch::volume_maintenance::STATE_VOLUME_MAINTENANCE_LEASE_KIND
+    )
+}
+
 fn validate_explicit_runner_placement(config: &WorkerConfig, command: &LeaseCommand) -> Result<()> {
     match command {
         LeaseCommand::RuntimeLaunch(command) => command.validate_runner_assignment(
             &config.runner_id,
             config.require_explicit_runtime_placement,
         ),
+        LeaseCommand::VolumeMaintenance(command) => command.validate_runner_assignment(
+            &config.runner_id,
+            config.require_explicit_runtime_placement,
+        ),
         _ => {
             ensure!(
                 !config.require_explicit_runtime_placement,
-                "explicit_runner_assignment_unsupported_lease: explicit-only Runner accepts runtime_launch only"
+                "explicit_runner_assignment_unsupported_lease: this lease kind has no explicit placement"
             );
             Ok(())
         }
@@ -2321,6 +2339,10 @@ impl ConnectedWorker {
         lease: &ClaimedLease,
         command: &runtime_launch::volume_maintenance::VolumeMaintenanceLeaseCommand,
     ) -> Result<()> {
+        command.validate_runner_assignment(
+            &self.config.runner_id,
+            self.config.require_explicit_runtime_placement,
+        )?;
         ensure!(
             runtime_launch::recovery::slot_recovered(),
             "this Runner slot has not confirmed its previous Runs stopped; refusing volume work"

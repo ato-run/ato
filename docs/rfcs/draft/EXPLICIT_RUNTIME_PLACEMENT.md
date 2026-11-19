@@ -9,7 +9,8 @@ Date: 2026-10-24
 `ATO_RUNNER_REQUIRE_EXPLICIT_RUNTIME_PLACEMENT`) is a default-off operator
 restriction on a connected Runner. When enabled, the Runner advertises
 `runtime_feature=explicit_runner_assignment_v1` and only advertises the
-intersection of its actually supported lease kinds with `runtime_launch`.
+intersection of its actually supported lease kinds with `runtime_launch` and
+`state_volume_maintenance`.
 An empty intersection stays empty. Other lease kinds have no explicit intent
 wire in this version and are refused before any lease side effects.
 
@@ -20,6 +21,13 @@ ownership/current Run/lease checks, and deliver it through existing authorized
 lease claim. Automatic selectors must exclude marked Runners. The marker alone
 never authorizes a Run, and a workload, Capsule or caller cannot supply this
 field as a replacement for server-side placement checks.
+
+An explicit Runner with a verified volume store also advertises
+`runtime_feature=explicit_state_volume_maintenance_v1`. The volume command
+uses the same runner ID check before opening its store. Its API assignment
+is scoped to the Instance owner, current saved placement, resident volume,
+operation, and writer generation. Legacy managed volume commands still omit
+the ID.
 
 If present, the value must be nonempty and exactly equal the local authenticated
 Runner ID even when the operator restriction is off. Missing/null is accepted

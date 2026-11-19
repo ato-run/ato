@@ -21,6 +21,8 @@ use super::state_artifact::{StateArtifactTransport, materialize_working_copy, pa
 use super::volume::VolumeStore;
 
 pub const STATE_VOLUME_MAINTENANCE_LEASE_KIND: &str = "state_volume_maintenance";
+pub const EXPLICIT_STATE_VOLUME_MAINTENANCE_FEATURE: &str =
+    "runtime_feature=explicit_state_volume_maintenance_v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -41,9 +43,19 @@ pub struct VolumeMaintenanceLeaseCommand {
     pub state_key: String,
     pub volume_ref: String,
     pub writer_fence: u64,
+    #[serde(default)]
+    pub explicit_runner_id: Option<String>,
 }
 
 impl VolumeMaintenanceLeaseCommand {
+    pub fn validate_runner_assignment(&self, runner_id: &str, required: bool) -> Result<()> {
+        super::lease::validate_runner_assignment(
+            self.explicit_runner_id.as_deref(),
+            runner_id,
+            required,
+        )
+    }
+
     pub fn validate(&self, lease_run_id: &str) -> Result<()> {
         ensure!(
             self.run_id == lease_run_id,

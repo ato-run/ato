@@ -81,6 +81,7 @@ fn command(operation: VolumeOperationKind, fence: u64) -> VolumeMaintenanceLease
         state_key: "data".to_owned(),
         volume_ref: VOLUME.to_owned(),
         writer_fence: fence,
+        explicit_runner_id: None,
     }
 }
 
