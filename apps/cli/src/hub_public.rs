@@ -704,6 +704,15 @@ pub fn resolve_for_run(
     api_url: &str,
     ato_home: &Path,
 ) -> Result<Option<ResolvedHubCapsule>> {
+    resolve_for_run_with_progress(path, api_url, ato_home, false)
+}
+
+pub(super) fn resolve_for_run_with_progress(
+    path: &Path,
+    api_url: &str,
+    ato_home: &Path,
+    progress: bool,
+) -> Result<Option<ResolvedHubCapsule>> {
     let Some(value) = path.to_str() else {
         return Ok(None);
     };
@@ -743,6 +752,14 @@ pub fn resolve_for_run(
             ),
         )
     })?;
+    if let HubSelector::Digest(requested) = &reference.selector
+        && requested != &digest
+    {
+        bail!(hub_error(
+            ERR_DIGEST_MISMATCH,
+            format!("the Hub did not return requested revision {requested}")
+        ));
+    }
     if resolved.size_bytes > MAX_OFFICIAL_BUNDLE_BYTES {
         bail!(hub_error(
             ERR_BUNDLE_TOO_LARGE,
@@ -752,6 +769,29 @@ pub fn resolve_for_run(
                 resolved.size_bytes
             )
         ));
+    }
+    if let Some(bundle_path) =
+        hub_transfer::verified_cache_path(ato_home, &digest, resolved.size_bytes)?
+    {
+        if progress {
+            eprintln!("Using verified cached bundle {digest}.");
+        }
+        return Ok(Some(ResolvedHubCapsule {
+            reference,
+            digest,
+            api_url: base,
+            bundle_path,
+        }));
+    }
+    if progress {
+        let path = hub_transfer::bundle_cache_path(ato_home, &digest)
+            .expect("the response digest was validated");
+        let reason = if path.try_exists()? {
+            "The cached bundle did not pass verification."
+        } else {
+            "This revision is absent from the bundle cache."
+        };
+        eprintln!("{reason} Downloading {digest}…");
     }
     if resolved.size_bytes > MAX_BUNDLE_BYTES {
         // A bundle above the Base64 JSON bound is streamed to the cache from a
@@ -1081,7 +1121,7 @@ pub fn store_bundle(ato_home: &Path, digest: &str, bytes: &[u8]) -> Result<PathB
     fs::create_dir_all(&directory)
         .with_context(|| format!("create the Hub cache directory {}", directory.display()))?;
     let path = directory.join(format!("{hex}.capsule"));
-    if path.is_file() {
+    if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
         let existing = fs::read(&path)
             .with_context(|| format!("read the cached Hub capsule {}", path.display()))?;
         if bundle_sha256(&existing) == digest {
@@ -1130,7 +1170,7 @@ fn unix_now_nanos() -> u128 {
 }
 
 /// The API origin, validated the same way `ato login` validates its URL.
-fn api_base(api_url: &str) -> Result<String> {
+pub(super) fn api_base(api_url: &str) -> Result<String> {
     let url = reqwest::Url::parse(api_url).context("invalid Ato API URL")?;
     ensure!(
         url.scheme() == "https"

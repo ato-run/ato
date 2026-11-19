@@ -812,6 +812,60 @@ fn running_a_hub_reference_resolves_verifies_executes_and_reports_the_run() {
 }
 
 #[test]
+fn a_small_hub_bundle_is_downloaded_again_only_when_its_cache_is_invalid() {
+    let bytes = sample_bytes();
+    let describe = || json_response("200 OK", resolve_body(&bytes));
+    let report = || json_response("200 OK", json!({}));
+    let api = StubApi::new(vec![
+        describe(),
+        binary_response(&bytes),
+        report(),
+        describe(),
+        report(),
+        describe(),
+        binary_response(&bytes),
+        report(),
+    ]);
+    let home = tempfile::tempdir().unwrap();
+    let cache = home.path().join("hub").join(format!(
+        "{}.capsule",
+        SAMPLE_DIGEST.trim_start_matches("sha256:")
+    ));
+    for attempt in 0..3 {
+        if attempt == 2 {
+            fs::write(&cache, b"invalid").unwrap();
+        }
+        let outcome = ato_with_home(home.path())
+            .args([
+                "run",
+                "capsules/koh0920/interop-static",
+                "--no-open",
+                "--api-url",
+                &api.base,
+            ])
+            .output()
+            .unwrap();
+        assert!(outcome.status.success(), "{}", stderr(&outcome));
+        assert_eq!(fs::read(&cache).unwrap(), bytes);
+    }
+    let requests = api.wait_requests(8);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.contains("/artifacts/"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.contains("/resolve?"))
+            .count(),
+        3
+    );
+}
+
+#[test]
 fn a_tampered_hub_artifact_fails_before_the_run() {
     let bytes = sample_bytes();
     let mut tampered = bytes.clone();
