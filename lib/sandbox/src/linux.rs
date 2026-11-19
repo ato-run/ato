@@ -15,18 +15,21 @@
 use super::{SandboxPolicy, SandboxResult};
 use anyhow::{Context, Result};
 use landlock::{
-    ABI, Access, AccessFs, AccessNet, NetPort, Ruleset, RulesetAttr, RulesetCreatedAttr,
-    RulesetStatus, path_beneath_rules,
+    ABI, Access, AccessFs, AccessNet, CompatLevel, Compatible, NetPort, Ruleset, RulesetAttr,
+    RulesetCreatedAttr, RulesetStatus, path_beneath_rules,
 };
 use std::path::Path;
 use tracing::{debug, info, warn};
 
 /// Check if Landlock is supported on this system
 pub fn is_landlock_supported() -> bool {
-    // Try to create a minimal ruleset to check support
+    // Best-effort compatibility can accept the requested rights even on a
+    // kernel without Landlock. Ask the kernel to create a real ruleset
+    // without applying it to this process.
     Ruleset::default()
+        .set_compatibility(CompatLevel::HardRequirement)
         .handle_access(AccessFs::from_all(ABI::V1))
-        .is_ok()
+        .is_ok_and(|ruleset| ruleset.create().is_ok())
 }
 
 /// Apply Landlock sandbox to the current process
