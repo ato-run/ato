@@ -417,6 +417,9 @@ pub(crate) fn prepare(
         NativeArtifactPayload::Archive(NativeArchiveSource::File(path)) => {
             extract_archive_file(path, request.descriptor.format, &artifact_root)
         }
+        NativeArtifactPayload::InstalledArchive(root) => {
+            super::artifact::inspect_archive_tree(root, request.descriptor.format)
+        }
         NativeArtifactPayload::BuiltTree(root) | NativeArtifactPayload::WindowApp { root, .. } => {
             adopt_tree(root)
         }
@@ -926,6 +929,9 @@ pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure
     if request.descriptor.local_window {
         let home = &request.state_paths[0].1;
         environment.insert("HOME".to_owned(), home.display().to_string());
+        // Foundation resolves the account's passwd entry ahead of HOME.
+        // Cocoa's Library/Application Support belongs in the Run's state too.
+        environment.insert("CFFIXED_USER_HOME".to_owned(), home.display().to_string());
         environment.insert(
             "XDG_CONFIG_HOME".to_owned(),
             home.join(".config").display().to_string(),
