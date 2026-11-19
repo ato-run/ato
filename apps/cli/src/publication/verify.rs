@@ -47,6 +47,8 @@ pub(super) struct Attempt {
     artifact_sha256: String,
     host: String,
     runtime_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime_version: Option<String>,
     verdict: Verdict,
     pub(super) cleanup_confirmed: bool,
     execution: AttemptRecordState,
@@ -80,6 +82,10 @@ struct BrowserProof {
     receipt_ref: String,
     verdict: Verdict,
     verifier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    browser_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    issue: Option<String>,
     agent_model: Option<String>,
     judge_model: Option<String>,
     containment: Value,
@@ -124,6 +130,10 @@ struct BrowserEvidence {
 }
 
 impl Attempt {
+    pub(super) fn derivation_ref(&self) -> &str {
+        &self.derivation_ref
+    }
+
     pub(super) fn valid_pass(&self, plan: &Plan) -> bool {
         if self.verdict != Verdict::Pass
             || self.execution != AttemptRecordState::Finished
@@ -197,6 +207,7 @@ impl Attempt {
             artifact_sha256: entry.plan.artifact_sha256.clone(),
             host: host.to_owned(),
             runtime_id: "local".into(),
+            runtime_version: None,
             verdict: Verdict::Inconclusive,
             cleanup_confirmed: true,
             execution: AttemptRecordState::NotStarted,
@@ -459,6 +470,12 @@ fn verify_job(store: &Store, id: &str, directory: &Path, cancelled: &AtomicBool)
                     "Runtime receipt does not match the fixed attempt"
                 );
                 recorded.mechanical_receipt_ref = Some(bundle_sha256(&receipt.canonical_bytes()?));
+                recorded.runtime_version = receipt
+                    .execution
+                    .as_ref()
+                    .and_then(|execution| execution.runtime_version.as_ref())
+                    .filter(|value| super::limited_text(value, 128))
+                    .cloned();
                 recorded.mechanical = receipt
                     .observations
                     .iter()
@@ -587,6 +604,16 @@ fn browser_proof(receipt: &BrowserVerificationReceipt, id: &str) -> Result<Brows
         receipt_ref: digest(receipt)?,
         verdict,
         verifier: safe_identifier(&receipt.verifier.verifier),
+        browser_version: receipt
+            .verifier
+            .browser_version
+            .as_deref()
+            .map(safe_identifier),
+        issue: receipt.reason.as_deref().and_then(|reason| {
+            let code = reason.split(':').next()?;
+            let code = safe_identifier(code);
+            (code != "unavailable").then_some(code)
+        }),
         agent_model: receipt.verifier.agent_model.as_deref().map(safe_identifier),
         judge_model: receipt.verifier.judge_model.as_deref().map(safe_identifier),
         containment: json!({"containment": if containment["containment"] == "bwrap" {"bwrap"} else {"unavailable"}}),
@@ -644,7 +671,8 @@ fn browser_proof(receipt: &BrowserVerificationReceipt, id: &str) -> Result<Brows
 
 fn make_browser(plan: &Plan, directory: &Path, attempt_id: &str) -> Option<BrowserVerification> {
     let contract = plan.browser_contract.clone()?;
-    if plan.browser_models.as_ref() != Some(&browser_models(plan.browser_interactive)) {
+    let models = browser_models(plan.browser_interactive).ok()?;
+    if plan.browser_models.as_ref() != Some(&models) {
         return None;
     }
     let dir = std::env::var_os("ATO_PUBLICATION_BROWSER_VERIFIER").map(PathBuf::from);
@@ -660,6 +688,7 @@ fn make_browser(plan: &Plan, directory: &Path, attempt_id: &str) -> Option<Brows
                     spec,
                     directory: directory.join("browser").join(attempt_id),
                     cancel_file: directory.join("cancel.json"),
+                    ollama_judge: models.ollama_judge,
                 }
             }
             configured => configured,

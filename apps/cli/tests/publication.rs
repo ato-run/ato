@@ -347,3 +347,54 @@ fn missing_contained_browser_prevents_a_pass_for_a_frozen_browser_condition() {
         true
     );
 }
+
+#[test]
+fn unmanifested_python_routes_share_one_frozen_contract() {
+    let workspace = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let source = workspace.path().join("dynamic");
+    fs::create_dir(&source).unwrap();
+    fs::write(
+        source.join("main.py"),
+        "raise RuntimeError('publication preparation must not execute source')\n",
+    )
+    .unwrap();
+    let mut client = Client::connect(home.path(), workspace.path());
+    let mut request = json!({
+        "source":"dynamic", "destination":scope(),
+        "http_checks":[{"id":"root","path":"/","status":200}],
+        "process_routes":[{"script":"./main.py","python_version":"3.11","guest_port":8080}]
+    });
+    let single = client.ok("publication_prepare", request.clone());
+    request["process_routes"].as_array_mut().unwrap().push(
+        json!({"script":"main.py","python_version":"3.12","guest_port":8080,"arguments":["8080"]}),
+    );
+    let multiple = client.ok("publication_prepare", request.clone());
+    assert_eq!(single["phase"], "prepared");
+    assert_eq!(multiple["phase"], "prepared");
+    assert_eq!(single["plan"]["source_ref"], multiple["plan"]["source_ref"]);
+    assert_eq!(
+        single["plan"]["base_contract_ref"],
+        multiple["plan"]["base_contract_ref"]
+    );
+    assert_ne!(
+        single["plan"]["artifact_sha256"],
+        multiple["plan"]["artifact_sha256"]
+    );
+    assert_eq!(
+        multiple["plan"]["declared_routes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        multiple["plan"]["derivations"]
+            .as_array()
+            .unwrap()
+            .contains(&single["plan"]["derivations"][0])
+    );
+
+    request["process_routes"][0]["script"] = json!("../external.py");
+    assert_eq!(client.call("publication_prepare", request)["isError"], true);
+}

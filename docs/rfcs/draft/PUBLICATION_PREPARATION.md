@@ -10,9 +10,17 @@ The artifact is verified and uploaded as the same bytes. Changing a condition,
 destination, or artifact starts a new preparation.
 
 A client can propose required HTTP status and body digest checks. For plain
-static HTML, Ato compiles them into the initial portable Contract. A bundle
-or authored source retains its declared Contract. A proposed HTTP check on
-those targets must already be declared exactly or is reported as unsupported.
+static HTML or a Python application without a manifest, Ato compiles them
+into the initial portable Contract. The client may propose up to four Python
+routes using a source-relative script, a pinned interpreter version, a guest
+port and optional argv entries. The script can read
+`ATO_ENDPOINT_APP_HTTP_PORT` or receive the selected port as an argv entry
+that matches the guest port. Formation validates and seals the source
+without executing the program or installing dependencies. Adding an
+alternative route changes the artifact and its declared Derivations while
+retaining K. A bundle or authored source retains its declared Contract and
+routes. A proposed HTTP check on those targets must already be declared
+exactly or is reported as unsupported.
 An optional Browser Contract v0 is fixed before execution, with the effective
 Contract referring to the original portable Contract and the browser condition.
 Unrecognized required checks prevent approval.
@@ -83,7 +91,9 @@ resumes status by preparation ID. A browser task uses
 `publication_browser_observe` and `publication_browser_act` while verification
 is underway. The owner reviews the report and the exact artifact named by
 the approval command. The agent can request the upload once an approval
-appears in the report.
+appears in the report. The publication result identifies a route with
+confirmed verification and includes the explicit `ato run --derivation`
+selection for recipients.
 
 The manual route accepts the same request JSON shown by the MCP tool schema.
 
@@ -97,7 +107,8 @@ ato publish commit "$preparation_id" --report-ref "$report_ref"
 
 For browser tasks, configure the absolute helper directory using
 `ATO_PUBLICATION_BROWSER_VERIFIER` and install that helper's locked
-dependencies. The Linux worker needs usable bubblewrap and Chrome.
+dependencies. The Linux worker needs usable bubblewrap, Chrome, and system
+fonts so Chrome can observe visible text.
 `ATO_BROWSER_CHROME_PATH` and `ATO_PUBLICATION_NODE` can select local binaries.
 Set `JEV_API_KEY` for the independent judge, and `DEEPSEEK_API_KEY` when using
 the model-based browser driver. These keys are forwarded to the contained
@@ -105,13 +116,30 @@ helper by file descriptor. Optional `ATO_JEV_MODEL` and
 `ATO_BROWSER_AGENT_MODEL` settings select the model identities recorded in
 the preparation and receipt.
 
+For structured browser verification the owner can configure a local Ollama
+service using `ATO_OLLAMA_JUDGE_URL`, `ATO_OLLAMA_JUDGE_MODEL` and
+`ATO_OLLAMA_JUDGE_DIGEST`. The URL is a literal HTTP loopback origin with
+an explicit port. The model is a preinstalled tagged local model and the
+digest is the 64-character lowercase value from `GET /api/tags`. The
+preparation pins all three. The helper checks the digest before and after
+each bounded, schema-validated decision. Browser and application traffic
+are restricted independently from the judge connection. The report names
+the digest as returned by the owner-operated service. This measures the
+service's advertised identity and depends on that service's integrity.
+
 ## Current scope
 
 This lane accepts self-contained portable bundles and portable authoring
-manifests, and can form a static application from plain HTML. Candidate
-exploration uses the available declared routes. Verification with a hard
-deadline currently admits Static Web. Other realization types need controlled
-launch and stop support before the worker can verify them. The frozen upload
-is limited to 8 MiB. The review receipt remains in the local preparation
-store. Hosting review receipts and admission enforcement in the Hub require
-server support. The existing low-level Hub commands retain their behavior.
+manifests and can form Static Web and pinned single-process Python routes
+from source. Candidate exploration uses the available declared routes
+within the fixed time and attempt budget. Static Web and Linux Python
+processes have bounded verification launch paths. The Linux process route
+requires bubblewrap PID and mount namespaces plus Landlock network policy.
+The worker resolves and measures an installed interpreter before launch.
+The isolated process sees a read-only source and private Run storage. Its
+namespace stops with the owned supervisor. OCI, service groups, Native
+Desktop, and other dynamic routes require deadline-aware launch and verified
+teardown before this workflow can admit them. The frozen upload is limited
+to 8 MiB. The review receipt remains in the local preparation store.
+Hosting review receipts and admission enforcement in the Hub require server
+support. The existing low-level Hub commands retain their behavior.

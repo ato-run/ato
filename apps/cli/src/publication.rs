@@ -1,5 +1,6 @@
 //! Public preparation is local orchestration over immutable Capsules.
 
+mod formation;
 mod mcp;
 mod operator;
 mod store;
@@ -17,6 +18,7 @@ use ato_formation::authoring::{HTTP_CONTRACT_VERIFIER, PlatformDraft};
 use ato_formation::browser::{BrowserContractV0, effective_contract_ref};
 use ato_formation::source::{FileVerifiedArchive, SourceLimits};
 use ato_portable_application::{build_authored_bundle_v2, build_static_bundle, bundle_sha256};
+use ato_runtime_attempt::browser_verify::OllamaJudgeConfig;
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -172,6 +174,8 @@ struct Prepare {
     destination: Destination,
     #[serde(default)]
     http_checks: Vec<HttpCheck>,
+    #[serde(default)]
+    process_routes: Vec<formation::ProcessRoute>,
     browser_task: Option<String>,
     browser_interactive: Option<bool>,
     target_host: Option<String>,
@@ -228,18 +232,37 @@ struct DeclaredRoute {
 struct BrowserModels {
     browser_driver: String,
     judge: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ollama_judge: Option<OllamaJudgeConfig>,
 }
 
-fn browser_models(interactive: bool) -> BrowserModels {
-    BrowserModels {
+fn browser_models(interactive: bool) -> Result<BrowserModels> {
+    let ollama_judge = match (
+        std::env::var("ATO_OLLAMA_JUDGE_URL").ok(),
+        std::env::var("ATO_OLLAMA_JUDGE_MODEL").ok(),
+        std::env::var("ATO_OLLAMA_JUDGE_DIGEST").ok(),
+    ) {
+        (None, None, None) => None,
+        (Some(url), Some(model), Some(digest)) if interactive => {
+            Some(OllamaJudgeConfig::new(&url, model, digest)?)
+        }
+        _ => bail!(
+            "Configure the Ollama judge URL, model and digest together for structured browser verification"
+        ),
+    };
+    Ok(BrowserModels {
         browser_driver: if interactive {
             "structured_mcp_operator".into()
         } else {
             std::env::var("ATO_BROWSER_AGENT_MODEL")
                 .unwrap_or_else(|_| "deepseek/deepseek-flash".into())
         },
-        judge: std::env::var("ATO_JEV_MODEL").unwrap_or_else(|_| "jev-1.13.0".into()),
-    }
+        judge: ollama_judge.as_ref().map_or_else(
+            || std::env::var("ATO_JEV_MODEL").unwrap_or_else(|_| "jev-1.13.0".into()),
+            OllamaJudgeConfig::identity,
+        ),
+        ollama_judge,
+    })
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -331,6 +354,10 @@ fn prepare(store: &Store, workspace: &Path, mut request: Prepare) -> Result<Valu
         request.http_checks.len() <= 16 && request.unsupported_required.len() <= 16,
         "Too many conditions"
     );
+    ensure!(
+        request.process_routes.len() <= 4,
+        "Propose at most four Python process routes"
+    );
     let mut ids = BTreeSet::new();
     for check in &request.http_checks {
         ensure!(
@@ -377,7 +404,8 @@ fn prepare(store: &Store, workspace: &Path, mut request: Prepare) -> Result<Valu
     );
     let browser_models = browser_contract
         .as_ref()
-        .map(|_| browser_models(browser_interactive));
+        .map(|_| browser_models(browser_interactive))
+        .transpose()?;
     if let Some(models) = &browser_models {
         ensure!(
             [&models.browser_driver, &models.judge]
@@ -425,6 +453,10 @@ fn prepare(store: &Store, workspace: &Path, mut request: Prepare) -> Result<Valu
         let path = frozen.materialize(&temporary.path().join("source"), "", limits)?;
         let manifest = path.join("capsule.toml");
         let bytes = if manifest.is_file() {
+            ensure!(
+                request.process_routes.is_empty(),
+                "Use the execution routes declared by the authored manifest"
+            );
             let document: toml::Value = toml::from_str(&fs::read_to_string(&manifest)?)?;
             if document.get("schema").and_then(toml::Value::as_str) == Some("ato.capsule/2") {
                 build_authored_bundle_v2(&path)?.0
@@ -435,10 +467,17 @@ fn prepare(store: &Store, workspace: &Path, mut request: Prepare) -> Result<Valu
                 )?
                 .0
             }
+        } else if !request.process_routes.is_empty() {
+            formation::build_process_bundle(
+                &path,
+                request.title.as_deref().unwrap_or("Python application"),
+                &request.http_checks,
+                request.process_routes,
+            )?
         } else {
             ensure!(
                 path.join("index.html").is_file(),
-                "Automatic formation here needs a portable authoring manifest or plain static HTML. Prepare a separately formed bundle for other source"
+                "Propose a pinned Python process route for a dynamic source, or provide an authoring manifest or a portable bundle"
             );
             ensure!(
                 !request.http_checks.is_empty(),
@@ -453,6 +492,10 @@ fn prepare(store: &Store, workspace: &Path, mut request: Prepare) -> Result<Valu
         };
         (bytes, "frozen_source".to_owned(), source_ref)
     } else {
+        ensure!(
+            request.process_routes.is_empty(),
+            "Use the execution routes declared by the existing Capsule"
+        );
         ensure!(
             input.is_file() && input.extension().is_some_and(|ext| ext == "capsule"),
             "Choose a source directory or a portable .capsule file"
@@ -727,6 +770,14 @@ fn report_ref(entry: &Entry) -> Result<String> {
     }))?))
 }
 
+fn verified_derivation(entry: &Entry) -> Option<&str> {
+    entry
+        .attempts
+        .iter()
+        .find(|attempt| attempt.valid_pass(&entry.plan))
+        .map(Attempt::derivation_ref)
+}
+
 fn view(entry: &Entry) -> Result<Value> {
     let report = if entry.phase == Phase::Ready || entry.approval.is_some() {
         Some(report_ref(entry)?)
@@ -752,6 +803,7 @@ fn view(entry: &Entry) -> Result<Value> {
         "plan": entry.plan, "attempts": entry.attempts,
         "recipient_scope": entry.plan.destination.recipient_scope(),
         "report_ref": report, "approval_command": approval_command,
+        "verified_derivation": verified_derivation(entry),
         "approval": entry.approval, "publication": entry.publication,
         "unverified": "Results are scoped to the listed attempt environments. Browser page text, action inputs, raw evidence and the link key are excluded from verification proof. Credential and private-data absence is unconfirmed by automated inspection."
     }))
@@ -776,10 +828,7 @@ fn validate_proof(store: &Store, entry: &Entry) -> Result<()> {
     );
     store.artifact(entry)?;
     ensure!(
-        entry
-            .attempts
-            .iter()
-            .any(|attempt| attempt.valid_pass(&entry.plan))
+        verified_derivation(entry).is_some()
             && entry
                 .attempts
                 .iter()
@@ -848,7 +897,8 @@ fn commit(store: &Store, args: ReportId) -> Result<Value> {
     let bytes = store.artifact(&entry)?;
     entry.phase = Phase::Publishing;
     store.save(&entry)?;
-    match upload(store, &entry.plan.destination, &bytes) {
+    let derivation = verified_derivation(&entry).context("The approved route is unavailable")?;
+    match upload(store, &entry.plan.destination, &bytes, derivation) {
         Ok(publication) => {
             entry.publication = Some(publication);
             entry.phase = Phase::Published;
@@ -864,7 +914,19 @@ fn commit(store: &Store, args: ReportId) -> Result<Value> {
     }
 }
 
-fn upload(store: &Store, destination: &Destination, bytes: &[u8]) -> Result<Value> {
+fn public_recipient(reference: &str, api_url: &str, derivation: &str) -> Value {
+    json!({
+        "command":"ato run", "reference":reference, "api_url":api_url, "derivation":derivation,
+        "argv":["ato","run",reference,"--api-url",api_url,"--derivation",derivation]
+    })
+}
+
+fn upload(
+    store: &Store,
+    destination: &Destination,
+    bytes: &[u8],
+    derivation: &str,
+) -> Result<Value> {
     match destination {
         Destination::Public {
             api_url,
@@ -875,7 +937,7 @@ fn upload(store: &Store, destination: &Destination, bytes: &[u8]) -> Result<Valu
             let result = hub_public::publish_pinned_bytes(bytes, api_url, name, tag, license)?;
             Ok(
                 json!({"kind":"public", "reference":result.0, "url":result.1,
-                "recipient":{"command":"ato run","reference":result.0,"api_url":api_url}}),
+                "recipient":public_recipient(&result.0, api_url, derivation)}),
             )
         }
         Destination::Link {
@@ -883,9 +945,12 @@ fn upload(store: &Store, destination: &Destination, bytes: &[u8]) -> Result<Valu
             allow_loopback_http,
         } => {
             let url = hub::push_pinned_bytes(bytes, hub_url, *allow_loopback_http, store.root())?;
-            Ok(
-                json!({"kind":"link", "private_link":url, "recipient":{"commands":["ato hub pull <link> -o app.capsule","ato run ./app.capsule"]}}),
-            )
+            Ok(json!({"kind":"link", "private_link":url,
+            "recipient":{"derivation":derivation,"commands":[
+                if *allow_loopback_http { "ato hub pull <link> --allow-loopback-http -o app.capsule" }
+                else { "ato hub pull <link> -o app.capsule" },
+                &format!("ato run ./app.capsule --derivation {derivation}")
+            ]}}))
         }
     }
 }
@@ -916,9 +981,10 @@ fn reconcile(store: &Store, id: &str) -> Result<Value> {
     );
     validate_proof(store, &entry)?;
     let reference = format!("capsules/{name}@{}", found.digest);
+    let derivation = verified_derivation(&entry).context("The approved route is unavailable")?;
     entry.publication = Some(
         json!({"kind":"public","reference":reference,"tag_matches":true,
-        "recipient":{"command":"ato run","reference":reference,"api_url":api_url}}),
+        "recipient":public_recipient(&reference, api_url, derivation)}),
     );
     entry.phase = Phase::Published;
     entry.issue = None;
