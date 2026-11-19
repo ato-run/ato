@@ -104,13 +104,12 @@ pub fn run_with(
         eprintln!("[sandbox-exec] PR_SET_NO_NEW_PRIVS failed: {error}");
     }
 
-    if is_sandbox_supported() {
-        let policy = read_policy(policy_path)?;
-        // Landlock is defence in depth on top of the bubblewrap namespace and
-        // bind mounts, which are already in force and are what actually
-        // contains the workload. A kernel that cannot apply it is not a reason
-        // to fail the Run — but it IS recorded, so "namespace-only" is never
-        // silently reported as fully sandboxed.
+    let policy = read_policy(policy_path)?;
+    if !policy.allow_network || is_sandbox_supported() {
+        // Bubblewrap provides the namespace and mount boundary. A policy
+        // requiring network restrictions also needs Landlock to fully apply
+        // them. Attempt enforcement even when the capability probe fails, so
+        // an unavailable Landlock cannot turn that policy into a fallback.
         match apply_sandbox(&policy) {
             Ok(applied) if !policy.allow_network && !applied.fully_enforced => {
                 return Err(anyhow!(
