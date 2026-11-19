@@ -49,6 +49,8 @@ pub(super) struct Attempt {
     runtime_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     runtime_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    oci: Option<OciEvidence>,
     verdict: Verdict,
     pub(super) cleanup_confirmed: bool,
     execution: AttemptRecordState,
@@ -72,6 +74,14 @@ struct Condition {
 struct ObservedHttp {
     status: u16,
     body_sha256: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OciEvidence {
+    platform: String,
+    surface_image: String,
+    service_images: BTreeMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -208,6 +218,7 @@ impl Attempt {
             host: host.to_owned(),
             runtime_id: "local".into(),
             runtime_version: None,
+            oci: None,
             verdict: Verdict::Inconclusive,
             cleanup_confirmed: true,
             execution: AttemptRecordState::NotStarted,
@@ -476,6 +487,17 @@ fn verify_job(store: &Store, id: &str, directory: &Path, cancelled: &AtomicBool)
                     .and_then(|execution| execution.runtime_version.as_ref())
                     .filter(|value| super::limited_text(value, 128))
                     .cloned();
+                recorded.oci = receipt.execution.as_ref().and_then(|execution| {
+                    Some(OciEvidence {
+                        platform: execution.platform.clone()?,
+                        surface_image: execution.image.clone()?,
+                        service_images: execution
+                            .services
+                            .iter()
+                            .map(|service| (service.name.clone(), service.image.clone()))
+                            .collect(),
+                    })
+                });
                 recorded.mechanical = receipt
                     .observations
                     .iter()

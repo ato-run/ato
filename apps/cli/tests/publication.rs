@@ -398,3 +398,43 @@ fn unmanifested_python_routes_share_one_frozen_contract() {
     request["process_routes"][0]["script"] = json!("../external.py");
     assert_eq!(client.call("publication_prepare", request)["isError"], true);
 }
+
+#[test]
+fn publication_oci_archives_are_explicit_workspace_inputs() {
+    let workspace = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let source = workspace.path().join("site");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("index.html"), "<h1>Static test</h1>").unwrap();
+    fs::write(source.join("image.tar"), b"not an OCI image").unwrap();
+    let outside_archive = outside.path().join("image.tar");
+    fs::copy(source.join("image.tar"), &outside_archive).unwrap();
+    fs::copy(source.join("image.tar"), workspace.path().join("image.tar")).unwrap();
+    let mut client = Client::connect(home.path(), workspace.path());
+    let image = format!("docker.io/tester/image@sha256:{}", "a".repeat(64));
+    let mut request = json!({
+        "source":"site", "destination":scope(),
+        "http_checks":[{"id":"root","path":"/","status":200}],
+        "oci_archives":[{"image":image,"path":outside_archive}]
+    });
+    let rejected = client.call("publication_prepare", request.clone());
+    assert_eq!(rejected["isError"], true);
+    assert_eq!(
+        rejected["structuredContent"]["error"],
+        "The OCI archive must be a file inside the authorized workspace"
+    );
+    request["oci_archives"][0]["path"] = json!("site/image.tar");
+    let rejected = client.call("publication_prepare", request.clone());
+    assert_eq!(
+        rejected["structuredContent"]["error"],
+        "Place OCI archives beside the source directory, outside the captured source tree"
+    );
+    fs::remove_file(source.join("image.tar")).unwrap();
+    request["oci_archives"][0]["path"] = json!("image.tar");
+    let rejected = client.call("publication_prepare", request);
+    assert_eq!(
+        rejected["structuredContent"]["error"],
+        "The supplied OCI archive must name a pinned image declared by the artifact"
+    );
+}

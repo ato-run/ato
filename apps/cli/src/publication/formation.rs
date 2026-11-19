@@ -1,17 +1,122 @@
 //! Compile agent-proposed, source-owned Python entrypoints without executing them.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Result, ensure};
 use ato_formation::authoring::EffectClass;
+use ato_objects::{PortableApplicationBundle, PortableDependencyProfile, PortableOciArchive};
 use ato_portable_application::{
     PYTHON_RUNTIME, PortableAuthoredBundleSpec, PortableDynamicRouteSpec, PortableExecutionSpec,
-    PortableHttpRequirementSpec, PortableRealizationKind, build_dynamic_routes_bundle,
+    PortableHttpRequirementSpec, PortableRealizationKind, ValidatedPortableApplication,
+    build_dynamic_routes_bundle, oci_archive::verify_oci_archive, oci_images,
+    portability_export::repack_portable_dependencies_with_archives,
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 
-use super::{HttpCheck, limited_text};
+use super::{HttpCheck, MAX_ARTIFACT, limited_text, read_limited};
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct OciArchiveInput {
+    image: String,
+    path: PathBuf,
+}
+
+pub(super) fn resolve_oci_archives(
+    workspace: &Path,
+    source: &Path,
+    inputs: Vec<OciArchiveInput>,
+) -> Result<BTreeMap<String, PathBuf>> {
+    ensure!(inputs.len() <= 8, "Supply at most eight OCI archives");
+    let mut sources = BTreeMap::new();
+    for input in inputs {
+        let path = workspace
+            .join(input.path)
+            .canonicalize()
+            .map_err(|_| anyhow::anyhow!("Cannot open the requested OCI archive"))?;
+        ensure!(
+            path.starts_with(workspace) && path.is_file(),
+            "The OCI archive must be a file inside the authorized workspace"
+        );
+        ensure!(
+            !path.starts_with(source),
+            "Place OCI archives beside the source directory, outside the captured source tree"
+        );
+        ensure!(
+            sources.insert(input.image, path).is_none(),
+            "Supply one OCI archive per pinned image"
+        );
+    }
+    Ok(sources)
+}
+
+pub(super) fn embed_oci_archives(
+    bundle: &PortableApplicationBundle,
+    routes: &[ValidatedPortableApplication],
+    sources: BTreeMap<String, PathBuf>,
+) -> Result<Vec<u8>> {
+    ensure!(
+        bundle
+            .portability
+            .as_ref()
+            .is_none_or(|transport| transport.external_objects.is_empty()),
+        "Embed external dependency objects before preparing an offline OCI publication"
+    );
+    let mut expected = BTreeMap::new();
+    for (image, platform) in routes.iter().flat_map(oci_images) {
+        if let Some(previous) = expected.insert(image, platform.clone()) {
+            ensure!(
+                previous == platform,
+                "Each OCI manifest digest must identify a single platform"
+            );
+        }
+    }
+    let mut archives: BTreeMap<_, _> = bundle
+        .portability
+        .iter()
+        .flat_map(|transport| transport.oci_archives.iter())
+        .map(|archive| (archive.image.clone(), archive.clone()))
+        .collect();
+    let mut remaining = MAX_ARTIFACT * 3 / 4;
+    for (image, path) in sources {
+        let platform = expected.get(&image).ok_or_else(|| {
+            anyhow::anyhow!(
+                "The supplied OCI archive must name a pinned image declared by the artifact"
+            )
+        })?;
+        let archive_bytes = read_limited(std::fs::File::open(path)?, remaining)?;
+        remaining -= archive_bytes.len() as u64;
+        let archive = PortableOciArchive {
+            image: image.clone(),
+            platform: platform.clone(),
+            bytes: STANDARD.encode(archive_bytes),
+        };
+        verify_oci_archive(&archive).map_err(|_| {
+            anyhow::anyhow!(
+                "The OCI archive does not match the declared manifest, platform, and layer closure"
+            )
+        })?;
+        archives.insert(image, archive);
+    }
+    ensure!(
+        expected.keys().all(|image| archives.contains_key(image)),
+        "Supply a verified archive for every pinned OCI image declared by the artifact"
+    );
+    let archives: Vec<_> = archives.into_values().collect();
+    let (bytes, _) = repack_portable_dependencies_with_archives(
+        bundle,
+        PortableDependencyProfile::Offline,
+        &BTreeMap::new(),
+        &archives,
+    )?;
+    ensure!(
+        bytes.len() as u64 <= MAX_ARTIFACT,
+        "This publication workflow supports bundles up to 8 MiB"
+    );
+    Ok(bytes)
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

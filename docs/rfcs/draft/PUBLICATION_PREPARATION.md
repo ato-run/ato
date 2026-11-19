@@ -21,6 +21,14 @@ alternative route changes the artifact and its declared Derivations while
 retaining K. A bundle or authored source retains its declared Contract and
 routes. A proposed HTTP check on those targets must already be declared
 exactly or is reported as unsupported.
+An authored `ato.capsule/2` can define a single OCI container or an OCI
+service group. Supply `oci_archives` as image-reference and path pairs
+within the authorized workspace. Keep the archives beside the source tree.
+Each archive must match the pinned manifest, platform, and complete config
+and layer graph. The compiler embeds the verified archives before freezing
+the final artifact. Repacking preserves the original K and D. It creates
+a distinct transport digest, so the repacked artifact gets its own
+verification and approval. Preparation needs no registry access.
 An optional Browser Contract v0 is fixed before execution, with the effective
 Contract referring to the original portable Contract and the browser condition.
 Unrecognized required checks prevent approval.
@@ -132,14 +140,25 @@ service's advertised identity and depends on that service's integrity.
 This lane accepts self-contained portable bundles and portable authoring
 manifests and can form Static Web and pinned single-process Python routes
 from source. Candidate exploration uses the available declared routes
-within the fixed time and attempt budget. Static Web and Linux Python
-processes have bounded verification launch paths. The Linux process route
-requires bubblewrap PID and mount namespaces plus Landlock network policy.
-The worker resolves and measures an installed interpreter before launch.
-The isolated process sees a read-only source and private Run storage. Its
-namespace stops with the owned supervisor. OCI, service groups, Native
-Desktop, and other dynamic routes require deadline-aware launch and verified
-teardown before this workflow can admit them. The frozen upload is limited
-to 8 MiB. The review receipt remains in the local preparation store.
-Hosting review receipts and admission enforcement in the Hub require server
-support. The existing low-level Hub commands retain their behavior.
+within the fixed time and attempt budget. Static Web, Linux Python
+processes, single OCI containers, and OCI service groups have bounded
+verification launch paths.
+
+The Linux process route requires bubblewrap PID and mount namespaces plus
+Landlock network policy. The worker resolves and measures an installed
+interpreter before launch. The isolated process sees a read-only source
+and private Run storage. Its namespace stops with the owned supervisor.
+
+OCI verification requires a self-contained offline archive for every image
+and a directly reachable native Linux Docker Engine. The attempt carries
+one command deadline across image loading, network creation, group launch,
+and readiness. A private Docker client targets the measured local socket.
+The containers share an internal network and the browser uses the declared
+HTTP surface. Cleanup has a separate budget. The worker leaves a
+preparation inconclusive if removal of owned containers or networks cannot
+be confirmed.
+
+Native process groups and Native Desktop still need bounded launch and
+verified teardown for this workflow. The frozen upload is limited to 8 MiB.
+The review receipt remains in the local preparation store. Hosting review
+receipts and admission enforcement in the Hub require server support.

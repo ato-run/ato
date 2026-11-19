@@ -176,6 +176,8 @@ struct Prepare {
     http_checks: Vec<HttpCheck>,
     #[serde(default)]
     process_routes: Vec<formation::ProcessRoute>,
+    #[serde(default)]
+    oci_archives: Vec<formation::OciArchiveInput>,
     browser_task: Option<String>,
     browser_interactive: Option<bool>,
     target_host: Option<String>,
@@ -225,6 +227,16 @@ struct DeclaredRoute {
     realization: String,
     platforms: Vec<PlatformDraft>,
     runtimes: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    services: Vec<DeclaredService>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeclaredService {
+    id: String,
+    runtimes: BTreeMap<String, String>,
+    ports: Vec<String>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -436,8 +448,9 @@ fn prepare(store: &Store, workspace: &Path, mut request: Prepare) -> Result<Valu
         "The requested source is outside the authorized workspace"
     );
 
+    let archives = formation::resolve_oci_archives(&workspace, &input, request.oci_archives)?;
     let temporary = tempfile::tempdir_in(store.root())?;
-    let (bytes, source_kind, source_ref) = if input.is_dir() {
+    let (mut bytes, source_kind, source_ref) = if input.is_dir() {
         let limits = SourceLimits::default();
         let mut file = ato_formation_worker::local::snapshot_directory_file(
             &input,
@@ -508,7 +521,11 @@ fn prepare(store: &Store, workspace: &Path, mut request: Prepare) -> Result<Valu
         bytes.len() as u64 <= MAX_ARTIFACT,
         "This publication workflow supports bundles up to 8 MiB"
     );
-    let formed = hub::validate_formed_bundle_document(&bytes)?;
+    let mut formed = hub::validate_formed_bundle_document(&bytes)?;
+    if !archives.is_empty() {
+        bytes = formation::embed_oci_archives(&formed.bundle, &formed.derivations, archives)?;
+        formed = hub::validate_formed_bundle_document(&bytes)?;
+    }
     let contract = &formed.derivations[0].contract;
     let mut blockers: Vec<_> = request
         .unsupported_required
@@ -581,6 +598,26 @@ fn prepare(store: &Store, workspace: &Path, mut request: Prepare) -> Result<Valu
             realization: route.realization.label().to_owned(),
             platforms: route.derivation.platforms.clone(),
             runtimes: route.derivation.runtimes.clone(),
+            services: if route.derivation.steps.len() > 1 {
+                route
+                    .derivation
+                    .steps
+                    .iter()
+                    .map(|step| DeclaredService {
+                        id: step.id.clone(),
+                        runtimes: step.runtimes.clone(),
+                        ports: route
+                            .derivation
+                            .ports
+                            .iter()
+                            .filter(|port| port.from == step.id)
+                            .map(|port| port.id.clone())
+                            .collect(),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
         })
         .collect();
     let checks = contract
