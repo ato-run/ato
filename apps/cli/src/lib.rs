@@ -104,7 +104,8 @@ use ato_local_execution::{
 #[command(
     name = "ato",
     version,
-    about = "Author, seal, transport, and resume Capsules"
+    about = "Run, create, and share Capsule applications",
+    long_about = "Run, create, and share Capsule applications.\n\nTry an app:       ato run ./application.capsule\nInstall locally:  ato app install ./application.capsule\nBuild from HTML:  ato form ./site --out ./formed\nShare a bundle:   ato hub push ./application.capsule --hub-url <URL>"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -113,61 +114,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Create C0 and start recording an authored Capsule.
-    Init(InitArgs),
-    /// Continue a branch or create a new future from a historical Record.
-    Resume(ResumeArgs),
-    /// Quiesce the active Run and atomically seal its branch head.
-    Stop { capsule: String },
-    /// Materialize one selected point into a portable .capsule bundle.
-    Encap(EncapArgs),
-    /// Compile an ato.capsule/2 source directory into a portable Application.
-    Pack(PackArgs),
-    /// Experimental: compile an ato.capsule/1 route that declares a native
-    /// Terminal or Pixel Surface into a portable wire v3 `.capsule` bundle.
-    #[command(name = "__native-bundle", hide = true)]
-    NativeBundle(NativeBundleArgs),
-    /// Experimental: compile an ato.capsule/1 route that declares a browser
-    /// (Static Web) Surface into a portable wire v3 `.capsule` bundle from the
-    /// existing source tree, without running a build.
-    #[command(name = "__static-bundle", hide = true)]
-    StaticBundle(StaticBundleArgs),
-    /// Consume a portable .capsule ephemerally.
+    /// Try a local or Hub Capsule in a temporary Run.
+    #[command(
+        after_long_help = "Example: ato run ./application.capsule\nFor a local installation you can stop and restart, use `ato app install`."
+    )]
     Run(RunArgs),
-    /// Derive and verify a candidate Derivation against an existing .capsule's
-    /// frozen Contract K. Writes local candidate artifacts; never publishes.
-    Reform(ReformArgs),
-    /// Import immutable model objects into this host's verified cache.
-    ModelSet {
-        #[command(subcommand)]
-        command: model_cache::ModelSetCommands,
-    },
-    /// Serve a local MLX model as the System One generation endpoint.
-    Llm {
-        #[command(subcommand)]
-        command: LlmCommands,
-    },
-    /// Import and operate a durable local portable Application Instance.
+    /// Install apps locally and list, start, or stop their Instances.
+    #[command(
+        after_long_help = "Install: ato app install ./application.capsule\nFind the Instance ID: ato app list\nRestart it: ato app start <INSTANCE>"
+    )]
     App {
         #[command(subcommand)]
         command: AppCommands,
-    },
-    /// Preview dependency size and guarantees before a portable export.
-    ExportPlan(ExportPlanArgs),
-    /// Repack an existing portable application without changing K or D.
-    Export(ExportArgs),
-    /// Authenticate this CLI with an Ato API using the browser device flow.
-    Login(LoginArgs),
-    /// Upload a content-addressed Capsule object graph.
-    Upload(UploadArgs),
-    /// Distribute a formed `.capsule` through a capsulehub coordinator, or
-    /// retrieve one from a shared link.
-    ///
-    /// The coordinator is a blind ciphertext store: it never sees the capsule
-    /// contents or the link key. Validation happens here, on the client.
-    Hub {
-        #[command(subcommand)]
-        command: hub::HubCommands,
     },
     /// Build and verify an application from a source directory.
     #[command(
@@ -182,6 +140,60 @@ enum Commands {
         #[arg(long)]
         no_open: bool,
     },
+    /// Share encrypted links or publish apps to the public Hub.
+    #[command(
+        after_long_help = "`push` encrypts the bundle locally and prints a link. The recipient uses `pull` to get the file.\n`publish` makes the bundle publicly discoverable under capsules/<owner>/<name> using an Ato login."
+    )]
+    Hub {
+        #[command(subcommand)]
+        command: hub::HubCommands,
+    },
+    /// Initialize a directory with an existing capsule.toml and start recording.
+    #[command(
+        after_long_help = "In capsule.toml, set schema = 1 and declare your process and adapters.\nInitialize without starting: ato init ./project --initial-only\nStart the initialized project: ato resume ./project"
+    )]
+    Init(InitArgs),
+    /// Continue a branch or create a new future from a historical Record.
+    Resume(ResumeArgs),
+    /// Stop an authored project's Run and save its branch head.
+    Stop {
+        /// Path to a project directory initialized by `ato init`.
+        capsule: String,
+    },
+    /// Materialize one selected point into a portable .capsule bundle.
+    Encap(EncapArgs),
+    /// Compile an ato.capsule/2 source directory into a portable Application.
+    Pack(PackArgs),
+    /// Experimental: compile an ato.capsule/1 route that declares a native
+    /// Terminal or Pixel Surface into a portable wire v3 `.capsule` bundle.
+    #[command(name = "__native-bundle", hide = true)]
+    NativeBundle(NativeBundleArgs),
+    /// Experimental: compile an ato.capsule/1 route that declares a browser
+    /// (Static Web) Surface into a portable wire v3 `.capsule` bundle from the
+    /// existing source tree, without running a build.
+    #[command(name = "__static-bundle", hide = true)]
+    StaticBundle(StaticBundleArgs),
+    /// Derive and verify a candidate Derivation against an existing .capsule's
+    /// frozen Contract K. Writes local candidate artifacts; never publishes.
+    Reform(ReformArgs),
+    /// Import immutable model objects into this host's verified cache.
+    ModelSet {
+        #[command(subcommand)]
+        command: model_cache::ModelSetCommands,
+    },
+    /// Serve a local MLX model as the System One generation endpoint.
+    Llm {
+        #[command(subcommand)]
+        command: LlmCommands,
+    },
+    /// Preview dependency size and guarantees before a portable export.
+    ExportPlan(ExportPlanArgs),
+    /// Repack an existing portable application without changing K or D.
+    Export(ExportArgs),
+    /// Authenticate this CLI with an Ato API using the browser device flow.
+    Login(LoginArgs),
+    /// Upload an authored project's object graph to the Ato API.
+    Upload(UploadArgs),
     /// Read and write DataResources on a Coordinator (hosted API or selfhost).
     Data {
         #[command(subcommand)]
@@ -193,6 +205,7 @@ enum Commands {
         command: workspace::WorkspaceCommand,
     },
     /// Inspect repository execution evidence without building or launching it.
+    #[command(display_order = 90)]
     FormInspect {
         path: PathBuf,
         /// Optional canonical D JSON, inspected without changing or executing it.
@@ -202,15 +215,18 @@ enum Commands {
         #[arg(long, requires = "derivation")]
         contract: Option<PathBuf>,
     },
-    /// Inspect or supply scoped input to an existing Formation Search.
+    /// Automation: inspect or supply scoped input to an existing Formation Search.
+    #[command(display_order = 90)]
     FormInput(formation_input::InputArgs),
-    /// Produce bounded Formation proposals through a scoped Session bridge.
+    /// Automation: propose a route through a scoped Formation Session bridge.
+    #[command(display_order = 90)]
     FormSession(formation_session::SessionArgs),
-    /// Explicitly authorize a retained Source result for functional verification.
+    /// Automation: authorize a retained Formation result for functional verification.
+    #[command(display_order = 90)]
     FormVerify(formation_verify::VerifyArgs),
     /// Take part in the Runtime Network: advertise this host's execution
     /// environments and run the Formation attempts addressed to it.
-    #[command(subcommand)]
+    #[command(subcommand, display_order = 90)]
     RuntimeNetwork(RuntimeNetworkCommand),
     /// Report this binary's build identity (version, commit, profile).
     ///
@@ -344,16 +360,20 @@ struct InitArgs {
 
 #[derive(Debug, Args)]
 struct ResumeArgs {
+    /// Project directory, optionally with @BRANCH or @BRANCH#RECORD. Defaults to main.
     selector: String,
+    /// Continue from the selected point on a new named branch.
     #[arg(long)]
     branch: Option<String>,
-    #[arg(long = "bind", value_parser = parse_binding)]
+    #[arg(long = "bind", value_name = "BINDING_ID=VALUE", value_parser = parse_binding)]
     bindings: Vec<(String, String)>,
 }
 
 #[derive(Debug, Args)]
 struct EncapArgs {
+    /// Project directory, optionally with @BRANCH or @BRANCH#RECORD. Defaults to main.
     selector: String,
+    /// Include materialization from this materializer ID (repeatable). Defaults to the project's encap configuration.
     #[arg(long = "materialize")]
     materializers: Vec<String>,
     #[arg(short, long, default_value = "computation.capsule")]
@@ -362,6 +382,7 @@ struct EncapArgs {
 
 #[derive(Debug, Args)]
 struct PackArgs {
+    /// Source directory with an ato.capsule/2 capsule.toml declaring the app and its routes.
     #[arg(default_value = ".")]
     source: PathBuf,
     #[arg(short, long, default_value = "application.capsule")]
@@ -379,12 +400,12 @@ struct RunArgs {
     /// it either asks on a terminal or refuses with exit 2.
     #[arg(long)]
     derivation: Option<String>,
-    /// Print every declared Derivation as JSON and exit without running one.
-    ///
-    /// The document is built from the same validation and host facts a Run
-    /// uses, so a tool that shows the choice does not reimplement it.
+    /// List declared routes and whether this host can run them, then exit.
     #[arg(long)]
     list_derivations: bool,
+    /// Emit the route list as JSON, including on a terminal.
+    #[arg(long, requires = "list_derivations")]
+    json: bool,
     /// Accept the selected Derivation's declared permissions without the
     /// interactive confirmation.
     ///
@@ -392,9 +413,10 @@ struct RunArgs {
     /// run.
     #[arg(long)]
     accept_permissions: bool,
-    #[arg(long = "bind", value_parser = parse_binding)]
+    /// Set a connection value for this Run, using a Binding ID declared by the app.
+    #[arg(long = "bind", value_name = "BINDING_ID=VALUE", value_parser = parse_binding)]
     bindings: Vec<(String, String)>,
-    /// Verify the local realization without opening a browser, then exit.
+    /// Verify the temporary Run, stop it and exit without opening a browser.
     #[arg(long)]
     no_open: bool,
     /// Write the shared Contract verification receipt as canonical JSON.
@@ -542,6 +564,7 @@ struct PortableInstanceWorkerArgs {
 
 #[derive(Debug, Args)]
 struct ExportPlanArgs {
+    /// Local portable application .capsule file to plan an export for.
     capsule: PathBuf,
     #[arg(long, value_enum, default_value_t = PortableExportProfile::Cached)]
     portability: PortableExportProfile,
@@ -554,6 +577,7 @@ struct ExportPlanArgs {
 
 #[derive(Debug, Args)]
 struct ExportArgs {
+    /// Local portable application .capsule file to repack.
     capsule: PathBuf,
     #[arg(long, value_enum)]
     portability: PortableExportProfile,
@@ -588,7 +612,9 @@ struct PortablePeerShimArgs {
 
 #[derive(Debug, Args)]
 struct UploadArgs {
+    /// Initialized project directory, optionally with @BRANCH or @BRANCH#RECORD.
     selector: String,
+    /// Include this materializer ID (repeatable).
     #[arg(long = "materialize")]
     materializers: Vec<String>,
     #[arg(long, env = "ATO_API_URL")]
@@ -598,6 +624,7 @@ struct UploadArgs {
     auth_token: Option<String>,
     #[arg(long, value_enum, default_value = "private")]
     visibility: VisibilityPolicy,
+    /// Reuse this key when retrying the same upload request.
     #[arg(long)]
     idempotency_key: Option<String>,
     #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u8).range(1..=32))]
@@ -900,7 +927,25 @@ pub fn run() -> Result<()> {
     if argv.get(1).is_some_and(|arg| arg == "sandbox-exec") {
         return ato_formation_worker::sandbox_exec::sandbox_exec(&argv[2..]);
     }
-    match Cli::parse().command {
+    let cli = Cli::try_parse_from(argv).unwrap_or_else(|mut error| {
+        use clap::error::{ContextKind, ContextValue};
+
+        // Internal re-entry commands use the __ prefix. Clap can suggest
+        // them even when they are hidden from help.
+        if let Some(ContextValue::Strings(mut suggestions)) =
+            error.remove(ContextKind::SuggestedSubcommand)
+        {
+            suggestions.retain(|name| !name.starts_with("__"));
+            if !suggestions.is_empty() {
+                error.insert(
+                    ContextKind::SuggestedSubcommand,
+                    ContextValue::Strings(suggestions),
+                );
+            }
+        }
+        error.exit()
+    });
+    match cli.command {
         Commands::Version { json } => version(json),
         Commands::Init(args) => init(args),
         Commands::Resume(args) => resume(args),
@@ -1080,7 +1125,19 @@ fn source_oci_acquire_base(args: SourceOciAcquireBaseArgs) -> Result<()> {
 }
 
 fn pack(args: PackArgs) -> Result<()> {
-    let (bytes, bundle) = build_authored_bundle_v2(&args.source).with_context(|| {
+    let manifest = args.source.join("capsule.toml");
+    let compiled = build_authored_bundle_v2(&args.source);
+    if let Err(ato_portable_application::PortableApplicationError::Io { path, source }) = &compiled
+        && path == &manifest
+        && source.kind() == std::io::ErrorKind::NotFound
+    {
+        bail!(
+            "Missing {}. Add an ato.capsule/2 manifest declaring the app and its routes. For a static site with index.html, try `ato form {}`",
+            manifest.display(),
+            display_path_argument(&args.source)
+        );
+    }
+    let (bytes, bundle) = compiled.with_context(|| {
         format!(
             "compile portable Application from {}",
             args.source.display()
@@ -2114,7 +2171,30 @@ fn load_run_record_frontier(
     ))
 }
 
-fn run_capsule(mut args: RunArgs) -> Result<()> {
+fn read_local_bundle(path: &Path, require_capsule_extension: bool) -> Result<Vec<u8>> {
+    let input = path.display();
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            bail!("Capsule file does not exist: {input}. Check the path and try again");
+        }
+        Err(error) => return Err(error).with_context(|| format!("read Capsule file {input}")),
+    };
+    if metadata.is_dir() {
+        bail!(
+            "{input} is a directory. Pass a portable .capsule file. To preview a static artifact produced by `ato form`, use `ato form-preview`"
+        );
+    }
+    if !metadata.is_file() {
+        bail!("{input} is not a regular file. Pass a portable .capsule file");
+    }
+    if require_capsule_extension && path.extension().is_none_or(|value| value != "capsule") {
+        bail!("{input} does not have a .capsule extension. Pass a portable .capsule file");
+    }
+    fs::read(path).with_context(|| format!("read Capsule file {input}"))
+}
+
+fn run_capsule(args: RunArgs) -> Result<()> {
     // `capsules/<owner>/<name>[:tag|@digest]` is a Hub reference only when no
     // such local path exists: an existing file keeps exactly its old meaning.
     let hub = hub_public::resolve_for_run(&args.capsule, &args.api_url, &ato_home()?)?;
@@ -2125,17 +2205,14 @@ fn run_capsule(mut args: RunArgs) -> Result<()> {
             resolved.reference.query(),
             resolved.digest
         );
-        args.capsule = resolved.bundle_path.clone();
     }
-    if args.capsule.extension().and_then(|value| value.to_str()) != Some("capsule")
-        || !args.capsule.is_file()
-    {
-        bail!(
-            "`ato run` accepts only a portable .capsule file; author repositories with `ato init`"
-        );
-    }
-    let bytes = fs::read(&args.capsule)?;
-    match decode_capsule_bundle_document(&bytes)? {
+    let local_path = hub
+        .as_ref()
+        .map_or(&args.capsule, |resolved| &resolved.bundle_path);
+    let bytes = read_local_bundle(local_path, true)?;
+    let bundle = decode_capsule_bundle_document(&bytes)
+        .with_context(|| format!("invalid .capsule file {}", local_path.display()))?;
+    match bundle {
         CapsuleBundleDocument::ComputationV2(bundle) => {
             if args.list_derivations {
                 // A computation-root wire v2 bundle declares no Derivation; the
@@ -2181,8 +2258,9 @@ fn install_local_application(args: AppInstallArgs) -> Result<()> {
     let path = hub
         .as_ref()
         .map_or(&args.capsule, |resolved| &resolved.bundle_path);
-    let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let bytes = read_local_bundle(path, false)?;
     let bundle = portable_export_bundle(&bytes)?;
+    check_requested_derivation(&bundle, args.derivation.as_deref())?;
     let candidates =
         derivation_selection::candidates(&bundle, &bundle_sha256(&bytes), &home.join("runs"))?;
     let selected = match derivation_selection::resolve_choice(
@@ -2265,13 +2343,7 @@ fn install_local_application(args: AppInstallArgs) -> Result<()> {
 }
 
 fn import_local_application(args: AppImportArgs) -> Result<()> {
-    if args.capsule.extension().and_then(|value| value.to_str()) != Some("capsule")
-        || !args.capsule.is_file()
-    {
-        bail!("`ato app import` accepts only a portable .capsule file");
-    }
-    let bytes =
-        fs::read(&args.capsule).with_context(|| format!("read {}", args.capsule.display()))?;
+    let bytes = read_local_bundle(&args.capsule, true)?;
     let approval = if args.approve_state_migration {
         StateMigrationApproval::granted()
     } else {
@@ -3307,6 +3379,24 @@ fn confirm_permissions(candidate: &DerivationCandidate) -> Result<()> {
     }
 }
 
+fn check_requested_derivation(
+    bundle: &PortableApplicationBundle,
+    requested: Option<&str>,
+) -> Result<()> {
+    if let Some(requested) = requested
+        && !bundle
+            .index
+            .derivations
+            .iter()
+            .any(|reference| reference == requested)
+    {
+        bail!(
+            "selected derivation `{requested}` is not declared by this bundle. Use `ato run <CAPSULE> --list-derivations` with the same file or Hub reference to see the available routes"
+        );
+    }
+    Ok(())
+}
+
 fn run_portable_application(
     args: RunArgs,
     bundle_bytes: &[u8],
@@ -3322,9 +3412,16 @@ fn run_portable_application(
             &bundle_sha256(bundle_bytes),
             &admission_root,
         )?;
-        println!("{}", serde_json::to_string_pretty(&candidates)?);
+        if args.json || !std::io::stdout().is_terminal() {
+            println!("{}", serde_json::to_string_pretty(&candidates)?);
+        } else {
+            for line in derivation_selection::render_candidates(&candidates) {
+                println!("{line}");
+            }
+        }
         return Ok(());
     }
+    check_requested_derivation(&bundle, args.derivation.as_deref())?;
     #[cfg(unix)]
     let shutdown = Some({
         let flag = Arc::new(AtomicBool::new(false));
@@ -4827,6 +4924,7 @@ mod tests {
             capsule: PathBuf::from("."),
             derivation: None,
             list_derivations: false,
+            json: false,
             accept_permissions: false,
             bindings: Vec::new(),
             no_open: false,

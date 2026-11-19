@@ -600,7 +600,7 @@ fn step_network_token(network: StepNetwork) -> &'static str {
 /// would still fetch, and this host's measured verdict with its reasons.
 pub fn render_candidates(candidates: &DerivationCandidates) -> Vec<String> {
     let mut lines = vec![format!(
-        "Capsule {} declares {} derivations. Select one to run:",
+        "Capsule {} declares {} derivations:",
         candidates.bundle_sha256,
         candidates.derivations.len()
     )];
@@ -801,7 +801,7 @@ pub fn selection_required(candidates: &DerivationCandidates) -> anyhow::Error {
         code: ERR_SELECTION_REQUIRED,
         exit_code: EXIT_NEEDS_EXPLICIT_DECISION,
         message: format!(
-            "this portable Capsule declares {} derivations; select one with --derivation <sha256:...>; ato run never selects one implicitly:\n{}\nato run <capsule> --list-derivations prints the same candidates as JSON",
+            "this portable Capsule declares {} derivations; select one with --derivation <sha256:...>; ato run never selects one implicitly:\n{}\nUse `ato run <CAPSULE> --list-derivations` to review the same candidates or add `--json` for machine-readable output",
             candidates.derivations.len(),
             listed.join("\n")
         ),

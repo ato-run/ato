@@ -1144,3 +1144,23 @@ fn a_run_whose_contract_fails_keeps_nothing_running() {
         )]
     );
 }
+
+#[test]
+fn missing_capsule_path_is_reported_by_run_import_and_install() {
+    let root = tempfile::tempdir().unwrap();
+    let missing = root.path().join("does-not-exist.capsule");
+    for command in [&["run"][..], &["app", "import"], &["app", "install"]] {
+        let output = ato_with_home(root.path())
+            .args(command)
+            .arg(&missing)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("Capsule file does not exist")
+                && error.contains(missing.to_str().unwrap()),
+            "{error}"
+        );
+    }
+}
