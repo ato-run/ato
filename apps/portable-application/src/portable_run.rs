@@ -261,7 +261,10 @@ pub fn execution_requirements_for(
         PortableRealizationKind::LocalProcess | PortableRealizationKind::ProcessServiceGroup => {
             ato_host_facts::ExecutionRequirements::process()
         }
-        PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup => {
+        PortableRealizationKind::OciContainer => {
+            ato_host_facts::ExecutionRequirements::single_container(route_platform(derivation))
+        }
+        PortableRealizationKind::OciServiceGroup => {
             ato_host_facts::ExecutionRequirements::container(route_platform(derivation))
         }
         PortableRealizationKind::NativeDesktop => {
@@ -346,6 +349,150 @@ fn state_delivered_by_path(state: &[ato_formation::authoring::BoundState]) -> bo
     cfg!(target_os = "macos") && declares_path_delivery(state)
 }
 
+/// Check the known host and local artifact requirements without realizing the route
+/// or needing any Binding values.
+fn check_compatibility(
+    route: &ValidatedPortableApplication,
+    runtime_root: &Path,
+    cache_root: &Path,
+    host: &ato_host_facts::HostFacts,
+) -> Option<AttemptFailure> {
+    let requirements = execution_requirements_for(route, runtime_root);
+    let status = ato_host_facts::execution_status(host, &requirements);
+    if status.state != ato_host_facts::CapabilityState::Advertised {
+        let reason = status
+            .reasons
+            .iter()
+            .find(|reason| !reason.code.is_warning())
+            .or_else(|| status.reasons.first());
+        let (code, detail) = match reason {
+            Some(reason) => (reason.code.as_str(), reason.message.clone()),
+            None => ("execution_unavailable", status.describe()),
+        };
+        return refused(
+            code,
+            format!(
+                "{} runtime admission failed on this host: {detail}",
+                route.realization.label()
+            ),
+        );
+    }
+    if route.realization == PortableRealizationKind::NativeDesktop {
+        if route.native.is_none() {
+            return refused(
+                "native_descriptor_missing",
+                "the selected native route carries no validated descriptor",
+            );
+        }
+        if declares_runtime_egress(&route.derivation.requirements) {
+            // Inbound loopback Ports are enforced by the Seatbelt profile;
+            // an arbitrary declared TCP destination is not. A mandatory
+            // policy that cannot be enforced before launch is a refusal,
+            // never a receipt entry.
+            return refused(
+                "native_egress_policy_unavailable",
+                "this native Adapter can enforce inbound loopback Ports only; the route                      declares TCP egress that would not be enforced",
+            );
+        }
+    }
+    if requirements.needs_container && host.connector_choice().is_none() {
+        return refused(
+            "oci_connector_unavailable",
+            format!(
+                "{} runtime admission failed: no connector reaches this daemon \
+                 (a remote daemon cannot receive this Run's workspace)",
+                route.realization.label()
+            ),
+        );
+    }
+    if let Some(abi) = route
+        .derivation
+        .requirements
+        .startup
+        .as_ref()
+        .and_then(|startup| startup.abi.as_ref())
+        && let Err(error) =
+            ato_runtime_attempt::launch::process_abi::check(&abi.glibc_min, &abi.glibcxx_min)
+    {
+        return refused("process_abi_unavailable", format!("{error:#}"));
+    }
+    if !route.model_sets.is_empty() {
+        let checked = resolve_model_inputs(&route.model_sets, cache_root, runtime_root, false);
+        if let Err(error) = checked {
+            return refused(
+                "model_set_unavailable",
+                format!("local Model Set admission failed: {error:#}"),
+            );
+        }
+    }
+    None
+}
+
+pub fn run_authorization(
+    route: &ValidatedPortableApplication,
+    consent: NativeSourceConsent,
+) -> ato_runtime_attempt::admission::EffectAuthorization<'_> {
+    use ato_runtime_attempt::admission::EffectAuthorization;
+    if consent == NativeSourceConsent::Approved {
+        EffectAuthorization::UserAuthorizedDeclaredRequirements {
+            derivation_ref: route.derivation_ref.as_str(),
+        }
+    } else {
+        EffectAuthorization::UserInvoked {
+            derivation_ref: route.derivation_ref.as_str(),
+        }
+    }
+}
+
+fn native_surface_binding(route: &ValidatedPortableApplication) -> Option<(&str, &str)> {
+    let surface = route.derivation.native_surface.as_ref()?;
+    Some((surface.surface.profile(), route.derivation_ref.as_str()))
+}
+
+/// Evaluate the same admission used at Run time before asking for Binding values.
+/// Run admission still checks these facts and inputs again before effects.
+pub fn preflight_local_run(
+    route: &ValidatedPortableApplication,
+    runtime_root: &Path,
+    cache_root: &Path,
+    host: &ato_host_facts::HostFacts,
+    consent: NativeSourceConsent,
+) -> Option<AttemptFailure> {
+    let failure = ato_runtime_attempt::admission::admit_with_model_delivery(
+        &route.attempt_spec(None),
+        run_authorization(route, consent),
+        None,
+        route.realization == PortableRealizationKind::LocalProcess,
+        native_surface_binding(route),
+    )
+    .or_else(|| check_compatibility(route, runtime_root, cache_root, host));
+    if failure.is_some() {
+        return failure;
+    }
+    let mut python_versions = BTreeSet::new();
+    match route.realization {
+        PortableRealizationKind::LocalProcess => {
+            python_versions.extend(route.derivation.runtimes.get(PYTHON_RUNTIME));
+        }
+        PortableRealizationKind::ProcessServiceGroup => {
+            python_versions.extend(
+                route
+                    .derivation
+                    .steps
+                    .iter()
+                    .filter_map(|step| step.runtimes.get(PYTHON_RUNTIME)),
+            );
+        }
+        _ => {}
+    }
+    for version in python_versions {
+        if let Err(error) = resolve_pinned_python(version) {
+            return refused("python_runtime_unavailable", format!("{error:#}"));
+        }
+    }
+    None
+}
+
 impl CandidateRealizer for PortableBundleExecutor<'_> {
     fn delivers_model_sets(&self) -> bool {
         self.validated.realization == PortableRealizationKind::LocalProcess
@@ -358,115 +505,30 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
     /// can own; this is that statement, and admit() still establishes the
     /// physical availability and boundaries before anything starts.
     fn native_surface_binding(&self) -> Option<(&str, &str)> {
-        let surface = self.validated.derivation.native_surface.as_ref()?;
-        Some((
-            surface.surface.profile(),
-            self.validated.derivation_ref.as_str(),
-        ))
+        native_surface_binding(self.validated)
     }
 
     fn admit(&self, _profile: &RuntimeProfile) -> Option<AttemptFailure> {
-        if !self.validated.model_sets.is_empty() {
-            let checked = resolve_model_inputs(
-                &self.validated.model_sets,
-                self.context.cache_root,
-                self.runtime_root,
-                false,
-            );
-            if let Err(error) = checked {
-                return refused(
-                    "model_set_unavailable",
-                    format!("local Model Set admission failed: {error:#}"),
-                );
-            }
-        }
-        // The capability question is answered from observed host facts, not
-        // from the OS this binary was compiled for: a container route can run
-        // on a VM-backed or rootless daemon through the Run's connector, and
-        // the facts are what decide which connector that is.
-        let requirements = self.execution_requirements();
         let probed;
         let host = match self.context.host {
             Some(host) => host,
             None => {
-                probed = ato_host_facts::HostFacts::probe(std::slice::from_ref(&requirements));
+                probed = ato_host_facts::HostFacts::probe(std::slice::from_ref(
+                    &self.execution_requirements(),
+                ));
                 &probed
             }
         };
-        let status = ato_host_facts::execution_status(host, &requirements);
-        if status.state != ato_host_facts::CapabilityState::Advertised {
-            let reason = status
-                .reasons
-                .iter()
-                .find(|reason| !reason.code.is_warning())
-                .or_else(|| status.reasons.first());
-            let (code, detail) = match reason {
-                Some(reason) => (reason.code.as_str(), reason.message.clone()),
-                None => ("execution_unavailable", status.describe()),
-            };
-            return refused(
-                code,
-                format!(
-                    "{} runtime admission failed on this host: {detail}",
-                    self.validated.realization.label()
-                ),
-            );
-        }
-        if self.validated.realization == PortableRealizationKind::OciContainer
-            && host.connector_choice() == Some(ato_host_facts::ConnectorChoice::Relay)
-        {
-            // A single container has no group network for a relay to join, so
-            // this Run has no materialization for it. Refusing here is honest;
-            // silently trying the bridge would fail later, less clearly.
-            return refused(
-                "oci_container_relay_unsupported",
-                "this OCI container route needs a relay on this host (a VM-backed or rootless \
-                 daemon), which this Run does not implement for a single container; a service \
-                 group route runs through the relay, and a native Linux daemon runs directly",
-            );
-        }
-        if self.validated.realization == PortableRealizationKind::NativeDesktop {
-            if self.validated.native.is_none() {
-                return refused(
-                    "native_descriptor_missing",
-                    "the selected native route carries no validated descriptor",
-                );
-            }
-            if declares_runtime_egress(&self.validated.derivation.requirements) {
-                // Inbound loopback Ports are enforced by the Seatbelt profile;
-                // an arbitrary declared TCP destination is not. A mandatory
-                // policy that cannot be enforced before launch is a refusal,
-                // never a receipt entry.
-                return refused(
-                    "native_egress_policy_unavailable",
-                    "this native Adapter can enforce inbound loopback Ports only; the route                      declares TCP egress that would not be enforced",
-                );
-            }
-        }
-        if requirements.needs_container && host.connector_choice().is_none() {
-            return refused(
-                "oci_connector_unavailable",
-                format!(
-                    "{} runtime admission failed: no connector reaches this daemon \
-                     (a remote daemon cannot receive this Run's workspace)",
-                    self.validated.realization.label()
-                ),
-            );
-        }
-        None
+        check_compatibility(
+            self.validated,
+            self.runtime_root,
+            self.context.cache_root,
+            host,
+        )
     }
 
     fn realize(&self, _attempt_id: &str, _attempt_root: &Path) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
-        if let Some(abi) = route
-            .derivation
-            .requirements
-            .startup
-            .as_ref()
-            .and_then(|s| s.abi.as_ref())
-        {
-            ato_runtime_attempt::launch::process_abi::check(&abi.glibc_min, &abi.glibcxx_min)?;
-        }
         fs::create_dir_all(self.runtime_root)
             .with_context(|| format!("create {}", self.runtime_root.display()))?;
         let (hydrated, dependency_fetches) =
@@ -842,14 +904,8 @@ impl PortableBundleExecutor<'_> {
         // materialization is not implemented for it. Admission refuses that
         // combination first; this is the same decision, stated where the
         // container would have been started.
-        if host.connector_choice() == Some(ato_host_facts::ConnectorChoice::Relay) {
-            return Err(launch(
-                anyhow::anyhow!(
-                    "a single OCI container route needs a relay on this host, which this Run does \
-                     not implement; use a service group route or a native Linux daemon"
-                ),
-                &workspace,
-            ));
+        if let Some(refusal) = host.single_container_refusal() {
+            return Err(launch(anyhow::anyhow!(refusal.message), &workspace));
         }
         let step = &route.derivation.steps[0];
         let port = &route.derivation.ports[0];

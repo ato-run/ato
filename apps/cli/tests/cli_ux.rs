@@ -104,6 +104,90 @@ fn declared_connections_can_be_found_for_a_bundle_and_an_installed_app() {
     );
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn run_refuses_an_incompatible_container_before_requesting_bindings() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let manifest = fs::read_to_string(sample("portable-oci-startup-json").join("capsule.toml"))
+        .unwrap()
+        .replace(
+            "[contract]",
+            r#"[[binding]]
+id = "admin_password"
+protocol = "ato.secret@1"
+required = true
+
+[[binding]]
+id = "site_name"
+protocol = "ato.config@1"
+required = true
+
+[contract]"#,
+        );
+    fs::write(project.join("capsule.toml"), &manifest).unwrap();
+    fs::write(project.join("fixture.txt"), "a non-empty workspace").unwrap();
+    let bundle = root.path().join("test app.capsule");
+    let (bytes, _) = ato_portable_application::build_authored_bundle_v2(&project).unwrap();
+    fs::write(&bundle, bytes).unwrap();
+
+    let docker = root.path().join("docker");
+    fs::write(
+        &docker,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "context show") printf '%s\n' default ;;
+  "context inspect") printf '%s\n' 'unix:///var/run/docker.sock' ;;
+  "info --format")
+    printf '%s\n' '{"OSType":"linux","Architecture":"x86_64","OperatingSystem":"Test Linux","SecurityOptions":["name=rootless"]}'
+    ;;
+  *) printf '%s\n' "$1" >> "$ATO_TEST_DOCKER_MUTATIONS"; exit 1 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(docker, fs::Permissions::from_mode(0o700)).unwrap();
+    let home = root.path().join("home");
+    let mutations = root.path().join("docker-mutations");
+    let run = || {
+        let mut command = ato();
+        command
+            .env("PATH", root.path())
+            .env("ATO_HOME", &home)
+            .env("ATO_TEST_DOCKER_MUTATIONS", &mutations)
+            .env_remove("DOCKER_HOST")
+            .env_remove("DOCKER_CONTEXT")
+            .arg("run")
+            .arg(&bundle)
+            .arg("--no-open");
+        command
+    };
+    let output = run().output().unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("Docker Engine is running in rootless mode"),
+        "{error}"
+    );
+    assert!(error.contains("No containers were started"), "{error}");
+    assert!(error.contains("--list-derivations"), "{error}");
+    assert!(!error.contains("admin_password"), "{error}");
+    assert_eq!(fs::read_dir(home.join("cache")).unwrap().count(), 0);
+    let routes: Value = serde_json::from_str(&assert_success(
+        run()
+            .args(["--list-derivations", "--json"])
+            .output()
+            .unwrap(),
+    ))
+    .unwrap();
+    let route = &routes["derivations"][0];
+    assert_eq!(route["runnable"], false);
+    assert!(!mutations.exists());
+}
+
 #[test]
 fn hub_connection_failure_has_a_short_default_and_verbose_details() {
     let root = tempfile::tempdir().unwrap();

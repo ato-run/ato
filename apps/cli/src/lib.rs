@@ -17,6 +17,7 @@ mod mcp_stdio;
 mod model_cache;
 mod object_transport;
 mod portable_dependency;
+mod run_bindings;
 pub mod workspace;
 mod workspace_control;
 pub mod zip_store;
@@ -477,13 +478,18 @@ struct RunArgs {
     /// run.
     #[arg(long)]
     accept_permissions: bool,
-    /// Set a value for a declared runtime connection for this Run only.
+    /// Set a declared non-secret runtime input. Use --list-bindings to see IDs.
     ///
-    /// Use --list-bindings to see IDs and protocols. For example, --bind
-    /// database_url=https://db.example assigns an endpoint URL when the app
-    /// declares database_url. Values are runtime inputs and are not saved.
+    /// Example: --bind database_url=https://db.example. Unspecified required
+    /// inputs are prompted for on a terminal. Use the prompt or --bind-env for secrets.
     #[arg(long = "bind", value_name = "BINDING_ID=VALUE", value_parser = parse_binding)]
     bindings: Vec<(String, String)>,
+    /// Read a portable app's Binding value from an existing environment variable.
+    ///
+    /// Example: --bind-env admin_password=ATO_ADMIN_PASSWORD. Supply the
+    /// variable through your secret store or automation environment.
+    #[arg(long = "bind-env", value_name = "BINDING_ID=ENV_VAR", value_parser = run_bindings::parse_env)]
+    binding_env: Vec<(String, String)>,
     /// Verify the temporary Run, stop it and exit without opening a browser.
     #[arg(long, visible_alias = "verify-only")]
     no_open: bool,
@@ -1397,21 +1403,19 @@ fn required_environment(requirements: &ato_host_facts::ExecutionRequirements) ->
     )
 }
 
-/// Refuse a Hub-resolved Run before anything is executed when this host cannot
-/// run the selected Derivation.
+/// Refuse a portable Run before asking for Binding values when the host
+/// cannot run the selected Derivation.
 ///
 /// The decision is the existing `ato_host_facts` admission, never a Hub-side
-/// judgement, and the returned `HostFacts` is the measurement the Run attempt
-/// then uses, so the printed diagnosis and admission cannot disagree. A local
-/// (non-Hub) Run keeps its existing path unchanged.
-fn preflight_hub_route(
-    bundle: &PortableApplicationBundle,
-    derivation_ref: &str,
+/// judgement. The Run attempt uses the same measured `HostFacts`.
+fn preflight_portable_route(
+    validated: &ValidatedPortableApplication,
     runtime_root: &Path,
-    reference: &str,
+    args: &RunArgs,
+    hub: Option<&hub_public::ResolvedHubCapsule>,
+    routes: usize,
     detailed: bool,
 ) -> Result<ato_host_facts::HostFacts> {
-    let validated = validate_bundle_for_derivation(bundle, derivation_ref)?;
     if !detailed {
         eprintln!(
             "Checking {} ({}) on this machine…",
@@ -1419,34 +1423,64 @@ fn preflight_hub_route(
             validated.realization.label()
         );
     }
-    let requirements = ato_portable_application::portable_run::execution_requirements_for(
-        &validated,
-        runtime_root,
-    );
+    let requirements =
+        ato_portable_application::portable_run::execution_requirements_for(validated, runtime_root);
     let host = ato_host_facts::HostFacts::probe(std::slice::from_ref(&requirements));
     let status = ato_host_facts::execution_status(&host, &requirements);
     if status.state == ato_host_facts::CapabilityState::Advertised {
         return Ok(host);
     }
-    if !detailed {
+    let code = if hub.is_some() {
+        hub_public::ERR_CAPABILITY_UNAVAILABLE
+    } else {
+        derivation_selection::ERR_CAPABILITY_UNAVAILABLE
+    };
+    if detailed {
+        for line in route_capability_lines(
+            validated.derivation_ref.as_str(),
+            validated,
+            &requirements,
+            &host,
+        ) {
+            eprintln!("{line}");
+        }
+        eprintln!(
+            "capability required {}",
+            required_environment(&requirements)
+        );
+    }
+    if let Some(refusal) = status
+        .reasons
+        .iter()
+        .find(|reason| reason.code == ato_host_facts::ReasonCode::OciContainerRelayUnsupported)
+    {
+        let command = route_listing_command(&args.capsule, &args.api_url);
+        let next = if routes > 1 {
+            format!("Check for another route declared by the publisher: {command}")
+        } else {
+            format!("Check this bundle on the Linux machine before starting it: {command}")
+        };
         bail!(
-            "{}: {} did not start. {} For host details, retry with --verbose.",
-            hub_public::ERR_CAPABILITY_UNAVAILABLE,
+            "{code}: {} did not start. {} No containers were started by this command.\n{next}",
             validated.application.title,
+            refusal.message
+        );
+    }
+    if detailed {
+        let reference = hub.map_or_else(
+            || args.capsule.display().to_string(),
+            |resolved| resolved.reference.reference(),
+        );
+        bail!(
+            "{code}: {reference} cannot run {} on this host, so the Run was not started. {}",
+            validated.derivation_ref,
             admission_reasons(&status.reasons)
         );
     }
-    for line in route_capability_lines(derivation_ref, &validated, &requirements, &host) {
-        eprintln!("{line}");
-    }
-    eprintln!(
-        "capability required {}",
-        required_environment(&requirements)
-    );
     bail!(
-        "{}: {reference} cannot run {derivation_ref} on this host; required {}; the Run was not started",
-        hub_public::ERR_CAPABILITY_UNAVAILABLE,
-        required_environment(&requirements)
+        "{code}: {} did not start. {} For host details, retry with --verbose.",
+        validated.application.title,
+        admission_reasons(&status.reasons)
     )
 }
 
@@ -2000,7 +2034,7 @@ fn preview_formation(artifact: &Path, no_open: bool) -> Result<()> {
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         })
         .context("Use the unrenamed static artifact directory printed by `ato form`")?;
-    let stop = preview_shutdown_flag()?;
+    let stop = terminal_shutdown_flag()?;
     let cache = ato_home()?.join("cache");
     fs::create_dir_all(&cache)?;
     let scratch = tempfile::Builder::new()
@@ -2025,7 +2059,7 @@ fn preview_formation(artifact: &Path, no_open: bool) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn preview_shutdown_flag() -> Result<Arc<AtomicBool>> {
+fn terminal_shutdown_flag() -> Result<Arc<AtomicBool>> {
     let flag = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&flag))?;
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&flag))?;
@@ -2033,7 +2067,7 @@ fn preview_shutdown_flag() -> Result<Arc<AtomicBool>> {
 }
 
 #[cfg(windows)]
-fn preview_shutdown_flag() -> Result<&'static AtomicBool> {
+fn terminal_shutdown_flag() -> Result<&'static AtomicBool> {
     use windows::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler};
     use windows::core::BOOL;
 
@@ -2664,7 +2698,11 @@ fn start_local_instance(args: AppStartArgs) -> Result<()> {
     let bundle = portable_export_bundle(&bundle_bytes)?;
     let selected = validate_bundle_for_derivation(&bundle, &instance.selected_derivation_ref)?;
     if args.list_bindings {
-        return print_application_bindings(&selected.application, false);
+        return print_application_bindings(
+            &selected.application,
+            false,
+            "Supply a value for this Run with --bind BINDING_ID=VALUE.",
+        );
     }
     resolve_application_bindings(&selected.application, &bindings).with_context(|| {
         format!(
@@ -3160,7 +3198,6 @@ fn portable_instance_worker_claimed(
             bindings: Some(&launch.bindings),
             run_id: Some(&claimed.run_id),
             host_facts: None,
-            show_progress: false,
         },
         launch.allow_unsigned_native,
         if launch.approve_source_build {
@@ -3432,6 +3469,11 @@ fn portable_export_archives(
 }
 
 fn run_computation_bundle(args: RunArgs, bundle: CapsuleBundle) -> Result<()> {
+    if !args.binding_env.is_empty() {
+        bail!(
+            "--bind-env is available for portable applications. This authored computation bundle uses --bind BINDING_ID=VALUE"
+        );
+    }
     if args.no_open || args.verification_receipt.is_some() {
         bail!(
             "--no-open and --verification-receipt are available only for portable application v3 bundles"
@@ -3695,6 +3737,21 @@ fn confirm_permissions(candidate: &DerivationCandidate) -> Result<()> {
     }
 }
 
+fn route_listing_command(capsule: &Path, api_url: &str) -> String {
+    let input = display_path_argument(capsule);
+    let mut next = format!("ato run {input} --list-derivations");
+    if !capsule.exists()
+        && api_url != auth_device::DEFAULT_API_URL
+        && let Ok(mut url) = reqwest::Url::parse(api_url)
+        && url.set_username("").is_ok()
+        && url.set_password(None).is_ok()
+    {
+        let url = display_path_argument(Path::new(url.as_str()));
+        write!(next, " --api-url {url}").expect("write to String");
+    }
+    next
+}
+
 fn check_requested_derivation(
     bundle: &PortableApplicationBundle,
     requested: Option<&str>,
@@ -3708,17 +3765,7 @@ fn check_requested_derivation(
             .iter()
             .any(|reference| reference == requested)
     {
-        let input = display_path_argument(capsule);
-        let mut next = format!("ato run {input} --list-derivations");
-        if !capsule.exists()
-            && api_url != auth_device::DEFAULT_API_URL
-            && let Ok(mut url) = reqwest::Url::parse(api_url)
-            && url.set_username("").is_ok()
-            && url.set_password(None).is_ok()
-        {
-            let url = display_path_argument(Path::new(url.as_str()));
-            write!(next, " --api-url {url}").expect("write to String");
-        }
+        let next = route_listing_command(capsule, api_url);
         bail!(
             "selected derivation `{requested}` is not declared by this bundle.\nDeclared routes:\n  {}\nCheck which routes your machine can run: {next}",
             bundle.index.derivations.join("\n  ")
@@ -3730,6 +3777,7 @@ fn check_requested_derivation(
 fn print_application_bindings(
     application: &ato_portable_application::ValidatedApplication,
     json: bool,
+    input_help: &str,
 ) -> Result<()> {
     if json || !std::io::stdout().is_terminal() {
         println!("{}", serde_json::to_string_pretty(&application.bindings)?);
@@ -3745,7 +3793,7 @@ fn print_application_bindings(
             };
             println!("  {}  {}  {required}", binding.id, binding.protocol);
         }
-        println!("Supply a value for this Run with --bind BINDING_ID=VALUE.");
+        println!("{input_help}");
     }
     Ok(())
 }
@@ -3773,7 +3821,11 @@ fn run_portable_application(
                 .context("the Capsule declares no routes")?,
         };
         let application = validate_bundle_for_derivation(&bundle, route)?.application;
-        return print_application_bindings(&application, args.json);
+        return print_application_bindings(
+            &application,
+            args.json,
+            "Run the app to enter required values, or use --bind-env BINDING_ID=ENV_VAR in a script.",
+        );
     }
     if args.list_derivations {
         // Listing reads the same bytes a Run would and probes the same host
@@ -3804,16 +3856,6 @@ fn run_portable_application(
         &args.capsule,
         &args.api_url,
     )?;
-    #[cfg(unix)]
-    let shutdown = Some({
-        let flag = Arc::new(AtomicBool::new(false));
-        signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&flag))?;
-        signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&flag))?;
-        flag
-    });
-    #[cfg(not(unix))]
-    let shutdown: Option<Arc<AtomicBool>> = None;
-    let bindings = runtime_binding_values(args.bindings)?;
     let choice =
         derivation_selection::resolve_choice(&bundle.index.derivations, args.derivation.as_deref());
     // A Run that has to ask which route to start asks before it prepares
@@ -3835,7 +3877,7 @@ fn run_portable_application(
     fs::create_dir_all(&cache)?;
     let runtime = tempfile::Builder::new()
         .prefix("ato-portable-run-")
-        .tempdir_in(cache)?;
+        .tempdir_in(&cache)?;
     // A bundle with more than one route is a choice. Every declared route is
     // projected against these same host facts, so the screen a person answers
     // and the admission the Run applies cannot disagree.
@@ -3862,39 +3904,26 @@ fn run_portable_application(
     // The selected route is admitted and its declared permissions are shown
     // before anything is realized. A route this host cannot run is refused by
     // name; no other declared route is ever tried instead.
-    if let Some(candidate) = candidates.as_ref().and_then(|candidates| {
+    let candidate = candidates.as_ref().and_then(|candidates| {
         candidates
             .derivations
             .iter()
             .find(|candidate| candidate.derivation_ref == selected_derivation)
-    }) {
-        if let Some(invalid) = &candidate.invalid {
-            bail!("{invalid}");
-        }
-        // A Hub Run keeps its existing preflight so the refusal code and the
-        // diagnosis stay the Hub's; a local bundle is admitted here.
-        if hub.is_none() && !candidate.runnable {
-            if !detailed {
-                let reasons = candidate
-                    .admission
-                    .as_ref()
-                    .map_or(&[][..], |admission| admission.reasons.as_slice());
-                bail!(
-                    "{}: {} did not start. {} For host details, retry with --verbose.",
-                    derivation_selection::ERR_CAPABILITY_UNAVAILABLE,
-                    candidate.display_name.as_deref().unwrap_or("The app"),
-                    admission_reasons(reasons)
-                );
-            }
-            for line in derivation_selection::candidate_capability_lines(candidate) {
-                eprintln!("{line}");
-            }
-            eprintln!("capability required {}", candidate.required_environment());
-            return Err(derivation_selection::capability_unavailable(
-                candidate,
-                &args.capsule.display().to_string(),
-            ));
-        }
+    });
+    if let Some(invalid) = candidate.and_then(|candidate| candidate.invalid.as_ref()) {
+        bail!("{invalid}");
+    }
+    use ato_portable_application::portable_run::{NativeSourceConsent, preflight_local_run};
+    let validated = validate_bundle_for_derivation(&bundle, &selected_derivation)?;
+    let host = preflight_portable_route(
+        &validated,
+        runtime.path(),
+        &args,
+        hub,
+        bundle.index.derivations.len(),
+        detailed,
+    )?;
+    if let Some(candidate) = candidate {
         if detailed {
             for line in derivation_selection::render_permissions(candidate) {
                 eprintln!("{line}");
@@ -3913,58 +3942,54 @@ fn run_portable_application(
             confirm_permissions(candidate)?;
         }
     }
-    // A Hub capsule is measured before its scratch becomes a Run: the same
-    // facts the common admission uses are what the refusal is based on, and
-    // nothing is realized on a host that cannot run the selected Derivation.
-    let host_facts = match hub {
-        Some(resolved) => Some(preflight_hub_route(
-            &bundle,
-            &selected_derivation,
-            runtime.path(),
-            &resolved.reference.reference(),
-            detailed,
-        )?),
-        None => None,
+    let native_source_consent = if args.allow_native_source_build {
+        NativeSourceConsent::Approved
+    } else if std::io::stdin().is_terminal() {
+        NativeSourceConsent::Denied
+    } else {
+        NativeSourceConsent::Unavailable
     };
+    if let Some(failure) = preflight_local_run(
+        &validated,
+        runtime.path(),
+        &cache,
+        &host,
+        native_source_consent,
+    ) {
+        bail!("the Run did not start: {}", failure.message);
+    }
+    let shutdown = terminal_shutdown_flag()?;
+    let cancelled: &AtomicBool = &shutdown;
+    let binding_environment = run_bindings::resolve(
+        &validated.application,
+        args.bindings,
+        args.binding_env,
+        cancelled,
+    )?;
+    if cancelled.load(Ordering::Relaxed) {
+        bail!("the Run was cancelled. No workload was started");
+    }
     let runtime_root = runtime.keep();
-    // A Run that fails verification publishes nothing: `--verification-receipt`
-    // names the receipt of a Run that was accepted. The attempt record (and,
-    // for a scenario, the transcript under the runtime scratch) is the failure
-    // evidence; writing a receipt here would make a refused Run look published.
-    let started = start_and_verify_portable_application(
+    if !detailed {
+        eprintln!("Starting and checking {}…", validated.application.title);
+    }
+    // Retain the normal attempt evidence once the requested Run proceeds to
+    // admission and realization. Early refusals and cancelled prompts drop
+    // their temporary directory before this point.
+    let started = start_portable_attempt(
         bundle_bytes,
-        bundle,
-        &selected_derivation,
+        &bundle,
+        &validated,
         &runtime_root,
-        shutdown.as_deref(),
+        Some(cancelled),
         PortableRuntimeState {
-            bindings: Some(&bindings),
-            host_facts: host_facts.as_ref(),
-            show_progress: !detailed,
+            host_facts: Some(&host),
             ..PortableRuntimeState::default()
         },
-        // The person running this bundle explicitly allowed an unsigned/ad-hoc
-        // native artifact; the receipt records the decision.
+        &binding_environment,
         args.allow_unsigned_native,
-        // A source-backed native route needs an explicit approval before it may
-        // fetch a toolchain. Nothing is inferred from a TTY, and a
-        // non-interactive Run that has no approval is refused with its own
-        // message.
-        if args.allow_native_source_build {
-            ato_portable_application::portable_run::NativeSourceConsent::Approved
-        } else if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-            ato_portable_application::portable_run::NativeSourceConsent::Denied
-        } else {
-            ato_portable_application::portable_run::NativeSourceConsent::Unavailable
-        },
-    );
-    // A Run that fails verification publishes nothing, exactly as it did
-    // before the Formation Generalization line was integrated: the attempt
-    // record (and, for a scenario, the transcript under the runtime scratch)
-    // is the failure evidence. Copying a receipt persisted by the common
-    // attempt into `--verification-receipt` made a refused Run look published
-    // and broke `scenario_verification`'s failure contract.
-    let started = started?;
+        native_source_consent,
+    )?;
     let mut runtime = started.runtime;
     let receipt = started.receipt;
     let result = (|| -> Result<()> {
@@ -4009,10 +4034,7 @@ fn run_portable_application(
         }
         println!("Press Ctrl-C to stop the local realization.");
         loop {
-            if shutdown
-                .as_deref()
-                .is_some_and(|flag| flag.load(Ordering::Relaxed))
-            {
+            if shutdown.load(Ordering::Relaxed) {
                 return Ok(());
             }
             // A service group is one Application: when any service exits, the
@@ -4378,7 +4400,6 @@ fn start_portable_attempt(
     native_local_override: bool,
     native_source_consent: ato_portable_application::portable_run::NativeSourceConsent,
 ) -> Result<StartedPortableApplication> {
-    use ato_runtime_attempt::admission::EffectAuthorization;
     use ato_runtime_attempt::attempt::{AttemptRequest, Continuation, ReceiptContext, run_attempt};
     use ato_runtime_attempt::build_sandbox::NetworkPolicy;
     use ato_runtime_attempt::journal::AttemptJournal;
@@ -4443,18 +4464,10 @@ fn start_portable_attempt(
             // the declared requirements (a native source build's fixed crate
             // egress), that consent travels with the attempt; otherwise the
             // common policy still refuses a D that declares any.
-            authorization: if matches!(
+            authorization: ato_portable_application::portable_run::run_authorization(
+                validated,
                 native_source_consent,
-                ato_portable_application::portable_run::NativeSourceConsent::Approved
-            ) {
-                EffectAuthorization::UserAuthorizedDeclaredRequirements {
-                    derivation_ref: validated.derivation_ref.as_str(),
-                }
-            } else {
-                EffectAuthorization::UserInvoked {
-                    derivation_ref: validated.derivation_ref.as_str(),
-                }
-            },
+            ),
             // A Run builds nothing.
             network: NetworkPolicy::Denied,
             browser: None,
@@ -4603,7 +4616,6 @@ struct PortableRuntimeState<'a> {
     /// Host facts the caller already measured for this Run. `None` lets the
     /// common admission probe for itself.
     host_facts: Option<&'a ato_host_facts::HostFacts>,
-    show_progress: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4624,9 +4636,6 @@ fn start_and_verify_portable_application(
         runtime_state.bindings.unwrap_or(&empty_bindings),
     )
     .context("Use --list-bindings to see the app's declared connection IDs")?;
-    if runtime_state.show_progress {
-        eprintln!("Starting and checking {}…", validated.application.title);
-    }
     start_portable_attempt(
         bundle_bytes,
         &bundle,
@@ -5343,6 +5352,7 @@ mod tests {
             verbose: false,
             accept_permissions: false,
             bindings: Vec::new(),
+            binding_env: Vec::new(),
             no_open: false,
             verification_receipt: None,
             allow_native_source_build: false,
