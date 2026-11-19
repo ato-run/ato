@@ -44,3 +44,35 @@
 - CLI 0.9.5でstaging APIを明示してコンテンツを公開した。アプリ、API、PWA、CLIの製品コードの配備・migration・feature flag変更は行っていない。
 
 CLIの根拠は[OCIのVOLUME検査](../../extensions/adapters/oci/src/lib.rs)、[サービスとstateの検証](../../lib/formation/src/capsule_toml_v2.rs)、[macOS DMGの展開処理](../../apps/portable-application/src/native_desktop/dmg.rs)を参照。実行したCLIのコミットは `8ee783ba3`。staging系列のAPIは `8fee5cbfa` の `src/routes/hub_capsules.ts`、PWAは `20edcd247` の `src/components/capsule-hub/CapsuleHubPage.tsx` で、検証回数の集計と検索対象を確認した。
+
+## 同日の起動・主要操作の追試
+
+対象は初回公開時に凍結した同じ58件。stgの `capsules/koh0920/` から配信digestとDを指定してMac上で実行した。Docker Desktop 29.1.3のデーモンを復旧し、Apple Silicon上でlinux/amd64の実行も確認した。アプリごとの配信digest、D、試行結果、主要操作は[追試一覧](evidence/capsule-hub-p0-20261119/runtime.csv)、観測結果と実行方式は[receipt抜粋](evidence/capsule-hub-p0-20261119/runtime-receipts.json)に記録した。各Runに独立した作業領域を割り当てた。
+
+| アプリ | 実際に確認した操作 |
+|---|---|
+| Excalidraw | 矩形を描いてブラウザーに保存し、再読み込み後に書き出したJSONから矩形を復元できた。 |
+| WordPress | stgの配信版で初期化後、管理者でログインし、下書きを作成・再取得して本文と下書き状態を照合した。 |
+| Trilium Notes | 空のノートブックに子ノートを作成し、日本語のタイトルと本文を保存した。ページの再読み込み後、ツリーと編集画面に同じ内容が表示された。 |
+| Mermaid | Python 3.12のDで二つのラベルを描画し、SVGをダウンロードして両方のラベルを照合した。 |
+| Memos | 一時環境の利用者でサインインし、非公開メモを作成してAPIから同じ本文を読み出した。 |
+| Pandoc | stgのOCI経路へMarkdownを送り、見出しを含むHTMLを取得した。 |
+| Beszel | 初回管理者を作成し、監視対象を登録して名前を再取得した。エージェントからの計測値受信は未確認。 |
+
+Mermaidの現行配信は `sha256:b6d9d279c723bc68c21a7bf4b0bafa56894d012ce50964a462c46c9c9e3b4e27`。契約と従来のOCI Dを保ったまま `sha256:d4e7d04a43e19ab1a1694c6f907aab73040193edad81128d499ed2e2850985a6` を追加した。利用者は次のようにDocker不要のDを選択できる。
+
+```sh
+ato run --api-url https://staging.api.ato.run --derivation sha256:d4e7d04a43e19ab1a1694c6f907aab73040193edad81128d499ed2e2850985a6 capsules/koh0920/mermaid
+```
+
+### 起動を妨げた不具合と操作上の問題
+
+| 箇所 | 実測 | 対応・改善点 |
+|---|---|---|
+| CLIのOCI経路選択 | Docker Desktopでは実行可能と表示された単一コンテナを、Run開始時にrelay未対応として拒否した。 | 単一OCIにもRun専用の内部ネットワークと既存relayを割り当てた。MemosとPandocで配信済みのDをそのまま選択し、実操作とreceiptを確認した。 |
+| OCIグループの起動失敗 | PostgreSQLの初期化サーバーは `/tmp` で待ち受け、上流エントリーポイントの `psql` は `/run/postgresql` を探して終了コード2になった。 | 初期化クライアントとサーバーのソケットを合わせる。エミュレーション中は初回DB構築が従来の60秒を超えた。 |
+| WordPressの初期化 | 配信初版は全コアファイルのコピーで待受が間に合わず、コピーを短縮した版は未設定サイトからのHTTP 302でContractに失敗した。 | イメージ内のライブラリを参照し、既存サイトを検出して初回だけ管理者を作成する構成に更新した。stg版の配信SHA-256は `921881c75c511725a156b87fcb34b3c739226be280500d6f79fa495f4d5503cd`。初期パスワードと署名用の鍵を別々のbindingで渡す。 |
+| SiYuanの起動完了判定 | 純粋なDで宣言した `bootProgress` への観測だけで追加の実行権限を求められた。 | 選択したDのポートへの開始観測と、ネットワーク・権限付与を分けた。配布イメージの初期化条件は別途確認する。 |
+| macOSのDMG | 署名済みアプリのFramework内にある相対リンクを展開時に一律拒否した。 | アプリ内で解決できるリンクを復元し、対象の表記もツリーダイジェストに含めた。RustDeskは展開後に終了コード255、LibreOfficeはウインドウ観測前に終了コード0となった。 |
+| AppFlowyの表示 | macOSのウインドウ観測は成功したが初期画面は黒く、文書を編集できなかった。初回はFlutterが実ユーザーのLibraryへの書き込みを拒否された。 | FoundationのホームをRunの保存領域に指定するとプライベートDBの初期化まで進んだ。再起動後も黒画面を再現し、ログにセッション未作成が記録された。 |
+| 大きな配信物・取得状況 | Pandoc 3.14の公式WebAssemblyでローカル変換できた。OCIとの併載版は約22.7 MBとなり、stgの1件8 MiBの上限で拒否された。OCI取得失敗時に原因が空のCLIメッセージも確認した。 | publish前に実サイズと上限を表示する。取得中の対象と進捗、タイムアウトと実プロセスの終了状態を区別して表示する。 |
