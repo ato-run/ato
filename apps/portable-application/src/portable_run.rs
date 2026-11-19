@@ -556,6 +556,36 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
         )
     }
 
+    fn realize_controlled(
+        &self,
+        attempt_id: &str,
+        attempt_root: &Path,
+        control: &ato_runtime_attempt::control::ExecutionControl,
+    ) -> Result<Realized, RealizeFailure> {
+        use ato_formation::failure::{FailureStage, FormationFailure};
+        use ato_runtime_attempt::control::AttemptPhase;
+
+        control.remaining(AttemptPhase::Launch)?;
+        // The static adapter expands a validated finite tree and starts a
+        // loopback socket in this process. No toolchain or external object can
+        // enter this bounded launch path. Other adapters need their own
+        // deadline-aware launch, and must fail closed until they have it.
+        if self.validated.realization != PortableRealizationKind::StaticWeb
+            || self
+                .bundle
+                .portability
+                .as_ref()
+                .is_some_and(|transport| !transport.external_objects.is_empty())
+        {
+            return Err(RealizeFailure::Execution(FormationFailure::new(
+                "portable_launch_deadline_unsupported",
+                FailureStage::Admission,
+                "This portable route does not yet support launch under a fixed verification budget",
+            ).into()));
+        }
+        self.realize(attempt_id, attempt_root)
+    }
+
     fn realize(&self, _attempt_id: &str, _attempt_root: &Path) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
         fs::create_dir_all(self.runtime_root)

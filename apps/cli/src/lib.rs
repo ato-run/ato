@@ -17,6 +17,7 @@ mod mcp_stdio;
 mod model_cache;
 mod object_transport;
 mod portable_dependency;
+mod publication;
 mod run_bindings;
 mod run_data;
 mod run_worker;
@@ -169,6 +170,9 @@ enum Commands {
         #[command(subcommand)]
         command: hub::HubCommands,
     },
+    /// Prepare, verify, approve, and publish a pinned app through MCP or CLI.
+    #[command(subcommand)]
+    Publish(publication::PublicationCommand),
     /// Initialize a directory with an existing capsule.toml and start recording.
     #[command(
         after_long_help = "Example project/capsule.toml (requires Python 3 to start):\n\n  schema = 1\n\n  [[process]]\n  id = \"app\"\n  command = [\"python3\", \"-m\", \"http.server\", \"8000\", \"--bind\", \"127.0.0.1\"]\n\n  [[adapter]]\n  use = \"ato.process@1\"\n  target = \"app\"\n\nInitialize: ato init ./project --initial-only\nStart the project: ato resume ./project"
@@ -308,6 +312,8 @@ enum Commands {
     PortableInstanceWorker(PortableInstanceWorkerArgs),
     #[command(name = "__portable-run-worker", hide = true)]
     PortableRunWorker { directory: PathBuf },
+    #[command(name = "__publication-worker", hide = true)]
+    PublicationWorker { preparation_id: String },
     /// 6b-D2 experimental: build a frozen source's root Dockerfile with a
     /// private builder into a verified OCI archive and an authored OCI route.
     #[command(name = "__source-oci-build", hide = true)]
@@ -1115,6 +1121,7 @@ fn command_with_help(full: bool) -> clap::Command {
                 "Create and share",
                 &[
                     "form",
+                    "publish",
                     "formation",
                     "form-preview",
                     "pack",
@@ -1275,6 +1282,7 @@ pub fn run() -> Result<()> {
         Commands::Login(args) => login(args),
         Commands::Upload(args) => upload(args),
         Commands::Hub { command } => hub::run(command),
+        Commands::Publish(command) => publication::run(command),
         Commands::Form(args) => build_formation(*args),
         Commands::FormPreview(args) => preview_formation(&args.artifact, args.no_open),
         Commands::Formation(command) => match command {
@@ -1327,6 +1335,7 @@ pub fn run() -> Result<()> {
         Commands::PortablePeerShim(args) => portable_peer_shim(args),
         Commands::PortableInstanceWorker(args) => portable_instance_worker(args),
         Commands::PortableRunWorker { directory } => run_worker::worker(directory),
+        Commands::PublicationWorker { preparation_id } => publication::worker(&preparation_id),
         Commands::SourceOciBuild(args) => source_oci_build(args),
         Commands::SourceOciAcquireBase(args) => source_oci_acquire_base(args),
     }
