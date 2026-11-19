@@ -64,6 +64,12 @@ pub struct LocalFormation {
     pub browser_budget: BrowserBudget,
 }
 
+/// The file or directory that local Formation kept for a verified route.
+pub enum LocalArtifact {
+    StaticWeb(PathBuf),
+    ProcessArchive(PathBuf),
+}
+
 static ATTEMPT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Run a Formation request against the local Runtime, end to end.
@@ -72,7 +78,15 @@ static ATTEMPT_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// does not parse — come back as `Err`. Everything a candidate did or did
 /// not do comes back inside the result's attempts.
 pub fn run(request: &FormationRequest, env: &LocalFormation) -> Result<FormationResult> {
-    run_with_executor(request, env, &local_executor(request, env))
+    run_with_artifact(request, env).map(|(result, _)| result)
+}
+
+/// Run local Formation and return the location of its published artifact.
+pub fn run_with_artifact(
+    request: &FormationRequest,
+    env: &LocalFormation,
+) -> Result<(FormationResult, Option<LocalArtifact>)> {
+    run_local(request, env, &local_executor(request, env))
 }
 
 fn local_executor(request: &FormationRequest, env: &LocalFormation) -> LocalAttemptExecutor {
@@ -92,22 +106,18 @@ pub fn run_with_executor(
     env: &LocalFormation,
     executor: &dyn AttemptExecutor,
 ) -> Result<FormationResult> {
+    run_local(request, env, executor).map(|(result, _)| result)
+}
+
+fn run_local(
+    request: &FormationRequest,
+    env: &LocalFormation,
+    executor: &dyn AttemptExecutor,
+) -> Result<(FormationResult, Option<LocalArtifact>)> {
     let RuntimeConstraint::Exact { runtime_id } = &request.runtime;
     if runtime_id != "local" {
         bail!("Phase 1 admits exactly one Runtime: --runtime local (got {runtime_id:?})");
     }
-    run_as(request, env, executor, runtime_id)
-}
-
-/// [`run_with_executor`] on this machine, recording it in the attempt
-/// evidence under `runtime_id`: the identity a Runtime Network ticket names
-/// this Runtime by, rather than the anonymous `local`.
-fn run_as(
-    request: &FormationRequest,
-    env: &LocalFormation,
-    executor: &dyn AttemptExecutor,
-    runtime_id: &str,
-) -> Result<FormationResult> {
     let profile = probe_local_runtime();
     // Absolute from here on: these paths are bound into sandboxes whose
     // working directory is not this process's.
@@ -160,28 +170,31 @@ fn run_as(
                 None => match candidate_authoring(&evidence) {
                     Ok(list) => list,
                     Err(mismatch) => {
-                        return Ok(FormationResult::NoVerifiedRoute {
-                            attempted_contract_refs: Vec::new(),
-                            attempts: vec![FormationAttempt {
-                                candidate: "detect".to_owned(),
-                                attempt_id: None,
-                                derivation_ref: None,
-                                contract_ref: None,
-                                runtime_id: runtime_id.to_owned(),
-                                status: AttemptStatus::Filtered,
-                                verification: None,
-                                base_contract_ref: None,
-                                realization: None,
-                                browser_verification: None,
-                                receipt: None,
-                                outcomes: AttemptOutcomes::not_run(mismatch.code),
-                                failure: Some(AttemptFailure {
-                                    code: mismatch.code.to_owned(),
-                                    stage: FailureStage::Preset.as_str().to_owned(),
-                                    message: mismatch.message,
-                                }),
-                            }],
-                        });
+                        return Ok((
+                            FormationResult::NoVerifiedRoute {
+                                attempted_contract_refs: Vec::new(),
+                                attempts: vec![FormationAttempt {
+                                    candidate: "detect".to_owned(),
+                                    attempt_id: None,
+                                    derivation_ref: None,
+                                    contract_ref: None,
+                                    runtime_id: runtime_id.to_owned(),
+                                    status: AttemptStatus::Filtered,
+                                    verification: None,
+                                    base_contract_ref: None,
+                                    realization: None,
+                                    browser_verification: None,
+                                    receipt: None,
+                                    outcomes: AttemptOutcomes::not_run(mismatch.code),
+                                    failure: Some(AttemptFailure {
+                                        code: mismatch.code.to_owned(),
+                                        stage: FailureStage::Preset.as_str().to_owned(),
+                                        message: mismatch.message,
+                                    }),
+                                }],
+                            },
+                            None,
+                        ));
                     }
                 },
             }
@@ -213,22 +226,28 @@ fn run_as(
         let mut attempt = attempt;
         scrub_host_paths(&mut attempt, env);
         attempts.push(attempt);
-        if let Some((contract_ref, route)) = formed {
-            return Ok(FormationResult::Formed {
-                contract_ref,
-                verified_routes: vec![route],
-                attempts,
-            });
+        if let Some((contract_ref, route, artifact)) = formed {
+            return Ok((
+                FormationResult::Formed {
+                    contract_ref,
+                    verified_routes: vec![route],
+                    attempts,
+                },
+                Some(artifact),
+            ));
         }
     }
 
-    Ok(FormationResult::NoVerifiedRoute {
-        attempted_contract_refs: attempts
-            .iter()
-            .filter_map(|attempt| attempt.contract_ref.clone())
-            .collect(),
-        attempts,
-    })
+    Ok((
+        FormationResult::NoVerifiedRoute {
+            attempted_contract_refs: attempts
+                .iter()
+                .filter_map(|attempt| attempt.contract_ref.clone())
+                .collect(),
+            attempts,
+        },
+        None,
+    ))
 }
 
 /// A new request id: each invocation of a local Formation is its own
@@ -290,7 +309,10 @@ fn attempt_one(
     network: NetworkPolicy,
     browser: Option<&BrowserVerification>,
     env: &LocalFormation,
-) -> (FormationAttempt, Option<(String, VerifiedRoute)>) {
+) -> (
+    FormationAttempt,
+    Option<(String, VerifiedRoute, LocalArtifact)>,
+) {
     let label = match &draft.provenance {
         AuthoringProvenance::Authored => "authored".to_owned(),
         AuthoringProvenance::PresetSynthesized { preset } => preset.to_string(),
@@ -379,8 +401,8 @@ fn attempt_one(
     // Verified — only now does the artifact become worth keeping. Keeping it
     // is publication, not verification: a failure here leaves the receipt
     // and its verdicts exactly as they were.
-    match store_candidate(&executed, &env.out_dir) {
-        Ok(materialization_ref) => (
+    match prepare_artifact(&executed).and_then(|artifact| artifact.publish(&env.out_dir)) {
+        Ok((materialization_ref, artifact)) => (
             {
                 attempt.outcomes.publication = Outcome::succeeded();
                 attempt
@@ -393,6 +415,7 @@ fn attempt_one(
                     runtime_id: runtime_id.to_owned(),
                     materialization_ref,
                 },
+                artifact,
             )),
         ),
         Err(error) => {
@@ -406,11 +429,6 @@ fn attempt_one(
             (attempt, None)
         }
     }
-}
-
-/// Keep the artifact of a verified candidate, content-addressed.
-pub(crate) fn store_candidate(executed: &ExecutedCandidate, out_dir: &Path) -> Result<String> {
-    prepare_artifact(executed)?.store(out_dir)
 }
 
 /// A verified candidate's artifact, packed or measured but not yet kept:
@@ -460,29 +478,36 @@ impl PreparedArtifact<'_> {
     }
 
     pub(crate) fn store(self, out_dir: &Path) -> Result<String> {
+        self.publish(out_dir).map(|(reference, _)| reference)
+    }
+
+    fn publish(self, out_dir: &Path) -> Result<(String, LocalArtifact)> {
         match self {
             Self::Process { packed } => {
                 let reference = digest(&packed);
                 let dir = out_dir.join("artifacts");
                 std::fs::create_dir_all(&dir)?;
-                std::fs::write(
-                    dir.join(format!("{}.tar", &reference["sha256:".len()..])),
-                    &packed,
-                )?;
-                Ok(reference)
+                let path = dir.join(format!("{}.tar", &reference["sha256:".len()..]));
+                std::fs::write(&path, &packed)?;
+                Ok((reference, LocalArtifact::ProcessArchive(path)))
             }
             Self::StaticWeb { output, .. } => {
                 let dir = out_dir.join("bundles");
                 std::fs::create_dir_all(&dir)?;
                 let destination = dir.join(&output.manifest_digest["sha256:".len()..]);
-                if !destination.exists() {
-                    // copy_tree fills an existing directory; it does not create
-                    // the root, and whether a file or a directory is listed first
-                    // is up to the filesystem.
-                    std::fs::create_dir_all(&destination)?;
-                    copy_tree(&output.bundle.bundle_root, &destination)?;
+                if !destination.is_dir() {
+                    let staging = tempfile::tempdir_in(&dir)?;
+                    copy_tree(&output.bundle.bundle_root, staging.path())?;
+                    if let Err(error) = std::fs::rename(staging.path(), &destination)
+                        && !destination.is_dir()
+                    {
+                        return Err(error.into());
+                    }
                 }
-                Ok(output.manifest_digest.clone())
+                Ok((
+                    output.manifest_digest.clone(),
+                    LocalArtifact::StaticWeb(destination),
+                ))
             }
         }
     }

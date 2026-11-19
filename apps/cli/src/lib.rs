@@ -169,9 +169,19 @@ enum Commands {
         #[command(subcommand)]
         command: hub::HubCommands,
     },
-    /// Form a local directory into a Capsule: build each candidate, observe it
-    /// satisfying its Contract, and keep the verified artifact.
+    /// Build and verify an application from a source directory.
+    #[command(
+        long_about = "Build and verify an application from a source directory.\n\nExample: ato form ./site --out ./formed (./site contains index.html)"
+    )]
     Form(Box<FormArgs>),
+    /// Open a loopback preview of a static artifact saved by `ato form`.
+    FormPreview {
+        /// Artifact directory printed by `ato form`.
+        artifact: PathBuf,
+        /// Print the URL and keep serving without opening a browser.
+        #[arg(long)]
+        no_open: bool,
+    },
     /// Read and write DataResources on a Coordinator (hosted API or selfhost).
     Data {
         #[command(subcommand)]
@@ -619,9 +629,12 @@ struct LoginArgs {
 /// tried in turn.
 #[derive(Debug, Args)]
 struct FormArgs {
-    /// The directory to form.
+    /// Source directory, such as a site with an index.html.
     path: PathBuf,
-    /// The Runtime to form on. Phase 1 admits exactly 'local'.
+    /// Write the full formation result as JSON, including on a terminal.
+    #[arg(long)]
+    json: bool,
+    /// Runtime for local formation. Use --runtime-network for a remote search.
     #[arg(long, default_value = "local")]
     runtime: String,
     /// Whether build steps may reach the network.
@@ -630,7 +643,7 @@ struct FormArgs {
     /// Candidate Derivations to try before giving up.
     #[arg(long, default_value_t = 8)]
     max_attempts: usize,
-    /// Where verified artifacts are written, content-addressed.
+    /// Where verified artifacts are saved. Defaults to the Ato formation cache.
     #[arg(long)]
     out: Option<PathBuf>,
     /// Scratch space for attempts: staged workspaces, build caches.
@@ -638,103 +651,150 @@ struct FormArgs {
     work_root: Option<PathBuf>,
     /// Also verify the running candidate in a browser against the
     /// '--accept' prompt. Only a browser PASS forms the candidate.
-    #[arg(long, requires = "accept")]
+    #[arg(long, requires = "accept", help_heading = "Browser verification")]
     verify_browser: bool,
     /// The acceptance prompt, in plain language. Kept verbatim in the
     /// browser Contract.
-    #[arg(long, requires = "verify_browser")]
+    #[arg(
+        long,
+        help_heading = "Browser verification",
+        requires = "verify_browser"
+    )]
     accept: Option<String>,
     /// The browser verifier helper (apps/formation-browser-verifier). Without
     /// one, a browser verification is recorded as unavailable — never passed.
-    #[arg(long, env = "ATO_BROWSER_VERIFIER")]
+    #[arg(
+        long,
+        help_heading = "Browser verification",
+        env = "ATO_BROWSER_VERIFIER"
+    )]
     browser_verifier: Option<PathBuf>,
     /// The Node binary that runs the browser verifier.
-    #[arg(long, env = "ATO_NODE", default_value = "node")]
+    #[arg(
+        long,
+        help_heading = "Browser verification",
+        env = "ATO_NODE",
+        default_value = "node"
+    )]
     node: String,
     /// The Chrome/Chromium binary the verifier drives.
-    #[arg(long, env = "ATO_BROWSER_CHROME_PATH")]
+    #[arg(
+        long,
+        help_heading = "Browser verification",
+        env = "ATO_BROWSER_CHROME_PATH"
+    )]
     browser_chrome: Option<PathBuf>,
     /// Development only: run the browser verifier and its browser directly on
     /// this host, with the host filesystem visible to them, when the verifier
     /// sandbox (Linux + bubblewrap) is not available. Recorded as
     /// `containment: none` in the receipt; never available on a Runtime
     /// Network Runtime.
-    #[arg(long, requires = "verify_browser")]
+    #[arg(
+        long,
+        help_heading = "Browser verification",
+        requires = "verify_browser"
+    )]
     allow_uncontained_browser_verifier: bool,
     /// Satisfy the Contract on the Runtime Network instead of this machine:
     /// every authorized route × every available owned Runtime, hard-filtered,
     /// executed and verified. `--runtime local` is unaffected.
-    #[arg(long)]
+    #[arg(long, help_heading = "Runtime Network")]
     runtime_network: bool,
     /// The coordinator (ato-api) base URL.
-    #[arg(long, env = "ATO_RUNTIME_NETWORK_API")]
+    #[arg(
+        long,
+        help_heading = "Runtime Network",
+        env = "ATO_RUNTIME_NETWORK_API"
+    )]
     api: Option<String>,
     /// A file holding the bearer token that acts for the requesting account.
-    #[arg(long, env = "ATO_RUNTIME_NETWORK_TOKEN_FILE")]
+    #[arg(
+        long,
+        help_heading = "Runtime Network",
+        env = "ATO_RUNTIME_NETWORK_TOKEN_FILE"
+    )]
     token_file: Option<PathBuf>,
     /// An authorized route (capsule.toml). Repeatable; default: the
     /// directory's own capsule.toml. Every route must bind to the same K.
-    #[arg(long = "route")]
+    #[arg(long = "route", help_heading = "Runtime Network")]
     routes: Vec<PathBuf>,
     /// Run only on this Runtime (runner id). No fallback elsewhere.
-    #[arg(long)]
+    #[arg(long, help_heading = "Runtime Network")]
     exact_runtime: Option<String>,
     /// `first_pass` stops at the first verified route; `all` attempts every
     /// admissible candidate.
-    #[arg(long, default_value = "first_pass", value_parser = ["first_pass", "all"])]
+    #[arg(long, help_heading = "Runtime Network", default_value = "first_pass", value_parser = ["first_pass", "all"])]
     mode: String,
     /// May control-plane-managed Runtimes be used?
-    #[arg(long)]
+    #[arg(long, help_heading = "Runtime Network")]
     allow_managed: bool,
     /// Continue this Runtime Network search instead of starting a new one.
     /// The search keeps the budget its first request stated: every budget
     /// option, `--max-attempts` and `--mode` included, must state it exactly,
     /// and what earlier requests spent stays spent.
-    #[arg(long)]
+    #[arg(long, help_heading = "Runtime Network")]
     search_id: Option<String>,
     /// The search's lifetime from its first request, in seconds (at most
     /// 7 days). Never extended.
-    #[arg(long, default_value_t = 30 * 60)]
+    #[arg(long, help_heading = "Runtime Network", default_value_t = 30 * 60)]
     deadline_seconds: u64,
     /// Logical source bytes the search may hand to Runtimes, over all of its
     /// attempts (at most 10 GiB).
-    #[arg(long, default_value_t = ato_formation_worker::runtime_network::MAX_SEARCH_TRANSFER_BYTES)]
+    #[arg(long, help_heading = "Runtime Network", default_value_t = ato_formation_worker::runtime_network::MAX_SEARCH_TRANSFER_BYTES)]
     max_transfer_bytes: u64,
     /// Logical bytes the search may expand on Runtimes (at most 10 GiB).
-    #[arg(long, default_value_t = ato_formation_worker::runtime_network::MAX_SEARCH_EXPANDED_BYTES)]
+    #[arg(long, help_heading = "Runtime Network", default_value_t = ato_formation_worker::runtime_network::MAX_SEARCH_EXPANDED_BYTES)]
     max_expanded_bytes: u64,
     /// Logical artifact bytes the search may have Runtimes keep (at most
     /// 10 GiB).
-    #[arg(long, default_value_t = ato_formation_worker::runtime_network::MAX_SEARCH_STORED_BYTES)]
+    #[arg(long, help_heading = "Runtime Network", default_value_t = ato_formation_worker::runtime_network::MAX_SEARCH_STORED_BYTES)]
     max_stored_bytes: u64,
     /// Let a decision provider pick the next attempt among those the search
     /// offers (Stage 5a). `jev` reads ATO_DECISION_JEV_API_KEY (never the
     /// browser judge's key). Without a usable answer the search takes its
     /// deterministic default. Frozen with the search.
-    #[arg(long, value_parser = ["jev"], requires = "runtime_network")]
+    #[arg(long, help_heading = "Runtime Network", value_parser = ["jev"], requires = "runtime_network")]
     decision_provider: Option<String>,
     /// Decision points the provider may answer over the whole search (1–64).
-    #[arg(long, default_value_t = 8, requires = "decision_provider")]
+    #[arg(
+        long,
+        help_heading = "Runtime Network",
+        default_value_t = 8,
+        requires = "decision_provider"
+    )]
     max_decisions: u32,
     /// How long a decision point waits for the provider, in milliseconds
     /// (1000–120000).
-    #[arg(long, default_value_t = 30_000, requires = "decision_provider")]
+    #[arg(
+        long,
+        help_heading = "Runtime Network",
+        default_value_t = 30_000,
+        requires = "decision_provider"
+    )]
     decision_timeout_ms: u64,
     /// Generate one bounded typed Python draft after known D exhaustion.
     /// Uses ATO_GENERATION_JEV_API_KEY, separately from decision/browser keys.
-    #[arg(long, value_parser = ["jev"], requires_all = ["runtime_network", "generation_entrypoints"])]
+    #[arg(long, help_heading = "Runtime Network", value_parser = ["jev"], requires_all = ["runtime_network", "generation_entrypoints"])]
     generation_provider: Option<String>,
     /// Explicit source entrypoint authorization: opaque-id=relative-file.py.
     /// Repeat for up to 16 files. Model sees IDs, never the paths or source.
-    #[arg(long = "generation-entrypoint", requires = "generation_provider")]
+    #[arg(
+        long = "generation-entrypoint",
+        requires = "generation_provider",
+        help_heading = "Runtime Network"
+    )]
     generation_entrypoints: Vec<String>,
     /// External exploration ceiling, frozen K, source authorization and
     /// pinned provider/spend config (JSON or TOML). No normal Run approval.
-    #[arg(long, requires = "runtime_network", conflicts_with_all = ["generation_provider", "verify_browser"])]
+    #[arg(long, help_heading = "Runtime Network", requires = "runtime_network", conflicts_with_all = ["generation_provider", "verify_browser"])]
     exploration_config: Option<PathBuf>,
     /// Publish a scoped connection for a logged-in CandidateProducer agent.
     /// Only the trusted requester may access its own token and private journal.
-    #[arg(long, requires = "exploration_config")]
+    #[arg(
+        long,
+        help_heading = "Runtime Network",
+        requires = "exploration_config"
+    )]
     session_bridge: Option<PathBuf>,
 }
 
@@ -871,6 +931,7 @@ pub fn run() -> Result<()> {
         Commands::Hub { command } => hub::run(command),
         Commands::Form(args) if args.runtime_network => form_on_runtime_network(*args),
         Commands::Form(args) => form(*args),
+        Commands::FormPreview { artifact, no_open } => preview_formation(&artifact, no_open),
         Commands::Data { command } => data::run(data::DataArgs { command }),
         Commands::Workspace { command } => workspace::run(workspace::WorkspaceArgs { command }),
         Commands::FormInspect {
@@ -1245,11 +1306,6 @@ fn desktop_inspect(project: &str) -> Result<()> {
     Ok(())
 }
 
-/// Run a Formation request against the local Runtime and print the result.
-///
-/// The JSON result goes to stdout either way — the attempts are the
-/// evidence. Exit status says which variant came back: 'formed' is success,
-/// 'no_verified_route' is not.
 fn read_token(path: &Path) -> Result<String> {
     Ok(std::fs::read_to_string(path)
         .with_context(|| format!("cannot read the token file {}", path.display()))?
@@ -1523,6 +1579,7 @@ fn form(args: FormArgs) -> Result<()> {
         ContractSource, FormationNetworkPolicy, FormationPolicy, FormationRequest, FormationResult,
         InitialCondition, RuntimeConstraint, SearchBudget,
     };
+    use ato_formation_worker::local::{LocalArtifact, run_with_artifact};
 
     let network = match args.network.as_str() {
         "denied" => FormationNetworkPolicy::Denied,
@@ -1573,14 +1630,118 @@ fn form(args: FormArgs) -> Result<()> {
         browser_verifier,
         browser_budget: ato_formation::browser::BrowserBudget::default(),
     };
-    let result = ato_formation_worker::local::run(&request, &env)?;
-    println!("{}", serde_json::to_string_pretty(&result)?);
-    match result {
-        FormationResult::Formed { .. } => Ok(()),
-        FormationResult::NoVerifiedRoute { .. } => {
-            bail!("formation produced no verified route")
+    let (result, artifact) = run_with_artifact(&request, &env)?;
+    if args.json || !std::io::stdout().is_terminal() {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    }
+    match (result, artifact) {
+        (FormationResult::Formed { .. }, Some(artifact)) => {
+            if !args.json {
+                match artifact {
+                    LocalArtifact::StaticWeb(path) => {
+                        eprintln!("Static site saved to {}", path.display());
+                        eprintln!(
+                            "Preview it with: ato form-preview {}",
+                            display_path_argument(&path)
+                        );
+                    }
+                    LocalArtifact::ProcessArchive(path) => {
+                        eprintln!("Verified process workspace saved to {}", path.display());
+                    }
+                }
+            }
+            Ok(())
+        }
+        (FormationResult::NoVerifiedRoute { attempts, .. }, _) => {
+            let mut reasons = Vec::new();
+            for attempt in &attempts {
+                if let Some(failure) = &attempt.failure
+                    && !reasons.contains(&failure.message.as_str())
+                {
+                    reasons.push(failure.message.as_str());
+                }
+                if reasons.len() == 3 {
+                    break;
+                }
+            }
+            if reasons.is_empty() {
+                bail!(
+                    "Formation produced no verified route. Use `ato form --json` for attempt details"
+                );
+            }
+            bail!(
+                "Formation produced no verified route:\n  {}",
+                reasons.join("\n  ")
+            );
+        }
+        (FormationResult::Formed { .. }, None) => {
+            bail!("Formation did not report a saved artifact")
         }
     }
+}
+
+fn preview_formation(artifact: &Path, no_open: bool) -> Result<()> {
+    let artifact = artifact
+        .canonicalize()
+        .with_context(|| format!("open Formation artifact directory {}", artifact.display()))?;
+    let digest = artifact
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| {
+            name.len() == 64
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+        .context("Use the unrenamed static artifact directory printed by `ato form`")?;
+    let stop = preview_shutdown_flag()?;
+    let cache = ato_home()?.join("cache");
+    fs::create_dir_all(&cache)?;
+    let scratch = tempfile::Builder::new()
+        .prefix("ato-form-preview-")
+        .tempdir_in(cache)?;
+    let server = ato_runtime_attempt::retained::preview_static_artifact(
+        &artifact,
+        &format!("sha256:{digest}"),
+        scratch.path(),
+    )
+    .with_context(|| format!("validate static Formation artifact {}", artifact.display()))?;
+    let url = server.base_url();
+    println!("Preview: {url}");
+    println!("Press Ctrl-C to stop the preview.");
+    if !no_open && let Err(error) = open_browser(&url) {
+        eprintln!("Open {url} in your browser ({error})");
+    }
+    while !stop.load(Ordering::Relaxed) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn preview_shutdown_flag() -> Result<Arc<AtomicBool>> {
+    let flag = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&flag))?;
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&flag))?;
+    Ok(flag)
+}
+
+#[cfg(windows)]
+fn preview_shutdown_flag() -> Result<&'static AtomicBool> {
+    use windows::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler};
+    use windows::core::BOOL;
+
+    static STOP: AtomicBool = AtomicBool::new(false);
+    unsafe extern "system" fn on_console_event(event: u32) -> BOOL {
+        if matches!(event, CTRL_C_EVENT | CTRL_BREAK_EVENT) {
+            STOP.store(true, Ordering::Relaxed);
+            return BOOL(1);
+        }
+        BOOL(0)
+    }
+    // Windows calls a process-lifetime function that only touches a static flag.
+    unsafe { SetConsoleCtrlHandler(Some(on_console_event), true)? };
+    Ok(&STOP)
 }
 
 fn init(args: InitArgs) -> Result<()> {
