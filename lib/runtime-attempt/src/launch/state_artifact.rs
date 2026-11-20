@@ -164,12 +164,7 @@ pub fn pack_state_tree(root: &Path) -> Result<StateArtifact> {
 /// would open a truncated SQLite file and, at best, fail confusingly. On any
 /// error the staging directory is removed and `destination` is untouched.
 pub fn unpack_state_tree(bytes: &[u8], expected_digest: &str, destination: &Path) -> Result<()> {
-    unpack_tree_bounded(
-        bytes,
-        expected_digest,
-        destination,
-        MAX_STATE_ARTIFACT_BYTES,
-    )
+    unpack_tree_bounded(bytes, expected_digest, destination, TreePurpose::State)
 }
 
 /// The same expansion, under a workspace-sized bound.
@@ -178,20 +173,24 @@ pub fn unpack_workspace_tree(
     expected_digest: &str,
     destination: &Path,
 ) -> Result<()> {
-    unpack_tree_bounded(
-        bytes,
-        expected_digest,
-        destination,
-        MAX_WORKSPACE_ARTIFACT_BYTES,
-    )
+    unpack_tree_bounded(bytes, expected_digest, destination, TreePurpose::Workspace)
+}
+
+enum TreePurpose {
+    State,
+    Workspace,
 }
 
 fn unpack_tree_bounded(
     bytes: &[u8],
     expected_digest: &str,
     destination: &Path,
-    limit: usize,
+    purpose: TreePurpose,
 ) -> Result<()> {
+    let limit = match purpose {
+        TreePurpose::State => MAX_STATE_ARTIFACT_BYTES,
+        TreePurpose::Workspace => MAX_WORKSPACE_ARTIFACT_BYTES,
+    };
     ensure!(
         bytes.len() <= limit,
         "artifact is {} bytes, over the {limit} byte limit",
@@ -210,7 +209,13 @@ fn unpack_tree_bounded(
         .context("state destination has no parent directory")?;
     std::fs::create_dir_all(parent)
         .with_context(|| format!("failed to create {}", parent.display()))?;
-    let staging = tempfile::Builder::new()
+    let mut builder = tempfile::Builder::new();
+    #[cfg(unix)]
+    if matches!(purpose, TreePurpose::Workspace) {
+        use std::os::unix::fs::PermissionsExt as _;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    let staging = builder
         .prefix(".ato-state-staging-")
         .tempdir_in(parent)
         .context("failed to create the state staging directory")?;
@@ -218,6 +223,10 @@ fn unpack_tree_bounded(
     // Errors propagate out of this block, and `staging` is removed on drop —
     // so a failure anywhere leaves `destination` exactly as it was.
     expand_into(bytes, staging.path(), limit)?;
+    #[cfg(unix)]
+    if matches!(purpose, TreePurpose::Workspace) {
+        prepare_readonly_workspace(staging.path())?;
+    }
 
     if destination.exists() {
         let discarded = tempfile::Builder::new()
@@ -241,6 +250,35 @@ fn unpack_tree_bounded(
     // The rename consumed the staging directory; keep its guard from trying to
     // remove a path that is now the live state.
     let _ = staging.keep();
+    Ok(())
+}
+
+/// The immutable workspace is bind-mounted read-only for the workload, whose
+/// UID may differ from the Runner's. Normalize only the tree being published.
+#[cfg(unix)]
+fn prepare_readonly_workspace(root: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut directories = vec![root.to_owned()];
+    while let Some(directory) = directories.pop() {
+        for entry in std::fs::read_dir(&directory)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            let path = entry.path();
+            let mode = if kind.is_dir() {
+                directories.push(path.clone());
+                0o755
+            } else {
+                ensure!(kind.is_file(), "workspace contains a non-regular file");
+                if is_owner_executable(&path)? {
+                    0o755
+                } else {
+                    0o644
+                }
+            };
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+        }
+    }
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o755))?;
     Ok(())
 }
 
@@ -1184,6 +1222,40 @@ mod tests {
             unpack_state_tree(&oversized, &state_artifact_digest(&oversized), &target).unwrap_err();
         assert!(error.to_string().contains("over the"), "{error}");
         assert!(!target.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readonly_workspace_modes_stop_at_the_mount_root() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+        let private = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(private.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let state = private.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let target = private.path().join("workspace");
+
+        // Unlike an explicit directory entry, this tar implicitly creates
+        // both ancestors of the CA file using the Runner's process umask.
+        let bytes = archive_with_entry("ca/nested/root.pem");
+        unpack_workspace_tree(&bytes, &state_artifact_digest(&bytes), &target).unwrap();
+        for directory in [target.clone(), target.join("ca"), target.join("ca/nested")] {
+            assert_eq!(mode(&directory), 0o755);
+        }
+        assert_eq!(mode(&target.join("ca/nested/root.pem")), 0o644);
+        assert_eq!(mode(private.path()), 0o700);
+        assert_eq!(mode(&state), 0o700);
+
+        let source = tempfile::tempdir().unwrap();
+        std::fs::create_dir(source.path().join("empty")).unwrap();
+        let program = source.path().join("program");
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let artifact = pack_state_tree(source.path()).unwrap();
+        unpack_workspace_tree(artifact.bytes(), artifact.digest(), &target).unwrap();
+        assert_eq!(mode(&target.join("empty")), 0o755);
+        assert_eq!(mode(&target.join("program")), 0o755);
     }
 
     #[cfg(unix)]
