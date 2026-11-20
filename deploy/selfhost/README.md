@@ -136,6 +136,15 @@ Mailの固定TCP listenerを割り当てる場合は、他サービスで使用�
 
 `fixed_tcp` の各要素はdeclared `port_id`、`bind_ip`、`port` を持ち、`egress` の各要素はdeclared `binding_id`、`destination_ipv4`、`ports` を持ちます。relay宛先・SNI・CAを試験用Dと揃え、メールの資格情報はInstanceのBindingとして設定します。`mail_data` に初期State Revisionを結合する場合は、v4のsaved-state bundleまたはホストの初期化経路が必要です。
 
+初回の Mail 用に別途 Stalwart を起動し、[サンプルの設定手順](../../samples/ato-mail/README.md#staging-configuration-operator-steps)でテストドメイン、メールボックス、listener、Binding の環境変数参照を作成します。PROXY v2 を受ける listener は、実際に転送する Runner のアドレスを `/32` で登録します。初期化用の Stalwart を正常終了し、書込が止まったデータディレクトリと、同じ設定用に作ったアプリ単体の bundle を用意します。
+
+次のコマンドを `ato` のルートで実行すると、既存の Rust exporter がデータを `mail_data` に結合して v4 bundle を作ります。`stopped_store` は作成した専用ストア、`mail_app` は元の bundle、`output` は未使用の出力先です。出力には指定ストア内のメールとアカウント情報が含まれるので、その所有者が管理します。TLS 私有鍵やリレーパスワードはストアの外に置き、起動時に Binding で渡します。
+
+```sh
+cargo run --locked -p ato-portable-application --example seed_filesystem_slot -- \
+  "$mail_app" mail_data "$stopped_store" "$output"
+```
+
 1. Cloudflareと商用ato.runへの通信を遮断します。操作端末とRunnerはローカルDNS、管理用URL、アプリ用URL、テストに必要なMail endpointだけへ到達できるようにします。
 2. 別端末から所有者としてログインし、Runnerを明示的に選択してMailのテストInstanceを起動します。検証receiptに同一bundle digest、ContractRef、選択Derivation、今回のattempt、`fully_satisfied=true` があることを確認します。
 3. [メールボックス照合](acceptance/mailbox.py)を使って専用テストアカウントの下書きを保存します。アプリを保存・再開後、同じアプリURLから同じメールを確認します。
