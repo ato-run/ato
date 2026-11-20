@@ -2937,3 +2937,633 @@ theorem only_the_fixed_combination_is_live (requeue includeStarting release : Bo
     exact fixed_recovery_relaunches w r (r + 1) hw
 
 end AlwaysOnRecovery
+
+/-! ## ato-api (cross-repo) :: volume operation dispatch after a confirmed stop
+
+`src/services/dynamic_state/volume_operations.ts` (`advanceVolumeOperation`, waiting
+branch). Found on production on 2026-11-20: a checkpoint requested about ten seconds
+after a stop failed `state_volume_runner_unavailable`; the same request succeeded fifty
+seconds later.
+
+A stopping Run gives its writer back before its lease ends, so for a while the resident
+Runner's only slot is still held by the very Run the operation asked to stop. The model
+keeps the operation status, who holds the writer, whether that lease is still open and
+whether the Runner is durably usable (owner, pool, capability, active, not drained).
+Heartbeat freshness is not modelled: an offline Runner still fails the operation. -/
+namespace VolumeOperationDispatch
+
+inductive Status where
+  | waiting | running | failed
+  deriving DecidableEq, Repr
+
+inductive Writer where
+  | free | app | operation
+  deriving DecidableEq, Repr
+
+structure World where
+  status : Status
+  writer : Writer
+  appLeaseOpen : Bool
+  runnerUsable : Bool
+  deriving DecidableEq, Repr
+
+/-- One `advanceVolumeOperation` call. `waitForSlot` is the fix: a full slot keeps the
+    operation waiting instead of failing it. -/
+def poll (waitForSlot : Bool) (w : World) : World :=
+  if w.status != .waiting then w
+  else if !w.runnerUsable then { w with status := .failed, writer := if w.writer == .operation then .free else w.writer }
+  else if w.writer == .app then w
+  else if w.appLeaseOpen then
+    if waitForSlot then { w with writer := .operation }
+    else { w with status := .failed, writer := .free }
+  else { w with status := .running, writer := .operation }
+
+inductive Event where
+  | poll            -- the owner's poll, the cron or the Runner's poll
+  | writerReleased  -- the stopping Run commits or releases its state
+  | leaseEnded      -- the Runner reports the Run stopped
+  | runnerRetired   -- the Runner is drained, archived or loses the capability
+  deriving DecidableEq, Repr
+
+def step (waitForSlot : Bool) (w : World) : Event → World
+  | .poll => poll waitForSlot w
+  | .writerReleased => if w.writer == .app then { w with writer := .free } else w
+  | .leaseEnded => { w with appLeaseOpen := false }
+  | .runnerRetired => { w with runnerUsable := false }
+
+def run (waitForSlot : Bool) (w : World) : List Event → World
+  | [] => w
+  | e :: rest => run waitForSlot (step waitForSlot w e) rest
+
+/-- A checkpoint requested while the App's Run is live on a usable Runner. -/
+def requested : World := ⟨.waiting, .app, true, true⟩
+
+/-- BUG (ato-api `fix/volume-checkpoint-export-races`): the poll that lands between the
+    writer release and the end of the lease fails the operation for good, although the
+    Runner is usable and the stop is completing normally. -/
+theorem slot_of_stopping_run_fails_operation_BUG :
+    (run false requested [.writerReleased, .poll, .leaseEnded, .poll]).status = .failed := by
+  decide
+
+/-- The failure is the timing of the poll alone: the same stop with the poll after the
+    lease ended dispatches the operation. -/
+theorem same_stop_later_poll_dispatches :
+    (run false requested [.writerReleased, .leaseEnded, .poll]).status = .running := by
+  decide
+
+/-- HOLDS (the fix): on a Runner that stays usable no interleaving of polls with the
+    stop's two reports fails the operation. -/
+theorem fixed_never_fails_on_usable_runner (events : List Event)
+    (h : ∀ e ∈ events, e ≠ .runnerRetired) :
+    ∀ w, w.runnerUsable = true → w.status ≠ .failed →
+      (run true w events).status ≠ .failed := by
+  induction events with
+  | nil => intro w _ hs; exact hs
+  | cons e rest ih =>
+    intro w hu hs
+    have hrest : ∀ e ∈ rest, e ≠ .runnerRetired := fun e he => h e (List.mem_cons_of_mem _ he)
+    have he : e ≠ .runnerRetired := h e (List.mem_cons_self ..)
+    apply ih hrest
+    · cases e <;> simp [step, poll] at * <;> (repeat' split) <;> simp_all
+    · cases e <;> simp [step, poll] at * <;> (repeat' split) <;> simp_all
+
+/-- HOLDS: once both reports of the stop arrived, the next poll dispatches. -/
+theorem fixed_dispatches_after_stop (w : World)
+    (hs : w.status = .waiting) (hu : w.runnerUsable = true)
+    (hw : w.writer ≠ .app) (hl : w.appLeaseOpen = false) :
+    (poll true w).status = .running := by
+  cases w with
+  | mk status writer appLeaseOpen runnerUsable =>
+    simp only at hs hu hw hl
+    subst hs hu hl
+    cases writer <;> simp_all [poll]
+
+/-- HOLDS: every order of the stop's reports and any number of early polls ends with
+    the operation running. -/
+theorem fixed_stop_then_checkpoint_runs :
+    (run true requested [.poll, .writerReleased, .poll, .poll, .leaseEnded, .poll]).status = .running ∧
+    (run true requested [.poll, .leaseEnded, .poll, .writerReleased, .poll]).status = .running := by
+  decide
+
+/-- HOLDS (negative case kept by the fix): a Runner that is durably unusable still
+    fails the operation and gives the writer back. -/
+theorem fixed_retired_runner_still_fails (w : World)
+    (hs : w.status = .waiting) (hu : w.runnerUsable = false) :
+    (poll true w).status = .failed ∧ (poll true w).writer ≠ .operation := by
+  cases w with
+  | mk status writer appLeaseOpen runnerUsable =>
+    simp only at hs hu
+    subst hs hu
+    cases writer <;> simp [poll]
+
+/-- HOLDS: while the previous Run still holds the writer nothing is dispatched or
+    failed, with or without the fix (the handover order is unchanged). -/
+theorem waits_for_writer (waitForSlot : Bool) (w : World)
+    (hs : w.status = .waiting) (hu : w.runnerUsable = true) (hw : w.writer = .app) :
+    poll waitForSlot w = w := by
+  cases w with
+  | mk status writer appLeaseOpen runnerUsable =>
+    simp only at hs hu hw
+    subst hs hu hw
+    simp [poll]
+
+end VolumeOperationDispatch
+
+/-! ## ato-api (cross-repo) :: the Runner's report against a concurrent poll
+
+`completeVolumeOperation` and the `running` branch of `advanceVolumeOperation` in the
+same file. Found on production on 2026-11-20: the Runner logged the checkpoint as
+succeeded, the API recorded the operation `interrupted` ("the Runner ended the
+operation without reporting") two seconds later, and the slot's checkpoint columns had
+nevertheless advanced.
+
+The report used to be a sequence of independent writes: record the checkpoint, end the
+lease, then take the operation out of `running`. `GET /state/operations/:id` advances
+the operation, and it interrupts a running operation whose lease has ended and whose
+writer is free. The checkpoint commit already released the writer, so the poll only
+needs to land after "end the lease". -/
+namespace VolumeOperationReport
+
+inductive Status where
+  | running | succeeded | interrupted
+  deriving DecidableEq, Repr
+
+structure World where
+  status : Status
+  leaseEnded : Bool
+  checkpointRecorded : Bool
+  deriving DecidableEq, Repr
+
+inductive Event where
+  | poll              -- GET /state/operations/:id, or the cron
+  | leaseExpired      -- the lease ends without a report (Runner died, lease expired)
+  | recordCheckpoint  -- report, write 1 (unfixed)
+  | endLease          -- report, write 2 (unfixed)
+  | finish            -- report, write 3 (unfixed): CAS out of `running`
+  | report            -- the fixed report: one transaction
+  deriving DecidableEq, Repr
+
+def step (w : World) : Event → World
+  | .poll =>
+    if w.status == .running && w.leaseEnded then { w with status := .interrupted } else w
+  | .leaseExpired => { w with leaseEnded := true }
+  | .recordCheckpoint => { w with checkpointRecorded := true }
+  | .endLease => { w with leaseEnded := true }
+  | .finish => if w.status == .running then { w with status := .succeeded } else w
+  | .report =>
+    if w.status == .running then ⟨.succeeded, true, true⟩ else w
+
+def run (w : World) : List Event → World
+  | [] => w
+  | e :: rest => run (step w e) rest
+
+/-- The Runner committed the checkpoint; its lease is live and it is about to report. -/
+def committed : World := ⟨.running, false, false⟩
+
+/-- What the owner and the export read must agree: a checkpoint is recorded as the
+    volume's current one exactly when its operation succeeded. -/
+def consistent (w : World) : Bool :=
+  w.checkpointRecorded == (w.status == .succeeded)
+
+def unfixedEvent : Event → Bool
+  | .report => false
+  | _ => true
+
+def fixedEvent : Event → Bool
+  | .recordCheckpoint | .endLease | .finish => false
+  | _ => true
+
+/-- BUG: a poll between the report's second and third write records a successful
+    checkpoint as interrupted while its checkpoint columns stay advanced. -/
+theorem poll_between_report_writes_interrupts_success_BUG :
+    ∃ events, events.all unfixedEvent = true ∧ ¬ events.contains .leaseExpired ∧
+      (run committed events).status = .interrupted ∧
+      (run committed events).checkpointRecorded = true ∧
+      consistent (run committed events) = false :=
+  ⟨[.recordCheckpoint, .endLease, .poll, .finish], by decide, by decide, by decide, by decide, by decide⟩
+
+/-- Without the poll in that window the same report succeeds. -/
+theorem unfixed_report_without_poll_succeeds :
+    run committed [.poll, .recordCheckpoint, .poll, .endLease, .finish, .poll] = ⟨.succeeded, true, true⟩ := by
+  decide
+
+/-- HOLDS (the fix): with the report as one transaction, status and checkpoint columns
+    agree after every interleaving of polls, lease expiry and (repeated) reports. -/
+theorem fixed_always_consistent (events : List Event) (h : events.all fixedEvent = true) :
+    ∀ w, consistent w = true → consistent (run w events) = true := by
+  induction events with
+  | nil => intro w hw; exact hw
+  | cons e rest ih =>
+    intro w hw
+    simp only [List.all_cons, Bool.and_eq_true] at h
+    apply ih h.2
+    cases w with
+    | mk status leaseEnded checkpointRecorded =>
+      cases e <;> cases status <;> cases leaseEnded <;> cases checkpointRecorded <;>
+        simp_all [step, consistent, fixedEvent]
+
+/-- HOLDS: while the lease has not ended by itself, polls cannot change the outcome
+    of a report: the operation ends `succeeded`. -/
+theorem fixed_polls_cannot_interrupt_report (before after : Nat) :
+    (run committed (List.replicate before .poll ++ .report :: List.replicate after .poll)).status
+      = .succeeded := by
+  have hbefore : ∀ n, run committed (List.replicate n .poll ++ .report :: List.replicate after .poll)
+      = run committed (.report :: List.replicate after .poll) := by
+    intro n
+    induction n with
+    | zero => rfl
+    | succ n ih => simpa [List.replicate_succ, run, step, committed] using ih
+  have hafter : ∀ n, run ⟨.succeeded, true, true⟩ (List.replicate n .poll) = ⟨.succeeded, true, true⟩ := by
+    intro n
+    induction n with
+    | zero => rfl
+    | succ n ih => simpa [List.replicate_succ, run, step] using ih
+  rw [hbefore before]
+  simp only [run, step, committed]
+  simpa using congrArg World.status (hafter after)
+
+/-- HOLDS (negative case): a report that arrives after a recorded interruption changes
+    nothing; the interrupted operation is not presented as a checkpoint. -/
+theorem fixed_late_report_changes_nothing :
+    run committed [.leaseExpired, .poll, .report] = ⟨.interrupted, true, false⟩ := by
+  decide
+
+/-- HOLDS: a lease that ended without any report is still recorded as interrupted. -/
+theorem fixed_dead_runner_still_interrupted :
+    (run committed [.leaseExpired, .poll]).status = .interrupted := by
+  decide
+
+end VolumeOperationReport
+
+/-! ## ato-api (cross-repo) :: with-data export of a Runner-local volume
+
+`src/services/portable_instance_export.ts` (`quiescePortableFilesystemState`,
+`filesystemStateHead`) behind `POST /v1/portable-application-exports/instances/:id`.
+Found on production on 2026-11-20: the export stopped the always-on App, waited for its
+writer and only then failed `state_volume_checkpoint_required`.
+
+A `runner_volume` slot is exportable only when its head is a checkpoint taken at the
+current writer generation. Every Run takes a new generation when it acquires the
+writer, and stopping a Run does not change the generation. -/
+namespace VolumeExportGate
+
+structure World where
+  writerEpoch : Nat
+  /-- The generation at which the head was recorded as a checkpoint, if ever. -/
+  checkpointEpoch : Option Nat
+  runLive : Bool
+  deriving DecidableEq, Repr
+
+def checkpointCurrent (w : World) : Bool := w.checkpointEpoch == some w.writerEpoch
+
+/-- `acquireWriter` for a Run: the next generation. -/
+def startRun (w : World) : World := { w with writerEpoch := w.writerEpoch + 1, runLive := true }
+
+def stopRun (w : World) : World := { w with runLive := false }
+
+/-- A successful checkpoint operation: it takes the next generation itself, from a
+    confirmed-stopped volume, and records the head at that generation. -/
+def checkpoint (w : World) : World :=
+  if w.runLive then w
+  else { w with writerEpoch := w.writerEpoch + 1, checkpointEpoch := some (w.writerEpoch + 1) }
+
+inductive Reachable : World → Prop where
+  | init : Reachable ⟨0, none, false⟩
+  | startRun {w} : Reachable w → w.runLive = false → Reachable (startRun w)
+  | stopRun {w} : Reachable w → Reachable (stopRun w)
+  | checkpoint {w} : Reachable w → Reachable (checkpoint w)
+
+structure Outcome where
+  accepted : Bool
+  /-- The export stopped a Run that was serving. -/
+  stoppedRun : Bool
+  after : World
+  deriving DecidableEq, Repr
+
+/-- Before the fix: stop, wait for the writer, then look at the checkpoint. -/
+def exportStopFirst (w : World) : Outcome :=
+  ⟨checkpointCurrent (stopRun w), w.runLive, stopRun w⟩
+
+/-- The fix: look at the checkpoint first; stop only what can then be captured. -/
+def exportCheckFirst (w : World) : Outcome :=
+  if checkpointCurrent w then ⟨checkpointCurrent (stopRun w), w.runLive, stopRun w⟩
+  else ⟨false, false, w⟩
+
+/-- BUG: a reachable state in which the export stops the Run and then fails. -/
+theorem export_stops_run_then_fails_BUG :
+    ∃ w, Reachable w ∧ (exportStopFirst w).stoppedRun = true ∧ (exportStopFirst w).accepted = false :=
+  ⟨startRun ⟨0, none, false⟩, .startRun .init rfl, by decide, by decide⟩
+
+/-- The same holds after a checkpoint, as soon as a Run has started again. -/
+theorem checkpoint_then_run_still_fails_BUG :
+    ∃ w, Reachable w ∧ (exportStopFirst w).stoppedRun = true ∧ (exportStopFirst w).accepted = false :=
+  ⟨startRun (checkpoint ⟨0, none, false⟩), .startRun (.checkpoint .init) (by decide), by decide, by decide⟩
+
+/-- Stopping a Run never turns a stale checkpoint into a current one, so the answer is
+    known before anything is stopped. -/
+theorem stop_does_not_change_the_answer (w : World) :
+    checkpointCurrent (stopRun w) = checkpointCurrent w := rfl
+
+/-- In every reachable state the checkpoint generation is at most the writer's, and a
+    live Run is strictly ahead of it. -/
+theorem reachable_checkpoint_bound {w : World} (h : Reachable w) :
+    ∀ c, w.checkpointEpoch = some c → c ≤ w.writerEpoch ∧ (w.runLive = true → c < w.writerEpoch) := by
+  induction h with
+  | init => intro c hc; simp at hc
+  | @startRun w _ hlive ih =>
+    intro c hc
+    have := ih c hc
+    simp only [startRun]
+    exact ⟨Nat.le_succ_of_le this.1, fun _ => Nat.lt_succ_of_le this.1⟩
+  | @stopRun w _ ih =>
+    intro c hc
+    have := ih c hc
+    simp only [stopRun]
+    exact ⟨this.1, fun h => by simp at h⟩
+  | @checkpoint w _ ih =>
+    intro c hc
+    unfold checkpoint at hc ⊢
+    split
+    · next hl => simp only [hl, ite_true] at hc; exact ih c hc
+    · next hl =>
+      simp only [hl] at hc
+      simp only [Bool.false_eq_true, ite_false, Option.some.injEq] at hc
+      subst hc
+      exact ⟨Nat.le_refl _, fun h => by simp_all⟩
+
+/-- A serving Run always means the export is refused: there is never a reason to stop
+    one for an export. -/
+theorem live_run_is_never_exportable {w : World} (h : Reachable w) (hl : w.runLive = true) :
+    checkpointCurrent w = false := by
+  unfold checkpointCurrent
+  cases hc : w.checkpointEpoch with
+  | none => rfl
+  | some c =>
+    have := (reachable_checkpoint_bound h c hc).2 hl
+    simp only [beq_eq_false_iff_ne, ne_eq, Option.some.injEq]
+    exact Nat.ne_of_lt this
+
+/-- HOLDS (the fix): a refused export leaves the Instance exactly as it was. -/
+theorem fixed_refusal_has_no_side_effect (w : World) (h : (exportCheckFirst w).accepted = false) :
+    (exportCheckFirst w).stoppedRun = false ∧ (exportCheckFirst w).after = w := by
+  unfold exportCheckFirst at h ⊢
+  split
+  · next hc => simp [stop_does_not_change_the_answer, hc] at h
+  · exact ⟨rfl, rfl⟩
+
+/-- HOLDS: in reachable states the fixed export never stops a Run at all. -/
+theorem fixed_never_stops_a_run {w : World} (h : Reachable w) :
+    (exportCheckFirst w).stoppedRun = false := by
+  unfold exportCheckFirst
+  split
+  · next hc =>
+    cases hl : w.runLive with
+    | false => rfl
+    | true => rw [live_run_is_never_exportable h hl] at hc; exact absurd hc (by decide)
+  · rfl
+
+/-- HOLDS: the fix refuses exactly the exports that failed before; nothing that used to
+    succeed is rejected. -/
+theorem fixed_accepts_the_same_exports (w : World) :
+    (exportCheckFirst w).accepted = (exportStopFirst w).accepted := by
+  unfold exportCheckFirst exportStopFirst
+  split
+  · rfl
+  · next hc => simp [stop_does_not_change_the_answer, hc]
+
+/-- HOLDS: stop, checkpoint, export — the sequence the owner is told to use — is
+    accepted. -/
+theorem checkpoint_after_stop_is_exportable (w : World) :
+    (exportCheckFirst (checkpoint (stopRun w))).accepted = true := by
+  simp [exportCheckFirst, checkpoint, stopRun, checkpointCurrent]
+
+end VolumeExportGate
+
+/-! ## ato-api (cross-repo) :: the owner's Stop, Start and Keep-running controls
+
+`src/routes/compute_instances.ts` (`POST /stop`, `POST /start`, `PATCH /runtime-policy`)
+with `src/services/always_on.ts` and `src/services/execution_authorization.ts`. Found
+on production on 2026-11-20: Stop then Start left an always-on Instance serving with
+`desired_state: stopped`, and restoring the policy stopped the Run again.
+
+This extends `AlwaysOnRecovery` with the owner's controls. A Run is renewable when it
+was launched while the policy wanted it (`reserveExecutionAuthorization`); a Run
+launched under a hard deadline cannot be upgraded in place. A Run of an Instance whose
+intent is `stopped` is not restarted when it ends and is put to sleep when idle. -/
+namespace AlwaysOnOwnerControls
+
+inductive Desired where
+  | running | stopped
+  deriving DecidableEq, Repr
+
+inductive Status where
+  | idle | waiting | running
+  deriving DecidableEq, Repr
+
+structure Run where
+  id : Nat
+  renewable : Bool
+  deriving DecidableEq, Repr
+
+/-- An always-on Instance. -/
+structure World where
+  desired : Desired
+  status : Status
+  lastRun : Option Nat
+  live : Option Run
+  /-- How many times an owner control stopped a serving Run. -/
+  outages : Nat
+  deriving DecidableEq, Repr
+
+/-- `stopInstanceRuntime`. -/
+def stopRuntime (w : World) : World :=
+  match w.live with
+  | some _ => { w with live := none, outages := w.outages + 1 }
+  | none => w
+
+/-- `setRuntimePolicy` to a different intent: new generation, nothing bound. -/
+def setPolicy (w : World) (d : Desired) : World :=
+  { w with desired := d, status := if d == .running then .waiting else .idle, lastRun := none }
+
+/-- `POST /stop`. -/
+def stop (w : World) : World := setPolicy (stopRuntime w) .stopped
+
+/-- `POST /start`: join the serving Run or launch `fresh`. With the fix the intent goes
+    back to `running` first, so the Run is renewable and bound to the policy. -/
+def start (fixed : Bool) (w : World) (fresh : Nat) : World :=
+  if fixed && w.desired == .stopped then
+    match w.live with
+    | some r => { w with desired := .running, status := .running, lastRun := some r.id }
+    | none => { w with desired := .running, status := .running, lastRun := some fresh,
+                       live := some ⟨fresh, true⟩ }
+  else
+    match w.live with
+    | some _ => w
+    | none => { w with live := some ⟨fresh, w.desired == .running⟩ }
+
+/-- `PATCH /runtime-policy` within always-on. -/
+def patch (fixed : Bool) (w : World) (d : Desired) : World :=
+  if !fixed then
+    let w := stopRuntime w
+    if w.desired == d then w else setPolicy w d
+  else if w.desired == d then w
+  else
+    match d, w.live with
+    | .running, some r =>
+      if r.renewable then { w with desired := .running, status := .running, lastRun := some r.id }
+      else setPolicy (stopRuntime w) d
+    | _, _ => setPolicy (stopRuntime w) d
+
+/-- The Run ends by itself (crash, host restart, hard deadline). Only an Instance
+    whose intent is `running` is queued for a restart (`scheduleInstanceRestart`). -/
+def runEnds (w : World) : World :=
+  match w.live with
+  | none => w
+  | some r =>
+    if w.desired == .running && (w.lastRun == some r.id || w.lastRun == none) then
+      { w with live := none, status := .waiting }
+    else { w with live := none }
+
+/-- `reconcileAlwaysOnInstances`: adopt the serving Run or launch `fresh`. -/
+def sweep (w : World) (fresh : Nat) : World :=
+  if w.desired == .running && w.status == .waiting then
+    match w.live with
+    | some r => { w with status := .running, lastRun := some r.id }
+    | none => { w with status := .running, lastRun := some fresh, live := some ⟨fresh, true⟩ }
+  else w
+
+/-- Resident: whatever ends the serving Run, the reconciler brings a Run back. -/
+def resident (w : World) : Bool :=
+  w.desired == .running && (sweep (runEnds w) 99).live.isSome
+
+/-- An always-on Instance serving normally. -/
+def serving : World := ⟨.running, .running, some 1, some ⟨1, true⟩, 0⟩
+
+/-- BUG: Stop then Start leaves the Instance serving but not resident: the intent
+    still says `stopped`, so the Run is not renewable and nothing restarts it. -/
+theorem stop_start_is_not_resident_BUG :
+    let w := start false (stop serving) 2
+    w.live = some ⟨2, false⟩ ∧ w.desired = .stopped ∧ resident w = false ∧
+      (sweep (runEnds w) 3).live = none := by
+  decide
+
+/-- BUG: restoring the intent afterwards stops the Run that is serving. -/
+theorem restoring_policy_stops_the_run_BUG :
+    let before := start false (stop serving) 2
+    (patch false before .running).live = none ∧
+      (patch false before .running).outages = before.outages + 1 := by
+  decide
+
+/-- BUG: a policy request that changes nothing stops the resident Run. -/
+theorem unchanged_policy_request_stops_the_run_BUG :
+    (patch false serving .running).live = none ∧ (patch false serving .running).outages = 1 := by
+  decide
+
+/-- HOLDS (the fix): Stop then Start is resident again, with a renewable Run bound to
+    the policy, and it comes back after the Run ends. -/
+theorem fixed_stop_start_is_resident (w : World) (fresh : Nat) :
+    let after := start true (stop w) fresh
+    after.live = some ⟨fresh, true⟩ ∧ after.desired = .running ∧
+      after.lastRun = some fresh ∧ resident after = true := by
+  cases w with
+  | mk desired status lastRun live outages =>
+    cases live <;> simp [start, stop, stopRuntime, setPolicy, resident, runEnds, sweep]
+
+/-- HOLDS: a policy request that changes nothing changes nothing. -/
+theorem fixed_unchanged_policy_is_a_noop (w : World) : patch true w w.desired = w := by
+  simp [patch]
+
+/-- HOLDS: returning to `running` keeps a Run that already holds renewable authority
+    and binds the policy to it, without an outage. -/
+theorem fixed_keep_running_adopts_renewable_run (w : World) (r : Run)
+    (hd : w.desired = .stopped) (hl : w.live = some r) (hr : r.renewable = true) :
+    let after := patch true w .running
+    after.live = some r ∧ after.outages = w.outages ∧ after.lastRun = some r.id ∧
+      resident after = true := by
+  cases w with
+  | mk desired status lastRun live outages =>
+    simp only at hd hl
+    subst hd hl
+    simp [patch, hr, resident, runEnds, sweep]
+
+/-- HOLDS (negative case): a Run launched under a hard deadline is not adopted. It is
+    drained, and the reconciler replaces it with a renewable one. -/
+theorem fixed_keep_running_replaces_hard_deadline_run (w : World) (r : Run) (fresh : Nat)
+    (hd : w.desired = .stopped) (hl : w.live = some r) (hr : r.renewable = false) :
+    let after := patch true w .running
+    after.live = none ∧ after.status = .waiting ∧
+      (sweep after fresh).live = some ⟨fresh, true⟩ := by
+  cases w with
+  | mk desired status lastRun live outages =>
+    simp only at hd hl
+    subst hd hl
+    simp [patch, hr, stopRuntime, setPolicy, sweep]
+
+/-- HOLDS: Stop still stops, and a stopped Instance is not restarted. -/
+theorem fixed_stop_is_not_resident (w : World) (fresh : Nat) :
+    (stop w).live = none ∧ (sweep (stop w) fresh).live = none := by
+  cases w with
+  | mk desired status lastRun live outages =>
+    cases live <;> simp [stop, stopRuntime, setPolicy, sweep]
+
+inductive Control where
+  | stop | start | keepRunning | keepStopped | runEnds | sweep
+  deriving DecidableEq, Repr
+
+def apply (w : World) (fresh : Nat) : Control → World
+  | .stop => stop w
+  | .start => start true w fresh
+  | .keepRunning => patch true w .running
+  | .keepStopped => patch true w .stopped
+  | .runEnds => runEnds w
+  | .sweep => sweep w fresh
+
+/-- What the owner's controls and the reconciler preserve. A serving Run always belongs
+    to an Instance whose intent is `running`, is renewable, and is either bound to the
+    policy or adopted by the next sweep; an Instance that wants a Run and has none is
+    queued for one. -/
+def supervised (w : World) : Bool :=
+  match w.live with
+  | none => w.desired == .stopped || w.status == .waiting
+  | some r =>
+    w.desired == .running && r.renewable &&
+      (w.lastRun == some r.id || w.status == .waiting)
+
+theorem fixed_control_keeps_supervision (w : World) (fresh : Nat) (c : Control)
+    (h : supervised w = true) : supervised (apply w fresh c) = true := by
+  cases w with
+  | mk desired status lastRun live outages =>
+    cases live with
+    | none =>
+      cases c <;> cases desired <;> cases status <;>
+        simp [apply, stop, start, patch, runEnds, sweep, stopRuntime, setPolicy, supervised] at h ⊢
+    | some run =>
+      cases run with
+      | mk id renewable =>
+        cases desired with
+        | stopped => simp [supervised] at h
+        | running =>
+          cases renewable with
+          | false => simp [supervised] at h
+          | true =>
+            cases c <;> cases status <;>
+              simp [apply, stop, start, patch, runEnds, sweep, stopRuntime, setPolicy, supervised] at h ⊢ <;>
+              (try split) <;> simp_all
+
+/-- HOLDS (the fix): no sequence of Stop, Start, Keep running, Run endings and sweeps
+    reaches "serving but not resident". -/
+theorem fixed_controls_keep_supervision (controls : List (Control × Nat)) :
+    ∀ w, supervised w = true →
+      supervised (controls.foldl (fun w c => apply w c.2 c.1) w) = true := by
+  induction controls with
+  | nil => intro w h; exact h
+  | cons c rest ih =>
+    intro w h
+    exact ih _ (fixed_control_keeps_supervision w c.2 c.1 h)
+
+/-- The unfixed Start breaks that invariant from a supervised state. -/
+theorem unfixed_start_breaks_supervision_BUG :
+    supervised (stop serving) = true ∧ supervised (start false (stop serving) 2) = false := by
+  decide
+
+end AlwaysOnOwnerControls
