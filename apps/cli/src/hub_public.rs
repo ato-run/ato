@@ -2328,7 +2328,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn an_environment_label_is_an_os_arch_pair_not_a_platform_string() {
         for accepted in [
             "macos-arm64",
@@ -2367,6 +2366,7 @@ mod tests {
         assert_eq!(human_bytes(512), "512 bytes");
     }
 
+    #[test]
     fn publish_names_are_owner_and_name() {
         assert_eq!(
             parse_owner_name("koh0920/interop-static").unwrap(),
