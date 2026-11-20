@@ -11,6 +11,9 @@ RUN pnpm build:selfhost
 FROM node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94
 WORKDIR /app
 COPY --from=build --chown=node:node /src/dist/selfhost/ dist/selfhost/
-RUN install -d -m 0700 -o node -g node /var/lib/ato-api
+# The socket directories are named volumes; a new volume takes its owner and
+# mode from here. 64198 is the WhoIs relay's user, node (1000) the API's.
+RUN install -d -m 0700 -o node -g node /var/lib/ato-api /run/ato-api \
+ && install -d -m 0750 -o 64198 -g node /run/ato-whois
 USER node
 ENTRYPOINT ["node", "dist/selfhost/server.mjs"]

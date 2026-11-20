@@ -3,9 +3,30 @@
 	auto_https disable_redirects
 	https_port 8443
 	skip_install_trust
+	# The public listener (:8443) never accepts PROXY protocol. Only the
+	# dedicated listener in the web container's namespace does, and only from
+	# tailscaled, which connects over loopback in that same namespace.
+	servers 127.0.0.1:8444 {
+		listener_wrappers {
+			proxy_protocol {
+				timeout 5s
+				allow 127.0.0.1/32
+				fallback_policy reject
+			}
+			tls
+		}
+	}
 }
 
-https://{$ATO_HOST} {
+# The client address is set by the management listener that observed the
+# connection. It is removed from every request that goes anywhere else.
+(no_network_identity) {
+	request_header -X-Ato-Client-Address
+}
+
+# Both management listeners serve the same site. Keep the handlers in one
+# snippet so the public and Tailscale paths cannot drift.
+(management) {
 	tls {$ATO_TLS:internal}
 	header {
 		X-Content-Type-Options nosniff
@@ -13,7 +34,12 @@ https://{$ATO_HOST} {
 	}
 	@api path /api /api/* /v1 /v1/* /health
 	handle @api {
-		reverse_proxy api:8787
+		# header_up replaces anything the client sent with the TCP peer of
+		# this listener. On 8444, the PROXY protocol wrapper has already
+		# replaced that peer with the tailnet address.
+		reverse_proxy unix//run/ato-api/proxy.sock {
+			header_up X-Ato-Client-Address {remote}
+		}
 	}
 	handle /assets/* {
 		root * /srv
@@ -27,13 +53,39 @@ https://{$ATO_HOST} {
 	}
 }
 
-https://*.{$ATO_APPS_HOST} {
+https://{$ATO_HOST} {
+	import management
+}
+
+# This listener is not published. Only a process in the web container's
+# network namespace, currently the tailscale sidecar, can open it.
+https://{$ATO_HOST}:8444 {
+	bind 127.0.0.1
+	import management
+}
+
+# Applications get no network identity on either listener: the header is
+# removed and the API's TCP listener does not accept one.
+(apps) {
 	tls {$ATO_TLS:internal}
+	import no_network_identity
 	reverse_proxy api:8787
+}
+
+https://*.{$ATO_APPS_HOST} {
+	import apps
+}
+
+# Tailnet clients reach every name through the dedicated listener, so the
+# applications are served there as well.
+https://*.{$ATO_APPS_HOST}:8444 {
+	bind 127.0.0.1
+	import apps
 }
 
 https://runner.{$ATO_HOST} {
 	tls {$ATO_TLS:internal}
+	import no_network_identity
 	@asserted header X-Ato-Run-Assertion *
 	handle @asserted {
 		reverse_proxy unix//run/ato-runner-ingress/surface.sock
