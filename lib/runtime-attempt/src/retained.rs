@@ -18,7 +18,7 @@ use ato_formation::{
 use ato_materializer_static_web::{
     ProducedStaticWebBundle, StaticWebBundleReceiptV1, StaticWebManifestV1,
 };
-use std::{fs, path::Path};
+use std::{fs, io::Read, path::Path};
 
 /// Construct only after the transport caller checks owner, ready state, current
 /// ticket assignment and fence. This type independently verifies all bytes and
@@ -191,6 +191,7 @@ impl RetainedCandidateRealizer<'_> {
                     output: Box::new(validate_static(
                         &root,
                         &self.descriptor.materialization_ref,
+                        None,
                     )?),
                 },
             };
@@ -250,7 +251,21 @@ impl RetainedCandidateRealizer<'_> {
     }
 }
 
-fn validate_static(root: &Path, expected_manifest: &str) -> Result<StaticFormationOutput> {
+/// Preview a retained static artifact using a private copy of the verified blobs.
+pub fn preview_static_artifact(
+    root: &Path,
+    expected_manifest: &str,
+    scratch: &Path,
+) -> Result<crate::static_server::StaticApplicationServer> {
+    let output = validate_static(root, expected_manifest, Some(scratch))?;
+    crate::formation_realizer::serve_static_bundle(&output)
+}
+
+fn validate_static(
+    root: &Path,
+    expected_manifest: &str,
+    preview_snapshot: Option<&Path>,
+) -> Result<StaticFormationOutput> {
     let manifest_bytes = fs::read(root.join("manifest.json"))?;
     ensure!(
         content_ref(&manifest_bytes) == expected_manifest,
@@ -268,6 +283,9 @@ fn validate_static(root: &Path, expected_manifest: &str) -> Result<StaticFormati
         receipt.canonical_bytes()? == receipt_bytes,
         "retained artifact receipt is not canonical"
     );
+    if let Some(snapshot) = preview_snapshot {
+        fs::create_dir_all(snapshot.join("blobs/sha256"))?;
+    }
     for file in manifest.files.values() {
         let hex = file
             .blob
@@ -278,11 +296,17 @@ fn validate_static(root: &Path, expected_manifest: &str) -> Result<StaticFormati
             fs::symlink_metadata(&location)?.is_file(),
             "retained blob is not a regular file"
         );
-        let bytes = fs::read(&location)?;
+        let mut bytes = Vec::new();
+        fs::File::open(&location)?
+            .take(file.size + 1)
+            .read_to_end(&mut bytes)?;
         ensure!(
             bytes.len() as u64 == file.size && content_ref(&bytes) == file.blob,
             "retained blob digest/size mismatch"
         );
+        if let Some(snapshot) = preview_snapshot {
+            fs::write(snapshot.join("blobs/sha256").join(hex), bytes)?;
+        }
     }
     Ok(StaticFormationOutput {
         served_paths: manifest.files.keys().cloned().collect(),
@@ -291,7 +315,7 @@ fn validate_static(root: &Path, expected_manifest: &str) -> Result<StaticFormati
         spa_fallback: manifest.routing.spa_fallback,
         total_bytes: manifest.files.values().map(|f| f.size).sum(),
         bundle: ProducedStaticWebBundle {
-            bundle_root: root.into(),
+            bundle_root: preview_snapshot.unwrap_or(root).into(),
             manifest_bytes,
             receipt_digest: content_ref(&receipt_bytes),
             receipt_bytes,

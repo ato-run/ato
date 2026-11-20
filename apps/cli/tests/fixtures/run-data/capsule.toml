@@ -1,0 +1,43 @@
+schema = "ato.capsule/2"
+
+[application]
+title = "Local notes"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[binding]]
+id = "access_key"
+protocol = "ato.secret@1"
+required = true
+
+[[state]]
+id = "notes"
+use = "ato.state.filesystem@1"
+mount = "/var/lib/notes"
+access = "read-write"
+mount_required = false
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "ready"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/healthz"
+status = 200
+
+[[derivation]]
+id = "notes"
+use = "ato.process@1"
+argv = ["python3", "notes.py", "8080"]
+cwd = "."
+guest_port = 8080
+runtimes = { python = "3.12" }
+
+[effects]
+default = "pure"

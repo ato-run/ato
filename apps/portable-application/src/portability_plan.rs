@@ -15,8 +15,11 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum PortableExportProfile {
+    /// Keep dependency references. A clean host may need to download Python packages or OCI images.
     Thin,
+    /// Embed Python packages. OCI images may still need to be fetched.
     Cached,
+    /// Embed supported dependencies, including verified OCI archives. The target still needs its runtime.
     Offline,
 }
 

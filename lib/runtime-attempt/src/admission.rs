@@ -125,7 +125,9 @@ pub fn admit(
     admit_with_model_delivery(spec, authorization, browser, false, None)
 }
 
-pub(crate) fn admit_with_model_delivery(
+/// Evaluate declared admission with the capabilities of the selected realizer,
+/// without starting a workload.
+pub fn admit_with_model_delivery(
     spec: &AttemptSpec<'_>,
     authorization: EffectAuthorization<'_>,
     browser: Option<&BrowserVerification>,

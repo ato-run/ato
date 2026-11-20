@@ -29,6 +29,23 @@ const UNKNOWN: &str = "unknown";
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        let source = "src/publication/native_window.m";
+        println!("cargo:rerun-if-changed={source}");
+        cc::Build::new()
+            .file(source)
+            .flag("-fobjc-arc")
+            .compile("ato_native_window");
+        for framework in [
+            "ApplicationServices",
+            "CoreGraphics",
+            "Foundation",
+            "Vision",
+        ] {
+            println!("cargo:rustc-link-lib=framework={framework}");
+        }
+        println!("cargo:rustc-link-arg=-Wl,-weak_framework,ScreenCaptureKit");
+    }
     println!("cargo:rerun-if-env-changed={SHA_ENV}");
     println!("cargo:rerun-if-env-changed={REQUIRE_ENV}");
     // Rebuild when HEAD moves, so a binary never reports a stale commit.

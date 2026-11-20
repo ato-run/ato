@@ -55,6 +55,58 @@ fn health_prints_the_authority_status() {
 }
 
 #[test]
+fn health_distinguishes_public_reachable_auth_required_and_unreachable() {
+    let home = tempfile::tempdir().unwrap();
+    for (status, body, expected) in [
+        (200, r#"{"status":"ok"}"#, "status: ok"),
+        (
+            401,
+            r#"{"error":"unauthorized"}"#,
+            "refused access (HTTP 401",
+        ),
+    ] {
+        let (port, requests, handle) = capturing_stub(vec![(status, body)]);
+        let coordinator = format!("http://127.0.0.1:{port}");
+        let output = ato()
+            .env("ATO_HOME", home.path())
+            .env_remove("ATO_COORDINATOR_TOKEN")
+            .args(["data", "health", "--coordinator", &coordinator])
+            .output()
+            .unwrap();
+        handle.join().unwrap();
+        assert_eq!(output.status.success(), status == 200);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            text.contains(&coordinator) && text.contains(expected),
+            "{text}"
+        );
+        assert!(
+            !requests.lock().unwrap()[0]
+                .to_ascii_lowercase()
+                .contains("authorization:")
+        );
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let coordinator = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let output = ato()
+        .env("ATO_HOME", home.path())
+        .env_remove("ATO_COORDINATOR_TOKEN")
+        .args(["data", "health", "--coordinator", &coordinator])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success() && text.contains("Could not reach") && text.contains(&coordinator),
+        "{text}"
+    );
+}
+
+#[test]
 fn create_prints_the_resource_the_authority_created() {
     let (port, handle) = stub(vec![(
         201,

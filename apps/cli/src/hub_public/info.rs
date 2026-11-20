@@ -16,7 +16,7 @@ const MAX_REVISION: u64 = 9_007_199_254_740_990;
 pub struct DescribeArgs {
     /// Public reference: capsules/<owner>/<name>[:tag|@sha256:…].
     pub reference: String,
-    /// Exact declared DerivationRef to read or describe.
+    /// Exact route reference from `ato run <REFERENCE> --list-derivations`.
     #[arg(long)]
     pub derivation: String,
     /// Write {"expected_revision":N,"info":{…}} from this JSON file.

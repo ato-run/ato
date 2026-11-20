@@ -527,6 +527,32 @@ fn v4_bundle_can_be_planned_and_reexported_without_changing_identity() {
 }
 
 #[test]
+fn app_list_empty_and_stop_unknown_report_distinct_states() {
+    let root = tempfile::tempdir().unwrap();
+    let list = ato_with_home(root.path())
+        .args(["app", "list", "--json"])
+        .output()
+        .unwrap();
+    assert!(list.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&list.stdout).unwrap(),
+        serde_json::json!([])
+    );
+
+    let stop = ato_with_home(root.path())
+        .args(["app", "stop", "nonexistent"])
+        .output()
+        .unwrap();
+    let inspect = ato_with_home(root.path())
+        .args(["app", "inspect", "nonexistent"])
+        .output()
+        .unwrap();
+    assert!(!stop.status.success() && !inspect.status.success());
+    assert_eq!(stop.stderr, inspect.stderr);
+    assert!(String::from_utf8_lossy(&stop.stderr).contains("`nonexistent` does not exist"));
+}
+
+#[test]
 fn imported_local_instance_can_stop_and_restart_without_reimporting() {
     let root = tempfile::tempdir().unwrap();
     eprintln!("durable lifecycle: import");
@@ -575,6 +601,14 @@ fn imported_local_instance_can_stop_and_restart_without_reimporting() {
     let first_status: Value = serde_json::from_slice(&first_status.stdout).unwrap();
     assert_eq!(first_status["instance"]["instance_id"], instance_id);
     assert_eq!(first_status["active_run"]["status"], "active");
+    let listed = ato_with_home(root.path())
+        .args(["app", "list", "--json"])
+        .output()
+        .unwrap();
+    assert!(listed.status.success());
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed[0]["instance_id"], instance_id);
+    assert_eq!(listed[0]["status"], "active");
     let first_run = first_status["active_run"]["run_id"]
         .as_str()
         .unwrap()
@@ -594,6 +628,24 @@ fn imported_local_instance_can_stop_and_restart_without_reimporting() {
         .unwrap();
     let stopped: Value = serde_json::from_slice(&stopped.stdout).unwrap();
     assert!(stopped["active_run"].is_null());
+    let listed = ato_with_home(root.path())
+        .args(["app", "list"])
+        .output()
+        .unwrap();
+    assert!(listed.status.success());
+    let listed = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        listed
+            .lines()
+            .any(|line| line.starts_with(instance_id) && line.contains("stopped")),
+        "{listed}"
+    );
+    let stop_again = ato_with_home(root.path())
+        .args(["app", "stop", instance_id])
+        .output()
+        .unwrap();
+    assert!(!stop_again.status.success());
+    assert!(String::from_utf8_lossy(&stop_again.stderr).contains("no active Run"));
 
     let second_receipt = root.path().join("second-receipt.json");
     eprintln!("durable lifecycle: second start");
@@ -1091,4 +1143,24 @@ fn a_run_whose_contract_fails_keeps_nothing_running() {
             Value::from("http_body_digest_mismatch")
         )]
     );
+}
+
+#[test]
+fn missing_capsule_path_is_reported_by_run_import_and_install() {
+    let root = tempfile::tempdir().unwrap();
+    let missing = root.path().join("does-not-exist.capsule");
+    for command in [&["run"][..], &["app", "import"], &["app", "install"]] {
+        let output = ato_with_home(root.path())
+            .args(command)
+            .arg(&missing)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("Capsule file does not exist")
+                && error.contains(missing.to_str().unwrap()),
+            "{error}"
+        );
+    }
 }

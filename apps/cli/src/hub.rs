@@ -158,10 +158,6 @@ fn push(args: PushArgs) -> Result<()> {
         );
     }
     let bytes = fs::read(&capsule).with_context(|| format!("cannot read {}", capsule.display()))?;
-    // Formed-capsule admission is client-side: the hub cannot read the bytes.
-    let contract_ref = validate_formed_bundle(&bytes)
-        .with_context(|| format!("{} must not be pushed", capsule.display()))?;
-
     let hub_url = args
         .hub_url
         .or_else(|| std::env::var(HUB_URL_ENV).ok())
@@ -176,29 +172,64 @@ fn push(args: PushArgs) -> Result<()> {
         .token
         .or_else(|| std::env::var(HUB_TOKEN_ENV).ok())
         .filter(|value| !value.is_empty());
+    let link = push_bytes(&bytes, &base, token.as_deref(), None)
+        .with_context(|| format!("could not push {}", capsule.display()))?;
+    println!("{link}");
+    Ok(())
+}
+
+pub(super) fn push_pinned_bytes(
+    bytes: &[u8],
+    hub_url: &str,
+    allow_loopback_http: bool,
+    scratch: &Path,
+) -> Result<String> {
+    let base = resolve_hub_base(hub_url, allow_loopback_http)?;
+    let token = std::env::var(HUB_URL_ENV)
+        .ok()
+        .and_then(|configured| resolve_hub_base(&configured, allow_loopback_http).ok())
+        .filter(|configured| configured == &base)
+        .and_then(|_| std::env::var(HUB_TOKEN_ENV).ok())
+        .filter(|token| !token.is_empty());
+    push_bytes(bytes, &base, token.as_deref(), Some(scratch))
+}
+
+fn push_bytes(
+    bytes: &[u8],
+    base: &str,
+    token: Option<&str>,
+    scratch: Option<&Path>,
+) -> Result<String> {
+    ensure!(
+        bytes.len() as u64 <= MAX_HUB_PLAINTEXT_BYTES,
+        "The bundle is too large to encrypt and share"
+    );
+    // Formed-capsule admission is client-side: the hub cannot read the bytes.
+    let contract_ref = validate_formed_bundle(bytes).context("the capsule must not be pushed")?;
 
     // Encrypt exactly the bytes that were just validated: re-reading the user's
     // file could encrypt a different (unvalidated) bundle if it changed after
     // validation.
-    let validated = tempfile::Builder::new()
-        .prefix("ato-hub-push-plaintext-")
-        .suffix(".capsule")
-        .tempfile()
+    let file = |prefix, suffix| {
+        let mut options = tempfile::Builder::new();
+        options.prefix(prefix).suffix(suffix);
+        match scratch {
+            Some(path) => options.tempfile_in(path),
+            None => options.tempfile(),
+        }
+    };
+    let validated = file("ato-hub-push-plaintext-", ".capsule")
         .context("failed to create a temporary validation file")?;
-    fs::write(validated.path(), &bytes)
+    fs::write(validated.path(), bytes)
         .context("failed to stage the validated capsule for encryption")?;
-    drop(bytes);
 
     let key = HubKey::generate().context("failed to generate a hub key")?;
-    let ciphertext = tempfile::Builder::new()
-        .prefix("ato-hub-push-")
-        .suffix(".capsule.hub")
-        .tempfile()
+    let ciphertext = file("ato-hub-push-", ".capsule.hub")
         .context("failed to create a temporary ciphertext file")?;
     let object_id = encrypt_file(&key, validated.path(), ciphertext.path())
         .context("failed to encrypt the capsule for the hub")?;
 
-    let url = object_url(&base, &object_id);
+    let url = object_url(base, &object_id);
     let client = hub_client()?;
     let file = fs::File::open(ciphertext.path())
         .context("failed to reopen the encrypted capsule for upload")?;
@@ -212,27 +243,24 @@ fn push(args: PushArgs) -> Result<()> {
         // A known length keeps the upload a single Content-Length body instead
         // of a chunked stream the coordinator would have to buffer differently.
         .body(Body::sized(file, ciphertext_len));
-    if let Some(token) = token.as_deref() {
+    if let Some(token) = token {
         request = request.header(AUTHORIZATION, bearer(token));
     }
     let response = request
         .send()
         .with_context(|| format!("failed to reach the hub at {base}"))?;
-    upload_status(response.status(), &base)?;
+    upload_status(response.status(), base)?;
 
-    let link = SharedLink::new(&base, object_id, key, contract_ref)
+    let link = SharedLink::new(base, object_id, key, contract_ref)
         .context("failed to build the shared link")?;
-    let link = link
-        .to_url(&base)
-        .context("failed to render the shared link")?;
-    // The link carries the key in its fragment; stdout is the user-facing
-    // artifact, not a log.
-    println!("{link}");
-    Ok(())
+    link.to_url(base)
+        .context("failed to render the shared link")
 }
 
 fn pull(args: PullArgs) -> Result<()> {
-    let link = SharedLink::parse(&args.link).context("invalid capsulehub link")?;
+    let link = SharedLink::parse(&args.link).context(
+        "Use the complete share URL printed by `ato hub push`, including its # fragment",
+    )?;
     let base = link.base_url().context("invalid capsulehub link base")?;
     ensure_transport_allowed(&base, args.allow_loopback_http)?;
 
@@ -495,7 +523,7 @@ fn upload_status(status: reqwest::StatusCode, base: &str) -> Result<()> {
 }
 
 /// Resolves and validates the hub base URL supplied for a push.
-fn resolve_hub_base(input: &str, allow_loopback_http: bool) -> Result<String> {
+pub(super) fn resolve_hub_base(input: &str, allow_loopback_http: bool) -> Result<String> {
     let base = input.trim();
     if base.is_empty() {
         bail!("the hub base URL is empty");

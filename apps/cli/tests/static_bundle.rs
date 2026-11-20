@@ -179,3 +179,124 @@ fn v1_rejects_binary_media_and_v2_carries_it() {
     );
     assert!(out_v2.exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn local_formation_prints_a_working_static_preview_command() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command as ProcessCommand, Stdio};
+    use std::time::Duration;
+
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("ato-home");
+    let source = root.path().join("source");
+    let destination = root.path().join("formed site's output");
+    fs::create_dir(&source).unwrap();
+    fs::write(
+        source.join("index.html"),
+        "<!doctype html><h1>Formed site</h1>",
+    )
+    .unwrap();
+    fs::write(source.join("style.css"), "h1 { color: blue }").unwrap();
+    let formed = ato()
+        .env("ATO_HOME", &home)
+        .arg("form")
+        .arg(&source)
+        .arg("--out")
+        .arg(&destination)
+        .output()
+        .unwrap();
+    let summary = String::from_utf8_lossy(&formed.stderr);
+    assert!(formed.status.success(), "{summary}");
+    let result: serde_json::Value = serde_json::from_slice(&formed.stdout).unwrap();
+    assert_eq!(result["status"], "formed");
+    let command = summary
+        .lines()
+        .find_map(|line| line.strip_prefix("Preview it with: "))
+        .unwrap();
+    let mut preview = ProcessCommand::new("/bin/sh")
+        .env("ATO_HOME", &home)
+        .env(
+            "PATH",
+            Path::new(env!("CARGO_BIN_EXE_ato")).parent().unwrap(),
+        )
+        .args(["-c", &format!("exec {command} --no-open")])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = preview.stdout.take().unwrap();
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let output = BufReader::new(stdout).read_line(&mut line).map(|_| line);
+        let _ = send.send(output);
+    });
+    let result = (|| -> anyhow::Result<_> {
+        let line = receive.recv_timeout(Duration::from_secs(10))??;
+        let url = line
+            .trim()
+            .strip_prefix("Preview: ")
+            .ok_or_else(|| anyhow::anyhow!("missing preview URL: {line:?}"))?;
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()?;
+        let html = client.get(url).send()?.error_for_status()?.text()?;
+        let css = client
+            .get(format!("{url}/style.css"))
+            .send()?
+            .error_for_status()?
+            .text()?;
+        Ok((url.to_owned(), html, css))
+    })();
+    // SAFETY: send SIGTERM to the specific child started above.
+    unsafe { libc::kill(preview.id().try_into().unwrap(), libc::SIGTERM) };
+    assert!(preview.wait().unwrap().success());
+    let (url, html, css) = result.unwrap();
+    assert!(url.starts_with("http://127.0.0.1:"), "{url}");
+    assert!(html.contains("Formed site"), "{html}");
+    assert_eq!(css, "h1 { color: blue }");
+
+    let bundles = destination.join("bundles");
+    let artifact = fs::read_dir(bundles)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let blob = fs::read_dir(artifact.join("blobs/sha256"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::write(blob, "tampered").unwrap();
+    let refused = ato()
+        .env("ATO_HOME", home)
+        .args(["form-preview", "--no-open"])
+        .arg(artifact)
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("blob digest/size mismatch"));
+    assert!(refused.stdout.is_empty());
+}
+
+#[test]
+fn local_formation_reports_missing_source_requirements_on_stderr() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("empty");
+    fs::create_dir(&source).unwrap();
+    let formed = ato()
+        .arg("form")
+        .arg(source)
+        .arg("--out")
+        .arg(root.path().join("output"))
+        .args(["--max-attempts", "1", "--json"])
+        .output()
+        .unwrap();
+    assert!(!formed.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&formed.stdout).unwrap();
+    assert_eq!(result["status"], "no_verified_route");
+    assert!(String::from_utf8_lossy(&formed.stderr).contains("index.html"));
+}

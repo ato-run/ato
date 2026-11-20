@@ -79,6 +79,24 @@ fn extract_tar_reader_with<R: Read>(
     destination: &Path,
     limits: ExtractLimits,
 ) -> Result<ExtractedArtifact> {
+    extract_checked_tar(archive, destination, limits, || Ok(()))
+}
+
+pub(super) fn extract_budgeted_tar(
+    bytes: &[u8],
+    destination: &Path,
+    checkpoint: impl Fn() -> Result<()>,
+) -> Result<ExtractedArtifact> {
+    extract_checked_tar(bytes, destination, ARTIFACT_LIMITS, checkpoint)
+}
+
+fn extract_checked_tar<R: Read>(
+    archive: R,
+    destination: &Path,
+    limits: ExtractLimits,
+    checkpoint: impl Fn() -> Result<()>,
+) -> Result<ExtractedArtifact> {
+    checkpoint()?;
     ensure!(
         !destination.exists(),
         "artifact destination already exists: {}",
@@ -99,6 +117,7 @@ fn extract_tar_reader_with<R: Read>(
         .entries()
         .context("the native artifact is not a readable tar archive")?
     {
+        checkpoint()?;
         let mut entry = entry.context("the native artifact entry is unreadable")?;
         entries += 1;
         ensure!(
@@ -153,6 +172,7 @@ fn extract_tar_reader_with<R: Read>(
                 let mut written = 0_u64;
                 let mut buffer = [0_u8; 64 * 1024];
                 loop {
+                    checkpoint()?;
                     let read = entry
                         .read(&mut buffer)
                         .context("read a native artifact entry")?;
@@ -214,6 +234,7 @@ fn extract_tar_reader_with<R: Read>(
     for _ in 0..8 {
         let pending = std::mem::take(&mut links);
         for (link, target) in pending {
+            checkpoint()?;
             let Some(resolved) = resolve_inside(&link, &target) else {
                 bail!(
                     "native artifact symlink '{}' points outside the artifact",
@@ -265,6 +286,7 @@ fn extract_tar_reader_with<R: Read>(
         !files.is_empty(),
         "the native artifact carries no regular file"
     );
+    checkpoint()?;
     finish(destination, files, total_bytes)
 }
 

@@ -181,6 +181,10 @@ pub struct BrowserVerificationRequest {
     /// profile lives here, so anything the verifier leaves running can be
     /// found by it and stopped.
     pub scratch_dir: String,
+    /// An optional Ato-owned interactive operator mailbox in the scratch
+    /// directory. The legacy helper exchange omits this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_session: Option<String>,
 }
 
 pub const BROWSER_VERIFIER_PROTOCOL: &str = "ato.browser-verifier/0";

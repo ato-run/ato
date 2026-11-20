@@ -498,24 +498,7 @@ fn realize_static(
     output: &crate::static_lane::StaticFormationOutput,
     planned: &PlannedCandidate,
 ) -> Result<(Box<dyn RunningCandidate>, RealizationEvidence)> {
-    let manifest: ato_materializer_static_web::StaticWebManifestV1 =
-        serde_json::from_slice(&output.bundle.manifest_bytes)
-            .context("read the produced static web manifest")?;
-    let blobs = output.bundle.bundle_root.join("blobs");
-    let mut routes = BTreeMap::new();
-    for (path, file) in &manifest.files {
-        let (algorithm, hex) = file
-            .blob
-            .split_once(':')
-            .with_context(|| format!("{path}: blob {} is not a digest", file.blob))?;
-        let location: PathBuf = blobs.join(algorithm).join(hex);
-        routes.insert(format!("/{path}"), (location, file.media_type.clone()));
-    }
-    let server = serve_off_pending_ports(
-        routes,
-        format!("/{}", manifest.entry_path),
-        manifest.routing.spa_fallback,
-    )?;
+    let server = serve_static_bundle(output)?;
     let base = server.base_url();
     let mut evidence = RealizationEvidence {
         port_operations: vec![],
@@ -548,6 +531,29 @@ fn realize_static(
         }),
         evidence,
     ))
+}
+
+pub(crate) fn serve_static_bundle(
+    output: &crate::static_lane::StaticFormationOutput,
+) -> Result<StaticApplicationServer> {
+    let manifest: ato_materializer_static_web::StaticWebManifestV1 =
+        serde_json::from_slice(&output.bundle.manifest_bytes)
+            .context("read the produced static web manifest")?;
+    let blobs = output.bundle.bundle_root.join("blobs");
+    let mut routes = BTreeMap::new();
+    for (path, file) in &manifest.files {
+        let (algorithm, hex) = file
+            .blob
+            .split_once(':')
+            .with_context(|| format!("{path}: blob {} is not a digest", file.blob))?;
+        let location: PathBuf = blobs.join(algorithm).join(hex);
+        routes.insert(format!("/{path}"), (location, file.media_type.clone()));
+    }
+    serve_off_pending_ports(
+        routes,
+        format!("/{}", manifest.entry_path),
+        manifest.routing.spa_fallback,
+    )
 }
 
 /// A loopback static server, never on a port a process realization chose

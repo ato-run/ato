@@ -21,9 +21,15 @@ pub struct DataArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum DataCommand {
-    /// Report the Coordinator's health.
+    /// Check whether the selected Coordinator is reachable and healthy.
+    #[command(
+        after_long_help = "A public health endpoint works without logging in. An explicitly supplied or saved Coordinator credential is accepted for servers that require one."
+    )]
     Health(CoordinatorArgs),
     /// Inspect or create Resources.
+    #[command(
+        after_long_help = "List IDs: ato data resource list\nInspect a result: ato data resource inspect <RESOURCE_ID>\nUse the same --coordinator for both commands."
+    )]
     Resource {
         #[command(subcommand)]
         command: ResourceCommand,
@@ -34,11 +40,17 @@ pub enum DataCommand {
         command: OperationCommand,
     },
     /// Bind a Resource to a Port and use the binding.
+    #[command(
+        after_long_help = "Find binding and Instance IDs on this Coordinator: ato data binding list\nFilter by a returned Instance ID: ato data binding list --instance <INSTANCE_ID>\nRead a returned binding: ato data binding document <BINDING_ID>"
+    )]
     Binding {
         #[command(subcommand)]
         command: BindingCommand,
     },
     /// Register a Protocol operation with its publisher.
+    #[command(
+        after_long_help = "Discover Protocol names: ato data protocol list\nFilter registrations: ato data protocol list --protocol todo.board@1"
+    )]
     Protocol {
         #[command(subcommand)]
         command: ProtocolCommand,
@@ -61,7 +73,7 @@ pub struct CoordinatorArgs {
     /// Bearer token for the Coordinator. When omitted, the token stored by
     /// ato login for the same API origin is used, so the CLI and the PWA act
     /// as the same identity.
-    #[arg(long, env = "ATO_COORDINATOR_TOKEN")]
+    #[arg(long, env = "ATO_COORDINATOR_TOKEN", hide_env_values = true)]
     pub token: Option<String>,
     /// First-party Origin to present. The hosted API's DataResource routes are
     /// fenced to first-party origins; Desktop's local Coordinator trusts
@@ -79,12 +91,14 @@ pub enum ResourceCommand {
     List(CoordinatorArgs),
     /// Read one Resource, including its document.
     Inspect {
+        /// ID from `ato data resource list` on this Coordinator.
         resource_id: String,
         #[command(flatten)]
         coordinator: CoordinatorArgs,
     },
     /// Export one Resource's document with its digest to a JSON file.
     Export {
+        /// ID from `ato data resource list` on this Coordinator.
         resource_id: String,
         #[arg(long)]
         out: PathBuf,
@@ -145,6 +159,7 @@ pub enum ResourceCommand {
 pub enum OperationCommand {
     /// Commit a document under compare-and-set, exactly once per operation id.
     Invoke {
+        /// ID from `ato data resource list` on this Coordinator.
         resource_id: String,
         #[arg(long)]
         operation_id: String,
@@ -164,6 +179,7 @@ pub enum OperationCommand {
 pub enum BindingCommand {
     /// List bindings (optionally only one app instance's).
     List {
+        /// Coordinator-side Instance ID from an unfiltered `ato data binding list`.
         #[arg(long)]
         instance: Option<String>,
         #[command(flatten)]
@@ -171,9 +187,12 @@ pub enum BindingCommand {
     },
     /// Bind a Resource to a Port. `--access operations` is operation-only.
     Create {
+        /// ID from `ato data resource list` on this Coordinator.
         resource_id: String,
+        /// The logical Port name expected by the app.
         #[arg(long)]
         port: String,
+        /// Port Protocol, including its version. See `ato data protocol list`.
         #[arg(long)]
         protocol: String,
         #[arg(long, default_value = "read")]
@@ -181,8 +200,8 @@ pub enum BindingCommand {
         /// Operations an operation-only binding may invoke (comma separated).
         #[arg(long, value_delimiter = ',')]
         operations: Vec<String>,
-        /// App instance this binding answers for. Omit for an owner-level
-        /// binding; a served app's bridge only sees bindings for its instance.
+        /// Coordinator-side Instance ID from the serving app's record or
+        /// an existing row in `ato data binding list`. Omit for an owner-level binding.
         #[arg(long)]
         instance_id: Option<String>,
         #[command(flatten)]
@@ -190,12 +209,14 @@ pub enum BindingCommand {
     },
     /// Read the document through a binding (refused for operation-only).
     Document {
+        /// ID from `ato data binding list` on this Coordinator.
         binding_id: String,
         #[command(flatten)]
         coordinator: CoordinatorArgs,
     },
     /// Invoke an operation through a binding.
     Invoke {
+        /// ID from `ato data binding list` on this Coordinator.
         binding_id: String,
         #[arg(long)]
         operation: String,
@@ -216,6 +237,7 @@ pub enum BindingCommand {
     },
     /// Revoke a binding.
     Revoke {
+        /// ID from `ato data binding list` on this Coordinator.
         binding_id: String,
         #[command(flatten)]
         coordinator: CoordinatorArgs,
@@ -226,6 +248,7 @@ pub enum BindingCommand {
 pub enum ProtocolCommand {
     /// List registered operations (all protocols, or one).
     List {
+        /// Protocol name including its version. Omit to see all registrations.
         #[arg(long)]
         protocol: Option<String>,
         #[command(flatten)]
@@ -428,20 +451,35 @@ fn request(
     path: &str,
     body: Option<Value>,
 ) -> Result<Value> {
+    let token = bearer(coordinator)?;
+    decode_response(send_request(coordinator, method, path, body, Some(&token))?)
+}
+
+fn send_request(
+    coordinator: &CoordinatorArgs,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<Value>,
+    token: Option<&str>,
+) -> Result<reqwest::blocking::Response> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
         .context("build coordinator client")?;
-    let mut request = client
-        .request(method, format!("{}{path}", base(coordinator)))
-        .header("authorization", format!("Bearer {}", bearer(coordinator)?));
+    let mut request = client.request(method, format!("{}{path}", base(coordinator)));
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
     if let Some(origin) = &coordinator.origin {
         request = request.header("origin", origin);
     }
     if let Some(body) = body {
         request = request.json(&body);
     }
-    let response = request.send().context("coordinator request failed")?;
+    Ok(request.send()?)
+}
+
+fn decode_response(response: reqwest::blocking::Response) -> Result<Value> {
     let status = response.status();
     let value: Value = response.json().unwrap_or(Value::Null);
     if !status.is_success() {
@@ -460,10 +498,43 @@ fn print_json(value: &Value) -> Result<()> {
 }
 
 fn health(coordinator: &CoordinatorArgs) -> Result<()> {
-    let value = request(coordinator, reqwest::Method::GET, "/health", None)?;
+    let origin = crate::auth_device::api_origin(&coordinator.coordinator)
+        .context("Check the --coordinator URL")?;
+    let token = match &coordinator.token {
+        Some(token) => Ok(Some(token.clone())),
+        None => crate::auth_device::load_credential(&origin)
+            .map(|credential| credential.map(|credential| credential.token)),
+    };
+    let response = send_request(
+        coordinator,
+        reqwest::Method::GET,
+        "/health",
+        None,
+        token.as_ref().ok().and_then(|token| token.as_deref()),
+    )
+    .map_err(|error| {
+        if error.downcast_ref::<reqwest::Error>().is_some_and(|error| error.is_connect() || error.is_timeout()) {
+            anyhow::anyhow!("Could not reach the Coordinator at {origin}. Check that it is running and retry with the correct --coordinator URL")
+        } else {
+            error.context(format!("Could not check Coordinator health at {origin}"))
+        }
+    })?;
+    if matches!(
+        response.status(),
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        let status = response.status();
+        token.with_context(|| format!("Reached the Coordinator at {origin}, but could not load its credential (HTTP {status})"))?;
+        bail!(
+            "Reached the Coordinator at {origin}, but it refused access (HTTP {status}). Check the Coordinator credential or run `ato login --api-url {origin}`"
+        );
+    }
+    let value = decode_response(response)
+        .with_context(|| format!("Coordinator health check failed at {origin}"))?;
     if coordinator.json {
         return print_json(&value);
     }
+    println!("Coordinator: {origin}");
     println!(
         "status: {}",
         value
@@ -471,20 +542,11 @@ fn health(coordinator: &CoordinatorArgs) -> Result<()> {
             .and_then(Value::as_str)
             .unwrap_or("unknown")
     );
-    println!(
-        "schema_version: {}",
-        value
-            .get("schema_version")
-            .and_then(Value::as_i64)
-            .unwrap_or_default()
-    );
-    println!(
-        "resources: {}",
-        value
-            .get("resources")
-            .and_then(Value::as_i64)
-            .unwrap_or_default()
-    );
+    for key in ["schema_version", "resources"] {
+        if let Some(number) = value.get(key).and_then(Value::as_i64) {
+            println!("{key}: {number}");
+        }
+    }
     Ok(())
 }
 

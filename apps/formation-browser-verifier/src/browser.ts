@@ -17,11 +17,13 @@
 
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
-import { Stagehand } from "@browserbasehq/stagehand";
+import { LLMClient, Stagehand } from "@browserbasehq/stagehand";
 import { z } from "zod";
 
 import { OriginGuard } from "./guard.ts";
+import type { ActionStatus, InteractiveAction, InteractiveElement } from "./interactive.ts";
 import {
   type Action,
   type BrowserEvent,
@@ -154,17 +156,26 @@ const SNAPSHOT_EXPRESSION = `JSON.stringify({
   navigationType: (performance.getEntriesByType("navigation")[0] || {}).type || null
 })`;
 
+class BrowserOnlyClient extends LLMClient {
+  override async createChatCompletion(): Promise<never> {
+    throw new Error("model_disabled_for_structured_operations");
+  }
+}
+
 export class StagehandDriver implements BrowserDriver {
   private stagehand: Stagehand | null = null;
   private guard: OriginGuard | null = null;
   private browserVersion: string | null = null;
   private origin = "";
   private readonly recorded: BrowserEvent[] = [];
+  private operatorContext: number | null = null;
+  private documentEpoch = 0;
+  private observedEpoch = 0;
 
   constructor(
     private readonly options: {
       agentModel: string;
-      agentApiKey: string;
+      agentApiKey: string | null;
       scratchDir: string;
       chromePath?: string;
       /// The run's shared sequence, so events and evidence interleave.
@@ -178,7 +189,13 @@ export class StagehandDriver implements BrowserDriver {
   }
 
   private event(kind: BrowserEvent["kind"], url: string | null) {
-    if (this.recorded.length >= MAX_EVENTS) return;
+    if (this.recorded.length >= MAX_EVENTS) {
+      if (kind !== "blocked_request" && kind !== "origin_violation") return;
+      const replace = this.recorded.findIndex((event) =>
+        event.kind !== "blocked_request" && event.kind !== "origin_violation");
+      if (replace === -1) return;
+      this.recorded.splice(replace, 1);
+    }
     this.recorded.push({ sequence: this.options.sequence(), kind, url: url ? bound(url, 1024) : null });
   }
 
@@ -190,7 +207,9 @@ export class StagehandDriver implements BrowserDriver {
     this.guard = await OriginGuard.start();
     const stagehand = new Stagehand({
       env: "LOCAL",
-      model: { modelName: this.options.agentModel, apiKey: this.options.agentApiKey },
+      ...(this.options.agentApiKey === null
+        ? { model: DEFAULT_AGENT_MODEL, llmClient: new BrowserOnlyClient(DEFAULT_AGENT_MODEL) }
+        : { model: { modelName: this.options.agentModel, apiKey: this.options.agentApiKey } }),
       systemPrompt: AGENT_SYSTEM_PROMPT,
       verbose: 0,
       disablePino: true,
@@ -224,9 +243,13 @@ export class StagehandDriver implements BrowserDriver {
     const session = page.getSessionForFrame(page.mainFrameId());
     session.on<{ frame: { parentId?: string; url: string } }>("Page.frameNavigated", (params) => {
       if (!params.frame.parentId) {
+        this.documentEpoch++;
         this.event("navigation", params.frame.url);
         if (!onOrigin(params.frame.url, this.origin)) this.event("origin_violation", params.frame.url);
       }
+    });
+    session.on<{ url: string }>("Page.windowOpen", (params) => {
+      if (!onOrigin(params.url, this.origin)) this.event("origin_violation", params.url);
     });
     session.on("Page.loadEventFired", () => this.event("load", page.url() || null));
     // Requests the page itself made. Anything off the candidate's origin was
@@ -246,6 +269,7 @@ export class StagehandDriver implements BrowserDriver {
 
   async runTask(instruction: string, maxSteps: number, signal: AbortSignal): Promise<TaskOutcome> {
     if (!this.stagehand) throw new Error("browser_not_started");
+    if (this.options.agentApiKey === null) throw new AgentFailed("model_disabled");
     const agent = this.stagehand.agent({
       model: { modelName: this.options.agentModel, apiKey: this.options.agentApiKey },
       systemPrompt: AGENT_SYSTEM_PROMPT,
@@ -274,6 +298,7 @@ export class StagehandDriver implements BrowserDriver {
   async observe(focus: string): Promise<Observation> {
     if (!this.stagehand) throw new Error("browser_not_started");
     const snapshot = await this.snapshot();
+    if (this.options.agentApiKey === null) return { snapshot, facts: [], factsUnavailable: false };
     let facts: string[] = [];
     let factsUnavailable = false;
     try {
@@ -288,13 +313,112 @@ export class StagehandDriver implements BrowserDriver {
     return { snapshot, facts, factsUnavailable };
   }
 
+  async interactiveObserve(): Promise<{ snapshot: Snapshot; elements: InteractiveElement[] }> {
+    const page = this.page();
+    const before = this.documentEpoch;
+    const context = await page.sendCDP<{executionContextId: number}>("Page.createIsolatedWorld", {
+      frameId: page.mainFrameId(), worldName: "ato-verification-operator",
+    });
+    this.operatorContext = context.executionContextId;
+    const elements = await this.operatorEvaluate<InteractiveElement[]>(`(() => {
+      const canType = el => el instanceof HTMLTextAreaElement ||
+        el instanceof HTMLInputElement && ["text","search","email","number","url","tel"].includes(el.type);
+      const visible = el => {
+        const box = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return box.width > 0 && box.height > 0 && style.visibility === "visible" && style.display !== "none";
+      };
+      const actionable = el => visible(el) && !el.disabled && el.getAttribute("aria-disabled") !== "true" &&
+        (canType(el) || el.matches("button, a[href]:not([download]):not([target]), input[type=button], input[type=submit], [role=button]"));
+      const controls = Array.from(document.querySelectorAll("button,a[href],input,textarea,[role=button]"))
+        .filter(actionable).slice(0, 100);
+      const rows = controls.map(el => ({el, markup: el.outerHTML, input: canType(el)}));
+      globalThis.__atoOperatorView = { href: location.href, rows, actionable };
+      return rows.map(({el, input}, index) => ({
+        id: index + 1,
+        kind: el.tagName.toLowerCase(),
+        label: (el.getAttribute("aria-label") || el.innerText || el.getAttribute("placeholder") || "").slice(0, 160),
+        can_type: input,
+      }));
+    })()`);
+    const snapshot = await this.snapshot();
+    this.observedEpoch = before;
+    return { snapshot, elements: before === this.documentEpoch ? elements : [] };
+  }
+
+  async interactiveAct(action: InteractiveAction): Promise<ActionStatus> {
+    if (this.observedEpoch !== this.documentEpoch || this.operatorContext === null) return "stale";
+    try {
+      const href = await this.operatorEvaluate<string>("globalThis.__atoOperatorView.href");
+      if (!onOrigin(href, this.origin)
+        || href !== await this.operatorEvaluate<string>("location.href")) return "stale";
+      if (action.kind === "navigate") {
+        if (!action.path.startsWith("/") || action.path.startsWith("//") || /[\\\\?#]/.test(action.path)) return "refused";
+        const route = new URL(action.path, this.origin);
+        if (route.origin !== this.origin) return "refused";
+        await this.page().goto(route.href, { waitUntil: "load" });
+        return "applied";
+      }
+      if (action.kind === "reload") {
+        const previous = this.documentEpoch;
+        await this.page().sendCDP("Page.reload");
+        for (let attempt = 0; attempt < 50; attempt++) {
+          if (this.documentEpoch > previous) {
+            const document = await this.page().sendCDP<{result: {value?: string}}>("Runtime.evaluate", {
+              expression: "document.readyState", returnByValue: true,
+            }).catch(() => null);
+            if (document?.result.value === "complete") return "applied";
+          }
+          await delay(25);
+        }
+        return "stale";
+      }
+      if (action.kind === "finish") return "refused";
+      // Re-check and act on the same actual element within a single browser
+      // execution. No selector, coordinates, or script comes from the client.
+      return await this.operatorEvaluate<ActionStatus>(`(() => {
+        const view = globalThis.__atoOperatorView;
+        const action = ${JSON.stringify(action)};
+        if (!view || location.href !== view.href) return "stale";
+        const item = view.rows[action.element - 1];
+        if (!item || !item.el.isConnected || item.el.outerHTML !== item.markup || !view.actionable(item.el)) return "stale";
+        if (action.kind === "click") {
+          if (item.input) return "refused";
+          item.el.click();
+        } else {
+          if (!item.input) return "refused";
+          item.el.value = action.text;
+          item.el.dispatchEvent(new Event("input", {bubbles:true}));
+          item.el.dispatchEvent(new Event("change", {bubbles:true}));
+        }
+        return "applied";
+      })()`);
+    } catch {
+      return "stale";
+    } finally {
+      this.operatorContext = null;
+    }
+  }
+
+  private async operatorEvaluate<T>(expression: string): Promise<T> {
+    const result = await this.page().sendCDP<{result: {value?: T}; exceptionDetails?: unknown}>("Runtime.evaluate", {
+      expression, contextId: this.operatorContext!, returnByValue: true,
+    });
+    if (result.exceptionDetails || result.result.value === undefined) throw new Error("observation_unavailable");
+    return result.result.value;
+  }
+
   /// URL, title, visible text and navigation type, straight from the page.
   private async snapshot(): Promise<Snapshot> {
     const page = this.page();
     let read: { url?: string; title?: string; text?: string; navigationType?: string | null } = {};
     try {
+      const context = await page.sendCDP<{executionContextId: number}>("Page.createIsolatedWorld", {
+        frameId: page.mainFrameId(), worldName: "ato-verification-snapshot",
+      });
       const evaluated = await page.sendCDP<{ result?: { value?: string } }>("Runtime.evaluate", {
         expression: SNAPSHOT_EXPRESSION,
+        contextId: context.executionContextId,
         returnByValue: true,
       });
       read = JSON.parse(evaluated.result?.value ?? "{}");

@@ -49,12 +49,57 @@ pub struct ProcessServiceGroup {
     services: Vec<RunningService>,
 }
 
+/// A start failed and the supervisor could not prove every process stopped.
+#[derive(Debug, thiserror::Error)]
+#[error("native process startup cleanup was not confirmed: {cleanup}")]
+pub(crate) struct StartCleanupUnconfirmed {
+    #[source]
+    pub error: anyhow::Error,
+    pub cleanup: String,
+    pub resources: Vec<String>,
+}
+
 impl ProcessServiceGroup {
     /// Start every service in order. A service starts only after every earlier
     /// service accepts TCP on its readiness address; any failure stops and
     /// reaps what already started before returning.
     pub fn start(workspace: &std::path::Path, services: Vec<ServiceSpec>) -> Result<Self> {
-        Self::start_with_readiness(workspace, services, true)
+        Self::start_with_readiness(
+            workspace,
+            services,
+            || Ok(()),
+            |group, address| {
+                group.wait_until_ready(
+                    address,
+                    || Ok(READY_TIMEOUT),
+                    |timeout| TcpStream::connect_timeout(&address, timeout).is_ok(),
+                )
+            },
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn start_bounded(
+        workspace: &std::path::Path,
+        services: Vec<ServiceSpec>,
+        control: &ato_runtime_attempt::control::ExecutionControl,
+        ingress: &BTreeMap<SocketAddr, ato_runtime_attempt::network_bridge::IngressBridge>,
+    ) -> Result<Self> {
+        use ato_runtime_attempt::control::AttemptPhase;
+
+        Self::start_with_readiness(
+            workspace,
+            services,
+            || control.remaining(AttemptPhase::Launch).map(|_| ()),
+            |group, address| {
+                let bridge = ingress.get(&address).context("missing scoped ingress")?;
+                group.wait_until_ready(
+                    address,
+                    || control.remaining(AttemptPhase::Launch),
+                    |timeout| bridge.wait_for_accept(timeout).is_ok(),
+                )
+            },
+        )
     }
 
     /// The caller must observe its non-socket readiness before accepting the Run.
@@ -63,13 +108,14 @@ impl ProcessServiceGroup {
         workspace: &std::path::Path,
         services: Vec<ServiceSpec>,
     ) -> Result<Self> {
-        Self::start_with_readiness(workspace, services, false)
+        Self::start_with_readiness(workspace, services, || Ok(()), |_, _| Ok(()))
     }
 
     fn start_with_readiness(
         workspace: &std::path::Path,
         services: Vec<ServiceSpec>,
-        socket_ready: bool,
+        before_spawn: impl Fn() -> Result<()>,
+        wait: impl Fn(&mut Self, SocketAddr) -> Result<()>,
     ) -> Result<Self> {
         if services.is_empty() {
             bail!("a native process service group declares no service");
@@ -98,20 +144,21 @@ impl ProcessServiceGroup {
                     return Err(group.fail(error));
                 }
             }
-            let adapter = ProcessAdapter::new(ProcessSpec {
-                id: spec.name.clone(),
-                command: spec.command,
-                cwd: spec.cwd,
-                environment: spec.environment,
-                isolated_group: true,
-            })
-            .with_context(|| format!("prepare service `{}`", spec.name))?;
-            let handle = match adapter.spawn(workspace) {
+            let start = || -> Result<ProcessHandle> {
+                before_spawn()?;
+                Ok(ProcessAdapter::new(ProcessSpec {
+                    id: spec.name.clone(),
+                    command: spec.command,
+                    cwd: spec.cwd,
+                    environment: spec.environment,
+                    isolated_group: true,
+                })?
+                .spawn(workspace)?)
+            };
+            let handle = match start() {
                 Ok(handle) => handle,
                 Err(error) => {
-                    return Err(group.fail(
-                        anyhow::Error::new(error).context(format!("start service `{}`", spec.name)),
-                    ));
+                    return Err(group.fail(error.context(format!("start service `{}`", spec.name))));
                 }
             };
             group.services.push(RunningService {
@@ -119,7 +166,7 @@ impl ProcessServiceGroup {
                 handle,
                 helpers: spec.helpers,
             });
-            if socket_ready && let Err(error) = group.wait_until_ready(spec.readiness) {
+            if let Err(error) = wait(&mut group, spec.readiness) {
                 return Err(group.fail(error));
             }
         }
@@ -156,28 +203,29 @@ impl ProcessServiceGroup {
 
     /// Stop every component in reverse start order and prove it is gone.
     pub fn stop(mut self) -> Result<()> {
-        let mut failures = Vec::new();
-        for service in self.services.iter_mut().rev() {
-            if let Err(error) = stop_group(&service.name, &mut service.handle) {
-                failures.push(format!("{error:#}"));
-            }
-            for helper in service.helpers.iter_mut().rev() {
-                if let Err(error) = stop_group(&helper.name, &mut helper.handle) {
-                    failures.push(format!("{error:#}"));
-                }
-            }
-        }
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            bail!(
-                "process group was not fully stopped: {}",
-                failures.join("; ")
-            )
-        }
+        self.stop_owned()
     }
 
-    fn wait_until_ready(&mut self, readiness: SocketAddr) -> Result<()> {
+    pub(crate) fn resources(&self) -> Vec<String> {
+        self.services
+            .iter()
+            .flat_map(|service| {
+                std::iter::once(format!("process_group:{}", service.handle.process_group())).chain(
+                    service
+                        .helpers
+                        .iter()
+                        .map(|helper| format!("process_group:{}", helper.handle.process_group())),
+                )
+            })
+            .collect()
+    }
+
+    fn wait_until_ready(
+        &mut self,
+        readiness: SocketAddr,
+        remaining: impl Fn() -> Result<Duration>,
+        probe: impl Fn(Duration) -> bool,
+    ) -> Result<()> {
         let deadline = Instant::now() + READY_TIMEOUT;
         loop {
             for service in &mut self.services {
@@ -197,10 +245,8 @@ impl ProcessServiceGroup {
                     }
                 }
             }
-            if TcpStream::connect_timeout(&readiness, Duration::from_millis(250)).is_ok() {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
+            let left = remaining()?.min(deadline.saturating_duration_since(Instant::now()));
+            if left.is_zero() {
                 bail!(
                     "service `{}` did not accept TCP on {readiness} within {}s",
                     self.services
@@ -210,14 +256,25 @@ impl ProcessServiceGroup {
                     READY_TIMEOUT.as_secs()
                 );
             }
-            std::thread::sleep(Duration::from_millis(100));
+            if probe(left.min(Duration::from_millis(250))) {
+                remaining()?;
+                return Ok(());
+            }
+            let left = remaining()?.min(deadline.saturating_duration_since(Instant::now()));
+            std::thread::sleep(left.min(Duration::from_millis(100)));
         }
     }
 
     /// Stop and reap after a failed start; the reported error stays primary.
     fn fail(mut self, error: anyhow::Error) -> anyhow::Error {
+        let resources = self.resources();
         if let Err(stop) = self.stop_owned() {
-            return error.context(format!("additionally, {stop:#}"));
+            return StartCleanupUnconfirmed {
+                error,
+                cleanup: format!("{stop:#}"),
+                resources,
+            }
+            .into();
         }
         error
     }
