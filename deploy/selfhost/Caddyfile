@@ -88,6 +88,19 @@ https://runner.{$ATO_HOST} {
 	import no_network_identity
 	@asserted header X-Ato-Run-Assertion *
 	handle @asserted {
+		# The API names the app's public host in X-Forwarded-Host. The app sees
+		# that name as Host, not this site's name, so its own Origin and
+		# redirect checks work. The gate still verifies the assertion first.
+		@public_host header X-Forwarded-Host *
+		reverse_proxy @public_host unix//run/ato-runner-ingress/surface.sock {
+			header_up Host {http.request.header.X-Forwarded-Host}
+			header_up X-Forwarded-Host {http.request.header.X-Forwarded-Host}
+			# One request per upstream connection: the Runner gate verifies each
+			# request's assertion only when its connection opens.
+			transport http {
+				keepalive off
+			}
+		}
 		reverse_proxy unix//run/ato-runner-ingress/surface.sock {
 			# One request per upstream connection: the Runner gate verifies each
 			# request's assertion only when its connection opens.
