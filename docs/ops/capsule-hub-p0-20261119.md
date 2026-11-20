@@ -164,3 +164,26 @@ PR #1912 が扱う単一コンテナOCIのDocker Desktop relay対応、署名済
 5. Runを停止し、残存プロセス・コンテナ・ボリューム・一時ファイルを確認する。
 6. 台帳の該当行を実測で更新する。
 
+
+実行例（1件ずつ。値は使い捨てにする）:
+
+```sh
+export ATO_HOME="$PWD/.tmp/ato-home"
+ATO=<検証するCLIの絶対パス>
+
+# 1. 配信digestと選択可能なDを固定する
+$ATO run --api-url https://staging.api.ato.run --list-derivations --json capsules/koh0920/<app>
+
+# 2. 必須Bindingを確認する（秘密値はここで表示された名前だけを使い、値は保存しない）
+$ATO run --api-url https://staging.api.ato.run --derivation <D> --list-bindings
+
+# 3. Runを開始する（-no-open で起動とContract確認まで、--headless なら操作できる状態で維持）
+$ATO run --api-url https://staging.api.ato.run --derivation <D> --accept-permissions --headless \
+  --bind <binding_id>="<disposable value>"
+
+# 4. 主要操作のあと停止し、残存物を確認する
+docker ps -a --filter "name=ato-" --format '{{.Names}} {{.Status}}'
+docker volume ls --filter "name=ato-" --format '{{.Name}}'
+```
+
+Dockerを使わないDがあるアプリは `--list-derivations` の `realization` が `process` のDを選ぶ。ネイティブウィンドウのDは、親プロセスがサンドボックス内にあると `native_sandbox_unavailable` で拒否されるため、通常のターミナルから実行する。
