@@ -584,15 +584,11 @@ impl DockerOciAdapter {
             self.inspect_loaded_image(&offline.config_reference)?
         } else {
             if self.inspect_image().is_err() {
-                run_checked(
+                pull_image(
                     &self.docker,
-                    [
-                        "pull",
-                        "--platform",
-                        self.spec.platform.as_str(),
-                        self.spec.image.as_str(),
-                    ],
-                    "pull immutable OCI image",
+                    &self.spec.image,
+                    &self.spec.platform,
+                    PULL_TIMEOUT,
                 )?;
             }
             self.inspect_image()?;
@@ -2459,6 +2455,58 @@ pub(crate) fn remove_network(docker: &DockerClient, network: &str) -> Result<()>
     Ok(())
 }
 
+/// How long one immutable image pull may run before it is stopped. A first
+/// pull of a large image is slow; a wedged daemon must not hang a Run.
+const PULL_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// Pull `image` for `platform`, naming what was attempted and how it ended.
+///
+/// Docker writes progress to stderr, which is captured rather than streamed, so
+/// the operator gets a line before the pull starts and a failure that
+/// distinguishes a timeout, a killed process and an exit code. The previous
+/// unbounded `docker pull` could fail with an empty `failed: ` message because
+/// a killed process writes nothing.
+fn pull_image(docker: &DockerClient, image: &str, platform: &str, timeout: Duration) -> Result<()> {
+    eprintln!("Pulling {image} for {platform} (this can take a while)…");
+    let mut command = docker.command();
+    command
+        .args(["pull", "--platform", platform, image])
+        .stdin(std::process::Stdio::null());
+    let output = match command_control::CommandControl::cleanup(timeout).output(&mut command) {
+        Ok(output) => output,
+        Err(error) if error.kind() == io::ErrorKind::TimedOut => bail!(
+            "oci_image_pull_timeout: pulling {image} for {platform} did not finish within {}s; \
+             the docker process was stopped",
+            timeout.as_secs()
+        ),
+        Err(error) => {
+            return Err(error).context(format!("pull {image} for {platform}"));
+        }
+    };
+    if output.status.success() {
+        eprintln!("Pulled {image}");
+        return Ok(());
+    }
+    bail!("{}", pull_failure_message(image, platform, &output));
+}
+
+/// What a failed pull attempted, how the process ended, and what it said.
+fn pull_failure_message(image: &str, platform: &str, output: &Output) -> String {
+    let ended = match output.status.code() {
+        Some(code) => format!("exited with code {code}"),
+        None => "was killed by a signal".to_owned(),
+    };
+    let stderr = bounded_stderr(output);
+    if stderr.is_empty() {
+        format!(
+            "oci_image_pull_failed: pulling {image} for {platform} {ended} and wrote no message; \
+             check that the image reference and platform exist and that the registry is reachable"
+        )
+    } else {
+        format!("oci_image_pull_failed: pulling {image} for {platform} {ended}: {stderr}")
+    }
+}
+
 fn run_checked<'a>(
     executable: &DockerClient,
     arguments: impl IntoIterator<Item = &'a str>,
@@ -3104,6 +3152,71 @@ mod tests {
                 gid: root.gid()
             })
         );
+    }
+
+    /// A failed pull must say what was pulled, for which platform, and how the
+    /// process ended; the unbounded `docker pull` used to report an empty
+    /// `failed: ` when the process wrote nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_image_pull_names_the_target_and_the_exit_state() {
+        let (_directory, client) = fake_docker(
+            "#!/bin/sh\n\
+             case \"$1\" in\n\
+               version) printf '%s\\n' '24.0.0' ;;\n\
+               image) printf '%s\\n' 'Error response from daemon: No such image: app' >&2; exit 1 ;;\n\
+               pull) printf '%s\\n' 'manifest unknown' >&2; exit 1 ;;\n\
+               *) exit 1 ;;\n\
+             esac\n",
+        );
+        let adapter = DockerOciAdapter::new_at(spec(), client.executable.as_ref().clone()).unwrap();
+        let message = format!("{:#}", adapter.admit().unwrap_err());
+        assert!(message.contains("oci_image_pull_failed"), "{message}");
+        assert!(message.contains(&spec().image), "{message}");
+        assert!(message.contains("linux/amd64"), "{message}");
+        assert!(message.contains("exited with code 1"), "{message}");
+        assert!(message.contains("manifest unknown"), "{message}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_image_pull_killed_by_a_signal_is_not_an_empty_message() {
+        let (_directory, docker) =
+            fake_docker("#!/bin/sh\ncase \"$1\" in\n  pull) kill -9 $$ ;;\n  *) exit 0 ;;\nesac\n");
+        let error = pull_image(
+            &docker,
+            "docker.io/example/app@sha256:aa",
+            "linux/amd64",
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("was killed by a signal"), "{message}");
+        assert!(message.contains("wrote no message"), "{message}");
+        assert!(
+            message.contains("docker.io/example/app@sha256:aa"),
+            "{message}"
+        );
+        assert!(message.contains("linux/amd64"), "{message}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_image_pull_that_outlives_its_budget_reports_a_timeout() {
+        let (_directory, docker) = fake_docker("#!/bin/sh\nsleep 10\n");
+        let started = std::time::Instant::now();
+        let error = pull_image(
+            &docker,
+            "docker.io/example/app@sha256:aa",
+            "linux/amd64",
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let message = error.to_string();
+        assert!(message.contains("oci_image_pull_timeout"), "{message}");
+        assert!(message.contains("within 1s"), "{message}");
+        assert!(message.contains("linux/amd64"), "{message}");
     }
 
     #[test]

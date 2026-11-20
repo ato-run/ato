@@ -346,3 +346,187 @@ fn documented_specialist_entry_points_keep_their_existing_shape() {
         assert!(help.contains(required), "{help}");
     }
 }
+
+/// A serving step with no Ports is a background worker, not a second route
+/// shape: it packs in a Web+DB+queue+worker group, and its omitted `ports`
+/// field is the same declaration as an explicit empty list.
+#[test]
+fn a_worker_without_ports_packs_in_a_web_db_queue_worker_group() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let explicit = root.path().join("explicit.capsule");
+    let stdout = assert_success(
+        ato()
+            .env("ATO_HOME", home)
+            .args(["pack"])
+            .arg(sample("oci-service-group-worker"))
+            .arg("--output")
+            .arg(&explicit)
+            .output()
+            .unwrap(),
+    );
+    assert!(stdout.contains("Packed:"), "{stdout}");
+    let explicit_ref = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("contract_ref="))
+        .expect("pack reports the contract")
+        .to_owned();
+
+    // The same manifest with the worker's `ports = []` line removed packs to
+    // the same canonical contract: the field is optional, not a special case.
+    let source = root.path().join("omitted");
+    fs::create_dir(&source).unwrap();
+    for entry in fs::read_dir(sample("oci-service-group-worker")).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.is_file() {
+            fs::copy(&path, source.join(path.file_name().unwrap())).unwrap();
+        }
+    }
+    let manifest = fs::read_to_string(source.join("capsule.toml"))
+        .unwrap()
+        .replace("ports = []\n", "");
+    fs::write(source.join("capsule.toml"), manifest).unwrap();
+    let omitted = root.path().join("omitted.capsule");
+    let stdout = assert_success(
+        ato()
+            .env("ATO_HOME", home)
+            .args(["pack"])
+            .arg(&source)
+            .arg("--output")
+            .arg(&omitted)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("contract_ref="))
+            .expect("pack reports the contract"),
+        explicit_ref
+    );
+}
+
+/// The paths an image declares but the manifest cannot assign are named while
+/// the image configuration is readable, before a Run would refuse them.
+#[cfg(unix)]
+#[test]
+fn pack_lists_the_image_volumes_the_manifest_cannot_assign() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let docker = bin.join("docker");
+    fs::write(
+        &docker,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "context show") printf '%s\n' default ;;
+  "context inspect") printf '%s\n' 'unix:///var/run/docker.sock' ;;
+  "info --format")
+    printf '%s\n' '{"OSType":"linux","Architecture":"x86_64","OperatingSystem":"Test Linux","SecurityOptions":["name=rootless"]}'
+    ;;
+  "image inspect")
+    printf '%s\n' '{"/data":{},"/var/opt/extra":{},"/var/log/extra":{}}'
+    ;;
+  *) exit 1 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&docker, fs::Permissions::from_mode(0o700)).unwrap();
+    let home = root.path().join("home");
+    let output = ato()
+        .env("PATH", &bin)
+        .env("ATO_HOME", &home)
+        .env_remove("DOCKER_HOST")
+        .env_remove("DOCKER_CONTEXT")
+        .args(["pack"])
+        .arg(sample("oci-persistent-volume-proof"))
+        .arg("--output")
+        .arg(root.path().join("proof.capsule"))
+        .output()
+        .unwrap();
+    let stdout = assert_success(output);
+    assert!(
+        stdout.contains("oci-mount derivation_ref=sha256:"),
+        "{stdout}"
+    );
+    // `/data` is declared as the state slot; the other two paths are not.
+    assert!(
+        stdout.contains("checked=yes unassigned=/var/log/extra,/var/opt/extra"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("oci-mount next=a Run refuses an image VOLUME"),
+        "{stdout}"
+    );
+}
+
+/// An image whose configuration cannot be read is reported as unchecked
+/// instead of disappearing from the diagnosis.
+#[cfg(unix)]
+#[test]
+fn pack_reports_an_unreadable_image_configuration_as_unchecked() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let docker = bin.join("docker");
+    fs::write(
+        &docker,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "context show") printf '%s\n' default ;;
+  "context inspect") printf '%s\n' 'unix:///var/run/docker.sock' ;;
+  "info --format") printf '%s\n' '{"OSType":"linux","Architecture":"x86_64","OperatingSystem":"Test Linux"}' ;;
+  "image inspect")
+    printf '%s\n' 'Error response from daemon: No such image: proof' >&2
+    exit 1
+    ;;
+  *) exit 1 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&docker, fs::Permissions::from_mode(0o700)).unwrap();
+    let home = root.path().join("home");
+    let output = ato()
+        .env("PATH", &bin)
+        .env("ATO_HOME", &home)
+        .env_remove("DOCKER_HOST")
+        .env_remove("DOCKER_CONTEXT")
+        .args(["pack"])
+        .arg(sample("oci-persistent-volume-proof"))
+        .arg("--output")
+        .arg(root.path().join("proof.capsule"))
+        .output()
+        .unwrap();
+    let stdout = assert_success(output);
+    assert!(
+        stdout.contains("checked=no reason=the image is not present locally"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("was not checked"), "{stdout}");
+}
+
+/// The first screen of `ato hub --help` has to separate the two things the
+/// same command group does: a share link (push/pull) and a public listing
+/// (publish).
+#[test]
+fn hub_help_states_the_share_link_and_the_public_listing_first() {
+    let help = assert_success(ato().args(["hub", "--help"]).output().unwrap());
+    let (first, rest) = help.split_once("Commands:").unwrap_or((help.as_str(), ""));
+    assert!(first.contains("Share link (push/pull)"), "{first}");
+    assert!(first.contains("Public listing (publish)"), "{first}");
+    assert!(first.contains("Encrypted"), "{first}");
+    assert!(
+        first.contains("stored under capsules/<owner>/<name>"),
+        "{first}"
+    );
+    assert!(rest.contains("push"), "{help}");
+    assert!(rest.contains("publish"), "{help}");
+    assert!(help.contains("capsules/<owner>/<name>"), "{help}");
+}

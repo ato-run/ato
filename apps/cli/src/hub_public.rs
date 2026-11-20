@@ -84,6 +84,7 @@ pub const ERR_INVALID_BUNDLE: &str = "hub-invalid-bundle";
 pub const ERR_API_FAILED: &str = "hub-api-failed";
 pub const ERR_CAPABILITIES_UNREPRESENTABLE: &str = "hub-capabilities-unrepresentable";
 pub const ERR_CAPABILITY_UNAVAILABLE: &str = "hub-capability-unavailable";
+pub const ERR_INVALID_METADATA: &str = "hub-invalid-metadata";
 
 const HUB_CAPSULES_PATH: &str = "/v1/hub/capsules/";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -110,6 +111,21 @@ pub const CAPABILITIES_SOURCE_BUNDLE: &str = "bundle";
 /// One error whose first token is a stable machine-readable code.
 fn hub_error(code: &str, message: impl std::fmt::Display) -> anyhow::Error {
     anyhow::anyhow!("{code}: {message}")
+}
+
+/// A byte count a person can compare with a published limit.
+fn human_bytes(bytes: u64) -> String {
+    const MIB: f64 = 1024.0 * 1024.0;
+    let mib = bytes as f64 / MIB;
+    if mib >= 1.0 && (mib - mib.round()).abs() < 0.05 {
+        format!("{} MiB", mib.round() as u64)
+    } else if mib >= 1.0 {
+        format!("{mib:.1} MiB")
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} bytes")
+    }
 }
 
 /// How a reference selects one immutable Capsule version.
@@ -1264,6 +1280,10 @@ pub(crate) fn api_error_code(body: &str) -> String {
 /// answered "403 official_publisher_required", which falls back to the Base64
 /// lane and therefore keeps the pre-M2 behaviour of every general publisher.
 pub fn publish(args: PublishArgs) -> Result<()> {
+    // Publisher-declared labels are checked here, not left to the API: the
+    // API answers a malformed environment with `invalid_metadata` alone, and
+    // a rejected publish is easier to fix before the bundle is read.
+    validate_environment_labels(&args.environments)?;
     let size = fs::metadata(&args.capsule)
         .with_context(|| format!("cannot read {}", args.capsule.display()))?
         .len();
@@ -1418,6 +1438,48 @@ fn publish_base64(args: PublishArgs, prepared: Option<PreparedPublish>) -> Resul
 
 /// Upload the bytes already authenticated by an approved publication report.
 /// Only the credential stored for this API origin is used.
+/// Environment labels travel as published metadata, so they use the Hub's
+/// label form rather than a runtime platform string.
+///
+/// The API validates this itself and answers only `invalid_metadata`, which
+/// does not say which value or what shape was expected.
+fn validate_environment_labels(labels: &[String]) -> Result<()> {
+    for label in labels {
+        if is_environment_label(label) {
+            continue;
+        }
+        let suggested = label.trim().to_ascii_lowercase().replace('/', "-");
+        let hint = if is_environment_label(&suggested) {
+            format!(" Use `--environment {suggested}` instead.")
+        } else {
+            String::new()
+        };
+        bail!(hub_error(
+            ERR_INVALID_METADATA,
+            format!(
+                "`{label}` is not an environment label. Use a lowercase `<os>-<arch>` label \
+                 such as `linux-arm64` or `macos-arm64`; a slash is not part of it.{hint}"
+            )
+        ));
+    }
+    Ok(())
+}
+
+/// A published environment label: lowercase, one hyphen-separated pair or more
+/// (for example `macos-arm64`, `linux-amd64`, `windows-x86_64`).
+fn is_environment_label(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= MAX_CAPABILITY_PLATFORM_BYTES
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
+        })
+        && bytes.contains(&b'-')
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+        && !value.contains("--")
+}
+
 pub(super) fn publish_pinned_bytes(
     bytes: &[u8],
     api_url: &str,
@@ -1450,18 +1512,38 @@ pub(super) fn publish_pinned_bytes(
     Ok((reference, response.url))
 }
 
+/// Print the image mount paths the manifest cannot assign, before uploading.
+///
+/// A publisher needs this before a version is written: it is the same
+/// diagnosis `ato run` acts on, read from the image configuration when that
+/// is possible and reported as unchecked when it is not.
+fn report_image_mounts(derivations: &[ValidatedPortableApplication]) {
+    for validated in derivations {
+        for line in crate::oci_mounts::lines(validated) {
+            eprintln!("{line}");
+        }
+    }
+}
+
 fn send_base64_bytes(
     args: &PublishArgs,
     bytes: &[u8],
     prepared: Option<PreparedPublish>,
 ) -> Result<(PreparedPublish, String, PublishResponse)> {
     if bytes.len() as u64 > MAX_BUNDLE_BYTES {
+        let size = bytes.len() as u64;
+        let excess = size - MAX_BUNDLE_BYTES;
         bail!(hub_error(
             ERR_BUNDLE_TOO_LARGE,
             format!(
-                "{} is {} bytes; a Base64 JSON publish carries at most {MAX_BUNDLE_BYTES} bytes",
+                "{} is {size} bytes ({size_text}); the general-public Hub limit is {limit_text} \
+                 ({MAX_BUNDLE_BYTES} bytes), over by {excess} bytes ({excess_text}). Reduce the \
+                 bundle, or publish from an official-publisher account, whose presigned lane \
+                 carries no 8 MiB limit",
                 args.capsule.display(),
-                bytes.len()
+                size_text = human_bytes(size),
+                limit_text = human_bytes(MAX_BUNDLE_BYTES),
+                excess_text = human_bytes(excess),
             )
         ));
     }
@@ -1470,6 +1552,7 @@ fn send_base64_bytes(
     // routes rather than from any publisher-declared value.
     let formed = crate::hub::validate_formed_bundle_document(bytes)
         .with_context(|| format!("{} must not be published", args.capsule.display()))?;
+    report_image_mounts(&formed.derivations);
     let capabilities =
         derive_capabilities(&formed.bundle, &formed.derivations).with_context(|| {
             format!(
@@ -1589,6 +1672,7 @@ fn publish_large(
     let formed = crate::hub::validate_formed_bundle_document(&bytes)
         .with_context(|| format!("{} must not be published", args.capsule.display()))
         .map_err(LargePublish::Fatal)?;
+    report_image_mounts(&formed.derivations);
     let capabilities = derive_capabilities(&formed.bundle, &formed.derivations)
         .with_context(|| {
             format!(
@@ -2241,6 +2325,45 @@ mod tests {
         ] {
             assert!(!is_valid_tag(&tag), "{tag}");
         }
+    }
+
+    #[test]
+    fn an_environment_label_is_an_os_arch_pair_not_a_platform_string() {
+        for accepted in [
+            "macos-arm64",
+            "linux-amd64",
+            "linux-arm64",
+            "windows-x86_64",
+        ] {
+            assert!(is_environment_label(accepted), "{accepted}");
+        }
+        for refused in [
+            "linux/arm64",
+            "Linux/arm64",
+            "linux/arm64/",
+            "linux",
+            "-arm64",
+            "linux--arm64",
+            "linux arm64",
+            "",
+        ] {
+            assert!(!is_environment_label(refused), "{refused}");
+        }
+        let message = validate_environment_labels(&["linux/arm64".to_owned()])
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("hub-invalid-metadata"), "{message}");
+        assert!(message.contains("--environment linux-arm64"), "{message}");
+        validate_environment_labels(&["linux-arm64".to_owned()]).expect("a label is accepted");
+    }
+
+    #[test]
+    fn a_bundle_size_is_reported_against_the_published_limit() {
+        assert_eq!(human_bytes(8 * 1024 * 1024), "8 MiB");
+        assert_eq!(human_bytes(10_797_471), "10.3 MiB");
+        assert_eq!(human_bytes(2_408_863), "2.3 MiB");
+        assert_eq!(human_bytes(2048), "2.0 KiB");
+        assert_eq!(human_bytes(512), "512 bytes");
     }
 
     #[test]

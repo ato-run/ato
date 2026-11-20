@@ -1488,6 +1488,18 @@ fn an_unavailable_presign_falls_back_to_the_base64_lane() {
     );
     assert!(message.contains("Base64 JSON lane"), "{message}");
     assert!(message.contains("hub-bundle-too-large"), "{message}");
+    // The refusal names the general-public limit, the real size and how much
+    // the bundle is over it.
+    let size = large_bundle().bytes.len() as u64;
+    assert!(
+        message.contains("the general-public Hub limit is 8 MiB"),
+        "{message}"
+    );
+    assert!(message.contains(&format!("{size} bytes")), "{message}");
+    assert!(
+        message.contains(&format!("over by {} bytes", size - 8 * 1024 * 1024)),
+        "{message}"
+    );
     let requests = api.wait_requests(1);
     assert_eq!(requests.len(), 1, "{requests:?}");
 }
@@ -1726,4 +1738,32 @@ fn an_unavailable_download_presign_falls_back_to_the_artifact_endpoint() {
         fs::read(cached_large_path(home.path())).unwrap(),
         fixture.bytes
     );
+}
+
+/// A runtime platform string is not a published environment label. The CLI
+/// refuses it before reading the bundle or sending a request, and names the
+/// accepted form instead of leaving the API's `invalid_metadata` to explain.
+#[test]
+fn a_platform_string_as_an_environment_is_refused_before_any_request() {
+    let api = StubApi::new(Vec::new());
+    let home = tempfile::tempdir().unwrap();
+    let output = ato_with_home(home.path())
+        .arg("hub")
+        .arg("publish")
+        .arg(repo_sample())
+        .args(["--name", "koh0920/interop-static"])
+        .args(["--environment", "linux/arm64"])
+        .args(["--api-url", &api.base])
+        .args(["--token", "ato_dev_test_token"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let message = stderr(&output);
+    assert!(message.contains("hub-invalid-metadata"), "{message}");
+    assert!(
+        message.contains("`linux/arm64` is not an environment label"),
+        "{message}"
+    );
+    assert!(message.contains("--environment linux-arm64"), "{message}");
+    assert_eq!(api.request_count(), 0, "no request was sent");
 }

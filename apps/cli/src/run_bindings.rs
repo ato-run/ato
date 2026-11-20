@@ -63,29 +63,27 @@ pub(super) fn resolve(
         .bindings
         .iter()
         .filter(|binding| binding.required && !values.contains_key(&binding.id))
+        .cloned()
         .collect::<Vec<_>>();
     if !missing.is_empty() && !io::stdin().is_terminal() {
-        let mut hints = Vec::new();
-        for binding in &missing {
-            let (purpose, example) = describe(binding);
-            let variable = format!("ATO_BIND_{}", binding.id.to_ascii_uppercase());
-            let flag = format!("--bind-env {}={variable}", binding.id);
-            let hint = match example {
-                Some(example) => format!(
-                    "  {} ({purpose}): {flag} or --bind {}={example}",
-                    binding.id, binding.id
-                ),
-                None => format!("  {} ({purpose}): {flag}", binding.id),
-            };
-            hints.push(hint);
-        }
+        // A Run without a terminal cannot ask for a value, so name every
+        // required Binding and both ways to supply it before anything starts.
         bail!(
-            "Required Bindings are missing. Set the named environment variables and add the matching flags to the Run command:\n{}",
-            hints.join("\n")
+            "Required Bindings are missing. Supply them for this Run, then run the same command again:\n{}\nNo workload was started.",
+            guidance(&missing, false).join("\n")
         );
     }
 
-    for binding in missing {
+    if !missing.is_empty() {
+        // The same list the non-interactive Run refuses with, so a person
+        // knows every required name and how a script would pass it.
+        eprintln!(
+            "Required Bindings. Values apply to this Run only:\n{}",
+            guidance(&missing, true).join("\n")
+        );
+    }
+
+    for binding in &missing {
         let id = &binding.id;
         let (purpose, example) = describe(binding);
         let hidden_help = || {
@@ -177,6 +175,38 @@ pub(super) fn read_visible(cancelled: &AtomicBool) -> Result<Option<String>> {
     }
 }
 
+/// One line per required Binding: what it is, and how to supply it.
+///
+/// A secret has no literal example and its prompt never echoes; `interactive`
+/// decides whether the terminal prompt is one of the ways, because a Run
+/// without a terminal cannot ask.
+fn guidance(bindings: &[ApplicationBindingV1], interactive: bool) -> Vec<String> {
+    bindings
+        .iter()
+        .filter(|binding| binding.required)
+        .map(|binding| {
+            let (purpose, example) = describe(binding);
+            let variable = format!("ATO_BIND_{}", binding.id.to_ascii_uppercase());
+            let env_flag = format!("--bind-env {}={variable}", binding.id);
+            let id = &binding.id;
+            match (example, interactive) {
+                (Some(example), true) => format!(
+                    "  {id} ({purpose}): type it when prompted, or --bind {id}=<value> (for example {example}) or {env_flag}"
+                ),
+                (Some(example), false) => format!(
+                    "  {id} ({purpose}): --bind {id}=<value> (for example {example}) or {env_flag}"
+                ),
+                (None, true) => format!(
+                    "  {id} ({purpose}): type it when prompted (input hidden), or {env_flag}"
+                ),
+                (None, false) => format!(
+                    "  {id} ({purpose}): {env_flag} (read from the environment; there is no prompt without a terminal)"
+                ),
+            }
+        })
+        .collect()
+}
+
 /// Only documented, non-secret protocols get an echoed input and a literal
 /// example. Unknown protocols may carry confidential values.
 fn describe(binding: &ApplicationBindingV1) -> (&'static str, Option<&'static str>) {
@@ -261,5 +291,60 @@ impl Drop for TerminalEcho {
     fn drop(&mut self) {
         // SAFETY: restore the mode on the same borrowed input handle.
         let _ = unsafe { windows::Win32::System::Console::SetConsoleMode(self.0, self.1) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn binding(id: &str, protocol: &str) -> ApplicationBindingV1 {
+        ApplicationBindingV1 {
+            id: id.to_owned(),
+            protocol: protocol.to_owned(),
+            required: true,
+        }
+    }
+
+    #[test]
+    fn a_missing_required_binding_is_named_with_both_flags() {
+        let lines = guidance(
+            &[
+                binding("admin_password", "ato.secret@1"),
+                binding("site_name", "ato.config@1"),
+            ],
+            false,
+        );
+        assert_eq!(lines.len(), 2);
+        // A secret has no literal example and is only ever asked for without
+        // echo, so a non-interactive Run names the environment flag.
+        assert!(lines[0].contains("admin_password"), "{lines:?}");
+        assert!(
+            lines[0].contains("--bind-env admin_password=ATO_BIND_ADMIN_PASSWORD"),
+            "{lines:?}"
+        );
+        assert!(!lines[0].contains("--bind admin_password="), "{lines:?}");
+        assert!(lines[1].contains("site_name"), "{lines:?}");
+        assert!(lines[1].contains("--bind site_name=<value>"), "{lines:?}");
+    }
+
+    #[test]
+    fn an_interactive_run_says_a_secret_is_prompted_without_echo() {
+        let lines = guidance(&[binding("admin_password", "ato.secret@1")], true);
+        assert!(
+            lines[0].contains("type it when prompted (input hidden)"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[0].contains("--bind-env admin_password=ATO_BIND_ADMIN_PASSWORD"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn an_optional_binding_is_not_named_as_required() {
+        let mut optional = binding("site_name", "ato.config@1");
+        optional.required = false;
+        assert!(guidance(&[optional], false).is_empty());
     }
 }

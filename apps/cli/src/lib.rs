@@ -16,6 +16,7 @@ mod llm_serve;
 mod mcp_stdio;
 mod model_cache;
 mod object_transport;
+mod oci_mounts;
 mod portable_dependency;
 mod publication;
 mod run_bindings;
@@ -105,14 +106,17 @@ use ato_local_execution::{
     OwnedProcessIdentity, configure_detached_process, terminate_owned_process,
 };
 
-const SHARE_HELP: &str = "Encrypted link
-  ato hub push ./app.capsule --hub-url https://hub.example
-  The bundle is encrypted on this machine. Keep the full link private.
-  The recipient uses ato hub pull '<LINK>' -o app.capsule. The hub may require a token.
+const SHARE_HELP: &str = "Choose how the bundle travels
 
-Public listing
-  ato hub publish ./app.capsule --name owner/app
-  Requires Ato login or a publisher token. Anyone can run capsules/owner/app.
+  Share link (push/pull)
+    ato hub push ./app.capsule --hub-url https://hub.example
+    The bundle is encrypted on this machine and only the link holder can open it.
+    The recipient uses ato hub pull '<LINK>' -o app.capsule. The hub may require a token.
+
+  Public listing (publish)
+    ato hub publish ./app.capsule --name owner/app
+    The bundle and its metadata are stored publicly; anyone can run capsules/owner/app.
+    Requires Ato login or a publisher token.
 
 Authored project upload
   ato upload ./project --api-url https://api.ato.run --visibility private
@@ -162,8 +166,16 @@ enum Commands {
     /// Operate execution hosts and their Model Sets.
     #[command(subcommand)]
     Runtime(RuntimeCommands),
-    /// Share encrypted links or publish apps to the public Hub.
+    /// Share a bundle by link (push/pull) or publish it publicly (publish).
     #[command(
+        long_about = "Share a Capsule bundle two ways.\n\n\
+                      Share link (push/pull)\n\
+                      Encrypted: only the link holder can open it. Nothing is listed publicly.\n\
+                      ato hub push ./app.capsule --hub-url <URL>   prints the link\n\
+                      ato hub pull '<LINK>' -o app.capsule          restores it\n\n\
+                      Public listing (publish)\n\
+                      Public: the bundle and its metadata are stored under capsules/<owner>/<name>.\n\
+                      ato hub publish ./app.capsule --name <owner>/<name>\n",
         after_long_help = SHARE_HELP
     )]
     Hub {
@@ -1501,6 +1513,13 @@ fn report_route_capabilities(bundle: &ato_objects::PortableApplicationBundle) {
             println!("{line}");
         }
     }
+    // The image configuration is readable here, so the paths this profile
+    // cannot assign are named before a Run would refuse them.
+    for (_, validated, _) in &routes {
+        for line in oci_mounts::lines(validated) {
+            println!("{line}");
+        }
+    }
 }
 
 /// The capability lines for one validated route.
@@ -1567,6 +1586,14 @@ fn preflight_portable_route(
     let host = ato_host_facts::HostFacts::probe(std::slice::from_ref(&requirements));
     let status = ato_host_facts::execution_status(&host, &requirements);
     if status.state == ato_host_facts::CapabilityState::Advertised {
+        // Name the image mount paths this profile cannot assign before the
+        // Bindings prompt and before anything is started.
+        let diagnosis = oci_mounts::lines(validated);
+        if detailed || oci_mounts::needs_attention(&diagnosis) {
+            for line in &diagnosis {
+                eprintln!("{line}");
+            }
+        }
         return Ok(host);
     }
     let code = if hub.is_some() {
@@ -4007,7 +4034,7 @@ fn run_portable_application(
         return print_application_bindings(
             &application,
             args.json,
-            "Run the app to enter required values, or use --bind-env BINDING_ID=ENV_VAR in a script.",
+            "Run the app to be prompted for required values (a secret is not echoed), or pass --bind BINDING_ID=VALUE / --bind-env BINDING_ID=ENV_VAR.",
         );
     }
     if args.list_derivations {

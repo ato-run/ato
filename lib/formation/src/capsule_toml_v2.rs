@@ -451,6 +451,10 @@ struct Service {
     cwd: String,
     #[serde(default)]
     env: BTreeMap<String, String>,
+    /// The Ports this service serves. Omitted or empty means the service is a
+    /// background worker: it serves no logical Port and reports no socket
+    /// readiness. A group still needs one service serving the Surface Port.
+    #[serde(default)]
     ports: Vec<ServicePort>,
     #[serde(default)]
     state: Vec<String>,
@@ -1822,12 +1826,10 @@ fn compile_services(
                     }
                 }
             }
-            if service.ports.is_empty() {
-                return Err(invalid(
-                    "derivation.service.ports",
-                    "every service serves at least one Port",
-                ));
-            }
+            // A service with no Ports is a background worker. It is still a
+            // serving step of the group (it carries its own image, argv,
+            // state and Bindings); a group declares the Surface Port at least
+            // once, which the shared Port-ownership check below enforces.
             let ports = service
                 .ports
                 .into_iter()
@@ -2593,14 +2595,59 @@ default = "pure"
             ("no Surface Port", SERVICE_GROUP.replace("id = \"app.http\"", "id = \"web.http\"")),
             ("duplicate service", SERVICE_GROUP.replace("id = \"web\"", "id = \"backend\"")),
             ("unknown service field", SERVICE_GROUP.replace("argv = [\"web\"]", "argv = [\"web\"]\nprivileged = true")),
-            ("service without Ports", SERVICE_GROUP.replace(
-                "ports = [{ id = \"backend.http\", guest_port = 80 }]",
-                "ports = []",
-            )),
+            ("empty Port id", SERVICE_GROUP.replace("id = \"backend.http\"", "id = \"\"")),
         ];
         parse_capsule_toml_v2(SERVICE_GROUP).expect("baseline group parses");
         for (name, toml) in refused {
             assert!(parse_capsule_toml_v2(&toml).is_err(), "{name} was accepted");
+        }
+    }
+
+    /// A service that serves no Port is a background worker: it starts, keeps
+    /// its state and Bindings, and reports no socket readiness. The group is
+    /// still admitted because another service serves the Surface Port.
+    #[test]
+    fn a_service_without_ports_is_a_background_worker() {
+        for (name, toml) in [
+            (
+                "omitted",
+                SERVICE_GROUP.replace("ports = [{ id = \"backend.http\", guest_port = 80 }]\n", ""),
+            ),
+            (
+                "empty",
+                SERVICE_GROUP.replace(
+                    "ports = [{ id = \"backend.http\", guest_port = 80 }]",
+                    "ports = []",
+                ),
+            ),
+        ] {
+            let draft =
+                parse_capsule_toml_v2(&toml).unwrap_or_else(|error| panic!("{name}: {error}"));
+            let [route] = draft.derivations.as_slice() else {
+                panic!("one route");
+            };
+            let worker = route
+                .services
+                .iter()
+                .find(|service| service.id == "backend")
+                .expect("the worker is declared");
+            assert!(worker.ports.is_empty(), "{name}");
+            assert_eq!(
+                worker.state,
+                ["data"],
+                "{name}: state stays scoped to the worker"
+            );
+            assert_eq!(
+                worker.bindings,
+                ["admin_secret"],
+                "{name}: a Binding stays scoped to the worker"
+            );
+            let web = route
+                .services
+                .iter()
+                .find(|service| service.id == "web")
+                .expect("the Surface service is declared");
+            assert_eq!(web.ports.len(), 1, "{name}");
         }
     }
     const SCENARIO_OBSERVATION: &str = r#"
