@@ -88,7 +88,13 @@ https://runner.{$ATO_HOST} {
 	import no_network_identity
 	@asserted header X-Ato-Run-Assertion *
 	handle @asserted {
-		reverse_proxy unix//run/ato-runner-ingress/surface.sock
+		reverse_proxy unix//run/ato-runner-ingress/surface.sock {
+			# One request per upstream connection: the Runner gate verifies each
+			# request's assertion only when its connection opens.
+			transport http {
+				keepalive off
+			}
+		}
 	}
 	respond 403
 }
