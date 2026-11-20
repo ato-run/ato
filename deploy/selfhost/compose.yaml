@@ -31,9 +31,9 @@ services:
       timeout: 4s
       retries: 6
   validator:
-    image: ato-selfhost-validator:${ATO_RUNNER_REV:?use ./stack}
+    image: ato-selfhost-validator:${ATO_VALIDATOR_REV:?use ./stack}
     build:
-      context: ./.tmp/src/${ATO_RUNNER_REV}
+      context: ./.tmp/src/${ATO_VALIDATOR_REV}
       dockerfile: ../../../Dockerfile.validator
     network_mode: service:api
     environment:

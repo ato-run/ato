@@ -4,6 +4,7 @@ umask 077
 site=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo=$(git -C "$site" rev-parse --show-toplevel)
 # shellcheck disable=SC1091
+unset ATO_VALIDATOR_REV
 . "$site/versions.env"
 mkdir -p "$site/.tmp/src"
 stage=$(mktemp -d "$site/.tmp/prepare.XXXXXXXX")
@@ -30,5 +31,6 @@ extract() {
 extract "${1:-$repo/../ato-api}" "$ATO_API_REV"
 extract "${2:-$repo/../ato-pwa}" "$ATO_PWA_REV"
 extract "$repo" "$ATO_RUNNER_REV"
+extract "$repo" "${ATO_VALIDATOR_REV:-$ATO_RUNNER_REV}"
 "$site/init-runtime.sh"
 echo "Prepared the pinned API, PWA and Runner sources in $site/.tmp/src"

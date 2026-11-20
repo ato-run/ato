@@ -15,7 +15,7 @@ WebとAPIは、Runnerの登録前、またはRunnerを止めた状態でも起�
 
 Linux、Docker Engine/Compose v2、Git、OpenSSL、Bashが必要です。Runnerを動かすユーザーにはRustのリポジトリ指定toolchain、Linuxユーザー名前空間・bubblewrap、必要なOCI実行環境を用意します。API/PWAの現在のソースを取得するにはそれぞれのリポジトリへのアクセス権が必要です。
 
-1. `ato`、`ato-api`、`ato-pwa` を同じ親ディレクトリにクローンします。各クローンが、この配布に同梱された [versions.env](versions.env) のコミットを保持していることを確認してください。
+1. `ato`、`ato-api`、`ato-pwa` を同じ親ディレクトリにクローンします。各クローンが、この配布に同梱された [versions.env](versions.env) のコミットを保持していることを確認してください。Runnerとvalidatorはどちらも `ato` からビルドし、実機で検証する組み合わせのコミットを個別に固定します。以前のmanifestで `ATO_VALIDATOR_REV` を省略した場合はRunnerと同じコミットを使用します。
 2. `ato/deploy/selfhost/` で次を実行します。ソースの場所が異なる場合は `./prepare.sh /path/to/ato-api /path/to/ato-pwa` と指定します。
 
    ```sh
