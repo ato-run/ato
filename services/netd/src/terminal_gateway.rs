@@ -482,6 +482,7 @@ mod tests {
                 framebuffer_resize_until: None,
                 principal: "user-1".into(),
                 grant_id: assertion.to_string(),
+                grant_expires_at: u64::MAX,
             })
         }
     }

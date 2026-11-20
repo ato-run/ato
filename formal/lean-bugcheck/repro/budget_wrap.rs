@@ -1,0 +1,11 @@
+// Regression for release-mode overflow; the real implementation is included by run.sh.
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+include!(concat!(env!("OUT"), "/transfer_budget.rs"));
+fn main() {
+    let b = TransferBudget::new(10);
+    assert!(b.consume(5));
+    let ok = b.consume(u64::MAX - 2); // real total = 2^64+2 > limit
+    println!("consume(u64::MAX-2) -> {ok}, used={} exhausted={}", b.used(), b.exhausted());
+    assert!(!ok);
+    assert_eq!(b.used(), u64::MAX);
+}

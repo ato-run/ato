@@ -18,6 +18,8 @@ pub struct AuthorizedSurfaceAccess {
     pub framebuffer_resize_until: Option<u64>,
     /// Unique assertion identifier (`jti`). A gateway consumes it once.
     pub grant_id: String,
+    /// Expiry of the verified assertion in Unix seconds.
+    pub grant_expires_at: u64,
 }
 
 #[derive(Debug, Clone, Copy, Error)]

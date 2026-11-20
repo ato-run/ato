@@ -257,6 +257,7 @@ impl HmacSurfaceAccessAuthorizer {
             framebuffer_resize_until: claims.framebuffer_resize.then_some(claims.exp),
             principal: claims.principal.id,
             grant_id: claims.jti,
+            grant_expires_at: claims.exp,
         })
     }
 }

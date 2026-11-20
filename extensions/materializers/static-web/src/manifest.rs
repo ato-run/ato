@@ -43,6 +43,10 @@ pub enum StaticWebManifestError {
     InvalidSchema,
     #[error("static web manifest field '{0}' must be non-empty")]
     EmptyField(&'static str),
+    #[error(
+        "static web manifest materialization_id must contain at most 128 ASCII letters, digits, underscores, or hyphens"
+    )]
+    InvalidMaterializationId,
     #[error("static web manifest path is invalid: {0}")]
     InvalidPath(String),
     #[error("static web manifest contains no entry file")]
@@ -122,7 +126,7 @@ impl StaticWebManifestV1 {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
         {
-            return Err(StaticWebManifestError::EmptyField("materialization_id"));
+            return Err(StaticWebManifestError::InvalidMaterializationId);
         }
         validate_relative_path(&self.entry_path)?;
         if self.files.is_empty()
@@ -386,6 +390,26 @@ fn validate_security(security: &StaticWebSecurityV1) -> Result<(), StaticWebMani
 mod tests {
     use super::*;
     use sha2::Digest as _;
+
+    #[test]
+    fn distinguishes_empty_and_invalid_materialization_ids() {
+        let mut manifest: StaticWebManifestV1 = serde_json::from_str(include_str!(
+            "../tests/fixtures/static-web-manifest-jcs-v1/input.json"
+        ))
+        .unwrap();
+        manifest.materialization_id.clear();
+        assert_eq!(
+            manifest.validate(),
+            Err(StaticWebManifestError::EmptyField("materialization_id"))
+        );
+        for id in ["invalid id".to_string(), "a".repeat(129)] {
+            manifest.materialization_id = id;
+            assert_eq!(
+                manifest.validate(),
+                Err(StaticWebManifestError::InvalidMaterializationId)
+            );
+        }
+    }
 
     #[test]
     fn golden_fixture_is_exact_jcs_and_has_expected_digest() {

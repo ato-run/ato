@@ -1,7 +1,8 @@
 //! Shared exact-origin, assertion, replay, and subprotocol WebSocket boundary.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use http::{
     HeaderValue, StatusCode,
@@ -19,10 +20,16 @@ use crate::surface_authorization::{
 pub const SURFACE_ASSERTION_HEADER: &str = "x-ato-surface-assertion";
 const MAX_CONSUMED_GRANTS: usize = 4096;
 
-pub type ConsumedSurfaceGrants = Arc<Mutex<HashSet<String>>>;
+#[derive(Default)]
+pub struct GrantReplayCache {
+    grants: HashMap<String, u64>,
+    high_water_time: u64,
+}
+
+pub type ConsumedSurfaceGrants = Arc<Mutex<GrantReplayCache>>;
 
 pub fn new_consumed_surface_grants() -> ConsumedSurfaceGrants {
-    Arc::new(Mutex::new(HashSet::new()))
+    Arc::new(Mutex::new(GrantReplayCache::default()))
 }
 
 pub fn is_normalized_allowed_origin(origin: &str) -> bool {
@@ -100,6 +107,7 @@ impl Callback for SurfaceHandshakeAuthorizer {
             &self.scope,
             self.authorizer.as_ref(),
             &self.consumed_grants,
+            !self.require_subprotocol || offered_subprotocol(request, self.subprotocol),
         )
         .map_err(UpgradeRejection::into_response)?;
 
@@ -108,8 +116,6 @@ impl Callback for SurfaceHandshakeAuthorizer {
                 SEC_WEBSOCKET_PROTOCOL,
                 HeaderValue::from_static(self.subprotocol),
             );
-        } else if self.require_subprotocol {
-            return Err(rejection(StatusCode::BAD_REQUEST));
         }
         if let Some(capture) = self.access_capture {
             capture
@@ -124,6 +130,7 @@ impl Callback for SurfaceHandshakeAuthorizer {
 enum UpgradeRejection {
     Unauthorized,
     Forbidden,
+    BadRequest,
     Internal,
 }
 
@@ -132,6 +139,7 @@ impl UpgradeRejection {
         rejection(match self {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Forbidden => StatusCode::FORBIDDEN,
+            Self::BadRequest => StatusCode::BAD_REQUEST,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         })
     }
@@ -142,7 +150,8 @@ fn authorize_upgrade(
     allowed_origins: &BTreeSet<String>,
     scope: &SurfaceGatewayScope,
     authorizer: &dyn SurfaceAccessAuthorizer,
-    consumed_grants: &Mutex<HashSet<String>>,
+    consumed_grants: &Mutex<GrantReplayCache>,
+    valid_subprotocol: bool,
 ) -> Result<AuthorizedSurfaceAccess, UpgradeRejection> {
     let origin = request
         .headers()
@@ -163,17 +172,42 @@ fn authorize_upgrade(
     if access.grant_id.trim().is_empty() || access.principal.trim().is_empty() {
         return Err(UpgradeRejection::Unauthorized);
     }
+    if !valid_subprotocol {
+        return Err(UpgradeRejection::BadRequest);
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| UpgradeRejection::Internal)?
+        .as_secs();
     let mut consumed = consumed_grants
         .lock()
         .map_err(|_| UpgradeRejection::Internal)?;
-    if consumed.contains(&access.grant_id) {
+    consume_grant(&mut consumed, &access, now)?;
+    Ok(access)
+}
+
+fn consume_grant(
+    consumed: &mut GrantReplayCache,
+    access: &AuthorizedSurfaceAccess,
+    now: u64,
+) -> Result<(), UpgradeRejection> {
+    // Never make a previously expired assertion valid again after clock rollback.
+    consumed.high_water_time = consumed.high_water_time.max(now);
+    let cutoff = consumed.high_water_time;
+    if access.grant_expires_at <= cutoff {
         return Err(UpgradeRejection::Unauthorized);
     }
-    if consumed.len() >= MAX_CONSUMED_GRANTS {
+    consumed.grants.retain(|_, expiry| *expiry > cutoff);
+    if consumed.grants.contains_key(&access.grant_id) {
+        return Err(UpgradeRejection::Unauthorized);
+    }
+    if consumed.grants.len() >= MAX_CONSUMED_GRANTS {
         return Err(UpgradeRejection::Internal);
     }
-    consumed.insert(access.grant_id.clone());
-    Ok(access)
+    consumed
+        .grants
+        .insert(access.grant_id.clone(), access.grant_expires_at);
+    Ok(())
 }
 
 fn offered_subprotocol(request: &Request, expected: &str) -> bool {
@@ -196,7 +230,6 @@ fn rejection(status: StatusCode) -> ErrorResponse {
 mod tests {
     use super::*;
     use crate::surface_authorization::{SurfaceAccessAuthorizer, SurfaceAuthorizationError};
-    use std::collections::HashSet;
     use std::sync::Mutex;
 
     const LEASE_ORIGIN: &str = "https://staging.ato.run";
@@ -223,6 +256,7 @@ mod tests {
             clipboard_paste_until: None,
             framebuffer_resize_until: None,
             grant_id: grant_id.into(),
+            grant_expires_at: u64::MAX,
         }
     }
 
@@ -250,7 +284,7 @@ mod tests {
 
     fn authorize(
         request: &Request,
-        consumed: &Mutex<HashSet<String>>,
+        consumed: &Mutex<GrantReplayCache>,
     ) -> Result<AuthorizedSurfaceAccess, UpgradeRejection> {
         authorize_upgrade(
             request,
@@ -258,17 +292,18 @@ mod tests {
             &scope(),
             &Fixed(Some(access("grant-1"))),
             consumed,
+            true,
         )
     }
 
     #[test]
     fn accepts_both_exact_origins_with_a_valid_assertion() {
         for origin in [LEASE_ORIGIN, RUNNER_ORIGIN] {
-            let consumed = Mutex::new(HashSet::new());
+            let consumed = Mutex::new(GrantReplayCache::default());
             let granted = authorize(&request(Some(origin), Some("valid")), &consumed)
                 .expect("both exact origins must be accepted");
             assert_eq!(granted.grant_id, "grant-1");
-            assert!(consumed.lock().unwrap().contains("grant-1"));
+            assert!(consumed.lock().unwrap().grants.contains_key("grant-1"));
         }
     }
 
@@ -283,7 +318,7 @@ mod tests {
             "null",
             "",
         ] {
-            let consumed = Mutex::new(HashSet::new());
+            let consumed = Mutex::new(GrantReplayCache::default());
             assert!(
                 matches!(
                     authorize(&request(Some(origin), Some("valid")), &consumed),
@@ -292,7 +327,7 @@ mod tests {
                 "origin {origin} must be refused"
             );
             assert!(
-                consumed.lock().unwrap().is_empty(),
+                consumed.lock().unwrap().grants.is_empty(),
                 "a refused handshake must not consume a grant"
             );
         }
@@ -300,7 +335,7 @@ mod tests {
 
     #[test]
     fn refuses_a_missing_origin_outright() {
-        let consumed = Mutex::new(HashSet::new());
+        let consumed = Mutex::new(GrantReplayCache::default());
         assert!(matches!(
             authorize(&request(None, Some("valid")), &consumed),
             Err(UpgradeRejection::Forbidden)
@@ -310,7 +345,7 @@ mod tests {
     #[test]
     fn never_upgrades_without_a_valid_assertion_on_an_allowed_origin() {
         for assertion in [None, Some(""), Some("forged"), Some("expired")] {
-            let consumed = Mutex::new(HashSet::new());
+            let consumed = Mutex::new(GrantReplayCache::default());
             assert!(
                 matches!(
                     authorize(&request(Some(RUNNER_ORIGIN), assertion), &consumed),
@@ -318,18 +353,63 @@ mod tests {
                 ),
                 "assertion {assertion:?} must not authorize"
             );
-            assert!(consumed.lock().unwrap().is_empty());
+            assert!(consumed.lock().unwrap().grants.is_empty());
         }
     }
 
     #[test]
     fn consumes_the_grant_exactly_once() {
-        let consumed = Mutex::new(HashSet::new());
+        let consumed = Mutex::new(GrantReplayCache::default());
         assert!(authorize(&request(Some(RUNNER_ORIGIN), Some("valid")), &consumed).is_ok());
         assert!(matches!(
             authorize(&request(Some(RUNNER_ORIGIN), Some("valid")), &consumed),
             Err(UpgradeRejection::Unauthorized)
         ));
-        assert_eq!(consumed.lock().unwrap().len(), 1);
+        assert_eq!(consumed.lock().unwrap().grants.len(), 1);
+    }
+
+    #[test]
+    fn expired_grants_are_reclaimed_without_allowing_replay_after_clock_rollback() {
+        let mut cache = GrantReplayCache::default();
+        for i in 0..MAX_CONSUMED_GRANTS {
+            let mut grant = access(&format!("grant-{i}"));
+            grant.grant_expires_at = 20;
+            assert!(consume_grant(&mut cache, &grant, 10).is_ok());
+        }
+        let mut fresh = access("fresh");
+        fresh.grant_expires_at = 30;
+        assert!(matches!(
+            consume_grant(&mut cache, &fresh, 19),
+            Err(UpgradeRejection::Internal)
+        ));
+        assert!(consume_grant(&mut cache, &fresh, 20).is_ok());
+        let mut old = access("grant-0");
+        old.grant_expires_at = 20;
+        assert!(matches!(
+            consume_grant(&mut cache, &old, 10),
+            Err(UpgradeRejection::Unauthorized)
+        ));
+        assert!(matches!(
+            consume_grant(&mut cache, &fresh, 10),
+            Err(UpgradeRejection::Unauthorized)
+        ));
+    }
+
+    #[test]
+    fn invalid_subprotocol_does_not_consume_the_grant() {
+        let consumed = Mutex::new(GrantReplayCache::default());
+        let request = request(Some(RUNNER_ORIGIN), Some("valid"));
+        assert!(matches!(
+            authorize_upgrade(
+                &request,
+                &origins(),
+                &scope(),
+                &Fixed(Some(access("grant-1"))),
+                &consumed,
+                false
+            ),
+            Err(UpgradeRejection::BadRequest)
+        ));
+        assert!(authorize(&request, &consumed).is_ok());
     }
 }
