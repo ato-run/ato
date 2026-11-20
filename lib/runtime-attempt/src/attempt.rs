@@ -862,7 +862,7 @@ fn observe_tls(
                 &observation.server_name,
                 probe_tls_start(observation.start),
                 timeout,
-                ato_tls_observe::TrustAnchors::PublicRoots,
+                ato_tls_observe::TrustAnchors::for_contract(observation.root_ca_digest.as_deref())?,
             ) {
                 Ok(facts) => break facts,
                 Err(error) => {

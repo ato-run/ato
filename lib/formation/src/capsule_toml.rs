@@ -40,8 +40,8 @@ use crate::authoring::{
     InputIdentityRequirement, ObservationDraft, Observed, PROCESS_PROTOCOL, PlatformDraft,
     PortDraft, RequirementDraft, RuntimeDraft, SCENARIO_CONTRACT_VERIFIER,
     STATE_FILESYSTEM_PROTOCOL, ScenarioRequirement, StateAccess, StateDraft, StateSaveDeclaration,
-    StepDraft, StepNetwork, TLS_CONTRACT_VERIFIER, TlsRequirement, TlsStart, WORKSPACE_PROTOCOL,
-    malformed, validate_tls_server_name,
+    StepDraft, StepNetwork, TLS_CONTRACT_VERIFIER, TLS_PINNED_ROOT_CONTRACT_VERIFIER,
+    TlsRequirement, TlsStart, WORKSPACE_PROTOCOL, malformed, validate_tls_server_name,
 };
 use crate::native_surface::{
     NativePresentation, NativeProbeOperation, NativeSurfaceAdapter, PIXEL_PORT_PROTOCOL,
@@ -299,7 +299,11 @@ pub fn render_capsule_toml(draft: &AuthoringDraft) -> Result<String, CapsuleToml
         RequirementDraft::Http(h)=>json!({"id":r.id,"use":USE_HTTP_CONTRACT,"port":h.port,"method":h.method,"path":h.path,"expect":{"status":h.status,"body_digest":h.body_digest.as_ref().map(&observed)}}),
         RequirementDraft::InputIdentity(i)=>json!({"id":r.id,"use":USE_WORKSPACE_CONTRACT,"input":i.input,"expect":{"digest":observed(&i.digest)}}),
         RequirementDraft::Scenario(s)=>json!({"id":r.id,"use":USE_SCENARIO_CONTRACT,"port":s.port,"scenario":observed(&s.scenario)}),
-        RequirementDraft::Tls(t)=>json!({"id":r.id,"use":USE_TLS_CONTRACT,"port":t.port,"server_name":t.server_name,"start":t.start.as_str()})
+        RequirementDraft::Tls(t)=>{
+            let mut value = json!({"id":r.id,"use":crate::authoring::tls_verifier(t.root_ca_digest.as_deref()),"port":t.port,"server_name":t.server_name,"start":t.start.as_str()});
+            if let Some(pin) = &t.root_ca_digest { value["root_ca_digest"] = json!(pin); }
+            value
+        }
     }).collect();
     let mut contract_doc = json!({"require":requirements});
     // Only an explicit identity is written. A document that never stated one
@@ -1193,6 +1197,7 @@ fn read_contract(
                     "scenario",
                     "server_name",
                     "start",
+                    "root_ca_digest",
                 ],
             )?;
             let id = required_str(require, "id", "contract.require")?;
@@ -1205,6 +1210,14 @@ fn read_contract(
                     .ok_or_else(|| malformed(format!("{what}.expect"), "expected a table"))?,
             };
 
+            if require.contains_key("root_ca_digest")
+                && verifier != TLS_PINNED_ROOT_CONTRACT_VERIFIER
+            {
+                return Err(malformed(
+                    format!("{what}.root_ca_digest"),
+                    "only a pinned-root TLS observation accepts a CA fingerprint",
+                ));
+            }
             let requirement = match verifier.as_str() {
                 USE_HTTP_CONTRACT => {
                     if require.contains_key("scenario") {
@@ -1302,7 +1315,14 @@ fn read_contract(
                         scenario: Observed::Stated(raw),
                     })
                 }
-                USE_TLS_CONTRACT => {
+                USE_TLS_CONTRACT | TLS_PINNED_ROOT_CONTRACT_VERIFIER => {
+                    let root_ca_digest = optional_str(require, "root_ca_digest", &what)?;
+                    if crate::authoring::required_tls_anchor(&verifier, root_ca_digest).is_none() {
+                        return Err(malformed(
+                            format!("{what}.root_ca_digest"),
+                            "expected a lowercase sha256 DER fingerprint",
+                        ));
+                    }
                     // A certificate requirement observes a port, the name the
                     // certificate must cover, and how TLS starts there. It
                     // states no expected value: the serial changes on every
@@ -1335,6 +1355,7 @@ fn read_contract(
                         }
                     };
                     RequirementDraft::Tls(TlsRequirement {
+                        root_ca_digest: root_ca_digest.map(str::to_owned),
                         port: required_str(require, "port", &what)?,
                         server_name,
                         start,

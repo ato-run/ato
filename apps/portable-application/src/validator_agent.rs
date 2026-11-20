@@ -273,12 +273,15 @@ impl ValidatorAgent {
                 continue;
             };
             let observed = match with_retry(deadline, || {
+                let anchors =
+                    ato_tls_observe::TrustAnchors::for_contract(required.root_ca_digest.as_deref())
+                        .map_err(|error| RetryableFailure::terminal(error.to_string()))?;
                 ato_tls_observe::observe_tls(
                     address,
                     &required.server_name,
                     probe_tls_start(required.start),
                     Duration::from_secs(10),
-                    ato_tls_observe::TrustAnchors::PublicRoots,
+                    anchors,
                 )
                 .map(|facts| runtime_tls_observation(&required, facts))
                 .map_err(|error| RetryableFailure::retryable(error.to_string(), None))

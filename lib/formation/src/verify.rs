@@ -40,8 +40,8 @@ use sha2::{Digest, Sha256};
 
 use crate::authoring::{
     BoundContract, HTTP_CONTRACT_VERIFIER, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER,
-    SCENARIO_CONTRACT_VERIFIER, TERMINAL_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER, TlsStart,
-    WORKSPACE_CONTRACT_VERIFIER,
+    SCENARIO_CONTRACT_VERIFIER, TERMINAL_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER,
+    TLS_PINNED_ROOT_CONTRACT_VERIFIER, TlsStart, WORKSPACE_CONTRACT_VERIFIER,
 };
 use crate::scenario::{
     SCENARIO_VERIFIER_VERSION, ScenarioObservation, ScenarioResult, is_scenario_ref,
@@ -60,8 +60,7 @@ pub const CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V4: &str = "ato.contract-verifica
 /// override decision, and exactly which filesystem/egress/lifecycle rules the
 /// host enforced. Evidence only; it never changes a Contract verdict.
 pub const CONTRACT_VERIFICATION_RECEIPT_SCHEMA_V5: &str = "ato.contract-verification-receipt/5";
-/// The trust anchor label a certificate observation must carry to satisfy K:
-/// the public root set, never a private or test anchor.
+/// The trust anchor label required by the original public-root TLS verifier.
 pub const TLS_TRUST_ANCHOR_PUBLIC_ROOTS: &str = "public-roots";
 
 /// What the executed Derivation actually produced, in the terms `K` observes.
@@ -616,7 +615,7 @@ impl ContractVerificationReceipt {
                                 captured_bytes: None,
                                 tls: None,
                             }),
-                        TLS_CONTRACT_VERIFIER => runtime
+                        TLS_CONTRACT_VERIFIER | TLS_PINNED_ROOT_CONTRACT_VERIFIER => runtime
                             .tls
                             .iter()
                             .find(|observation| observation.requirement_id == requirement.id)
@@ -840,12 +839,24 @@ pub fn verify(contract: &BoundContract, candidate: &CandidateObservation) -> Con
                         by: format!("runtime scenario verifier {}", requirement.id),
                     }
                 }
-                TLS_CONTRACT_VERIFIER => {
+                TLS_CONTRACT_VERIFIER | TLS_PINNED_ROOT_CONTRACT_VERIFIER => {
                     // A certificate is presented by a running listener.
                     // Formation builds artifacts and starts nothing, so it
                     // names the runtime gate that will decide this.
-                    ObservationOutcome::Deferred {
-                        by: format!("runtime tls verifier {}", requirement.id),
+                    if crate::authoring::required_tls_anchor(
+                        &requirement.verifier,
+                        requirement.digest.as_deref(),
+                    )
+                    .is_some()
+                    {
+                        ObservationOutcome::Deferred {
+                            by: format!("runtime tls verifier {}", requirement.id),
+                        }
+                    } else {
+                        ObservationOutcome::Failed {
+                            code: "tls_anchor_invalid",
+                            detail: "TLS requirement has an invalid trust anchor".to_owned(),
+                        }
                     }
                 }
                 TERMINAL_CONTRACT_VERIFIER => {
@@ -1035,7 +1046,7 @@ pub fn verify_runtime(
                         Some(_) => ObservationOutcome::Satisfied,
                     }
                 }
-                TLS_CONTRACT_VERIFIER => {
+                TLS_CONTRACT_VERIFIER | TLS_PINNED_ROOT_CONTRACT_VERIFIER => {
                     let port = requirement.port.as_deref().unwrap_or_default();
                     let server_name = requirement.server_name.as_deref().unwrap_or_default();
                     let start = requirement.start.unwrap_or(TlsStart::Implicit);
@@ -1096,11 +1107,11 @@ pub fn verify_runtime(
                                 ),
                             }
                         }
-                        Some(observation) if !observation.trusted => ObservationOutcome::Failed {
+                        Some(observation) if !observation.trusted || crate::authoring::required_tls_anchor(&requirement.verifier, requirement.digest.as_deref()) != Some(observation.trust_anchor.as_str()) => ObservationOutcome::Failed {
                             code: "tls_chain_untrusted",
                             detail: format!(
                                 "the certificate presented on {port} for {server_name} does not \
-                                 validate to a public root ({})",
+                                 validate to the required root ({})",
                                 observation.trust_anchor
                             ),
                         },

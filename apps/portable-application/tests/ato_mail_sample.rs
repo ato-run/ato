@@ -42,6 +42,54 @@ fn mail_sample_route() -> ValidatedPortableApplication {
 }
 
 #[test]
+fn a_private_mail_ca_is_explicit_in_a_new_contract() {
+    use ato_formation::authoring::TLS_PINNED_ROOT_CONTRACT_VERIFIER;
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/ato-mail");
+    let trial = tempfile::tempdir().unwrap();
+    for file in ["missive-config.toml", "stalwart-config.json"] {
+        std::fs::copy(source.join(file), trial.path().join(file)).unwrap();
+    }
+    let manifest = std::fs::read_to_string(source.join("capsule.toml")).unwrap();
+    let pin = format!("sha256:{}", "a9".repeat(32));
+    let private = manifest.replace(
+        "use = \"ato.contract.tls@1\"",
+        &format!("use = \"{TLS_PINNED_ROOT_CONTRACT_VERIFIER}\"\nroot_ca_digest = \"{pin}\""),
+    );
+    let build = |contents: &str| {
+        std::fs::write(trial.path().join("capsule.toml"), contents).unwrap();
+        build_authored_bundle_v2(trial.path())
+    };
+    let (_, public) = build(&manifest).unwrap();
+    let (_, pinned) = build(&private).unwrap();
+    let route = validate_all_derivations(&pinned).unwrap().remove(0);
+    assert_ne!(
+        route.contract_ref,
+        validate_all_derivations(&public).unwrap()[0].contract_ref
+    );
+    assert_eq!(
+        route
+            .contract
+            .requirements
+            .iter()
+            .filter(|r| r.verifier == TLS_PINNED_ROOT_CONTRACT_VERIFIER
+                && r.digest.as_deref() == Some(&pin))
+            .count(),
+        4
+    );
+    assert!(build(&private.replace(&pin, "sha256:invalid")).is_err());
+    assert!(
+        build(&private.replace(TLS_PINNED_ROOT_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER)).is_err()
+    );
+    assert!(
+        build(&private.replace(
+            TLS_PINNED_ROOT_CONTRACT_VERIFIER,
+            "ato.contract.tls-unknown@1"
+        ))
+        .is_err()
+    );
+}
+
+#[test]
 fn the_bundle_pins_its_effect_policy_and_its_whole_observation_set() {
     let route = mail_sample_route();
     // The validator requires this effect class for a service group with

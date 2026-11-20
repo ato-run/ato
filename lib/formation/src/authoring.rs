@@ -83,6 +83,28 @@ pub const SCENARIO_CONTRACT_VERIFIER: &str = "ato.contract.scenario@1";
 /// certificate's validity. The presented leaf serial is evidence, not
 /// identity: it changes on every renewal.
 pub const TLS_CONTRACT_VERIFIER: &str = "ato.contract.tls@1";
+/// A TLS observation which trusts exactly the root DER fingerprint sealed in K.
+pub const TLS_PINNED_ROOT_CONTRACT_VERIFIER: &str = "ato.contract.tls-pinned-root@1";
+
+pub fn tls_verifier(root_ca_digest: Option<&str>) -> &'static str {
+    if root_ca_digest.is_some() {
+        TLS_PINNED_ROOT_CONTRACT_VERIFIER
+    } else {
+        TLS_CONTRACT_VERIFIER
+    }
+}
+
+/// Only the public-root verifier can omit a digest. A malformed pinned K
+/// must never be interpreted as permission to use the public roots.
+pub fn required_tls_anchor<'a>(verifier: &str, digest: Option<&'a str>) -> Option<&'a str> {
+    match (verifier, digest) {
+        (TLS_CONTRACT_VERIFIER, None) => Some(crate::verify::TLS_TRUST_ANCHOR_PUBLIC_ROOTS),
+        (TLS_PINNED_ROOT_CONTRACT_VERIFIER, Some(pin)) if crate::receipt::is_sha256_ref(pin) => {
+            Some(pin)
+        }
+        _ => None,
+    }
+}
 /// The terminal-exchange acceptance verifier: a declared, bounded exchange
 /// with a native Terminal surface completed.
 ///
@@ -247,6 +269,7 @@ impl TlsStart {
 /// A certificate requirement on a port a Derivation declares.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlsRequirement {
+    pub root_ca_digest: Option<String>,
     pub port: String,
     /// The host name the presented certificate must cover, as a lowercase DNS
     /// name. This IS part of K: the service is the one whose name is covered.
@@ -1342,6 +1365,17 @@ fn bind_contract(
                         id: tls.port.clone(),
                     });
                 }
+                if required_tls_anchor(
+                    tls_verifier(tls.root_ca_digest.as_deref()),
+                    tls.root_ca_digest.as_deref(),
+                )
+                .is_none()
+                {
+                    return Err(malformed(
+                        "contract.require.root_ca_digest",
+                        "expected a lowercase sha256 DER fingerprint",
+                    ));
+                }
                 validate_tls_server_name(&tls.server_name).map_err(|detail| {
                     malformed(
                         format!("contract.require.{}.server_name", observation.id),
@@ -1350,14 +1384,14 @@ fn bind_contract(
                 })?;
                 BoundRequirement {
                     id: observation.id.clone(),
-                    verifier: TLS_CONTRACT_VERIFIER.to_owned(),
+                    verifier: tls_verifier(tls.root_ca_digest.as_deref()).to_owned(),
                     port: Some(tls.port.clone()),
                     method: None,
                     path: None,
                     status: None,
                     body_digest: None,
                     input: None,
-                    digest: None,
+                    digest: tls.root_ca_digest.clone(),
                     server_name: Some(tls.server_name.clone()),
                     start: Some(tls.start),
                 }
@@ -1749,6 +1783,7 @@ mod tests {
         draft.contract.requirements.push(ObservationDraft {
             id: "imaps".to_owned(),
             requirement: RequirementDraft::Tls(TlsRequirement {
+                root_ca_digest: None,
                 port: port.to_owned(),
                 server_name: server_name.to_owned(),
                 start: TlsStart::SmtpStarttls,
