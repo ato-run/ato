@@ -14,8 +14,10 @@ use std::{
 
 #[derive(Debug, Args)]
 pub(super) struct VerifyArgs {
+    /// ID of the completed Search that returned the retained Source result.
     #[arg(long)]
     source_search_id: String,
+    /// Coordinator URL used for that Search.
     #[arg(long, env = "ATO_RUNTIME_NETWORK_API")]
     api: String,
     /// Owning account's session token. Runtime/Bridge capabilities cannot grant permission.

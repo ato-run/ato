@@ -588,6 +588,18 @@ pub fn is_sandbox_supported() -> bool {
     }
 }
 
+/// Whether this Linux kernel can enforce filesystem and TCP restrictions together.
+pub fn linux_tcp_sandbox_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::is_landlock_tcp_supported()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
 /// Set `PR_SET_NO_NEW_PRIVS` on the calling process.
 ///
 /// Landlock requires either `CAP_SYS_ADMIN` or this flag, and the flag is

@@ -633,10 +633,11 @@ pub fn application_binding_environment_name(binding: &ApplicationBindingV1) -> S
     }
 }
 
-pub fn resolve_application_bindings(
+/// Validate supplied Binding IDs and values before asking for any missing ones.
+pub fn validate_supplied_application_bindings(
     application: &ValidatedApplication,
     supplied: &BTreeMap<String, String>,
-) -> Result<BTreeMap<String, String>, PortableApplicationError> {
+) -> Result<(), PortableApplicationError> {
     let declared = application
         .bindings
         .iter()
@@ -647,6 +648,21 @@ pub fn resolve_application_bindings(
             "runtime supplied undeclared Binding `{unknown}`"
         )));
     }
+    for (id, value) in supplied {
+        if value.is_empty() || value.len() > 64 * 1024 || value.contains('\0') {
+            return Err(profile(format!(
+                "runtime Binding `{id}` has an invalid value"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub fn resolve_application_bindings(
+    application: &ValidatedApplication,
+    supplied: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, PortableApplicationError> {
+    validate_supplied_application_bindings(application, supplied)?;
     let missing = application
         .bindings
         .iter()
@@ -664,12 +680,6 @@ pub fn resolve_application_bindings(
         let Some(value) = supplied.get(&binding.id) else {
             continue;
         };
-        if value.is_empty() || value.len() > 64 * 1024 || value.contains('\0') {
-            return Err(profile(format!(
-                "runtime Binding `{}` has an invalid value",
-                binding.id
-            )));
-        }
         environment.insert(application_binding_environment_name(binding), value.clone());
     }
     Ok(environment)

@@ -20,6 +20,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(target_os = "linux")]
+mod process_group_linux;
+
 // The native process group (and its peer broker) is a Unix-only
 // materialization: it needs process groups and Unix sockets, and it refuses
 // the whole route on other hosts. The import follows the code it belongs to.
@@ -35,6 +38,7 @@ use crate::{
 use anyhow::{Context, Result, bail, ensure};
 use ato_adapter_oci::{
     DockerOciAdapter, OciEndpoint, OciMount, OciNetwork, OciResourceLimits, OciSpec, StopBudget,
+    command_control::CommandControl,
 };
 use ato_adapter_process::{
     ProcessAdapter, ProcessHandle, ProcessSpec, StopBudget as ProcessStopBudget,
@@ -47,9 +51,10 @@ use ato_formation::verify::{
 use ato_objects::PortableDependencyProfile;
 use ato_runtime_attempt::admission::EffectAuthorization;
 use ato_runtime_attempt::build_sandbox::NetworkPolicy;
+use ato_runtime_attempt::control::{AttemptPhase, ExecutionControl};
 use ato_runtime_attempt::data_plane::{ModelCache, ModelSetEntry, ModelSetManifest, env_name};
 use ato_runtime_attempt::launch::oci::{
-    LaunchedOci, OciCandidate, ServiceStart, start_service_group,
+    LaunchedOci, OciCandidate, ServiceStart, abandon_group, start_service_group,
 };
 use ato_runtime_attempt::launch::process_executor::state_path_env_name;
 #[cfg(unix)]
@@ -261,7 +266,10 @@ pub fn execution_requirements_for(
         PortableRealizationKind::LocalProcess | PortableRealizationKind::ProcessServiceGroup => {
             ato_host_facts::ExecutionRequirements::process()
         }
-        PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup => {
+        PortableRealizationKind::OciContainer => {
+            ato_host_facts::ExecutionRequirements::single_container(route_platform(derivation))
+        }
+        PortableRealizationKind::OciServiceGroup => {
             ato_host_facts::ExecutionRequirements::container(route_platform(derivation))
         }
         PortableRealizationKind::NativeDesktop => {
@@ -346,6 +354,179 @@ fn state_delivered_by_path(state: &[ato_formation::authoring::BoundState]) -> bo
     cfg!(target_os = "macos") && declares_path_delivery(state)
 }
 
+/// Check the known host and local artifact requirements without realizing the route
+/// or needing any Binding values.
+fn check_compatibility(
+    route: &ValidatedPortableApplication,
+    runtime_root: &Path,
+    cache_root: &Path,
+    host: &ato_host_facts::HostFacts,
+) -> Option<AttemptFailure> {
+    let requirements = execution_requirements_for(route, runtime_root);
+    let status = ato_host_facts::execution_status(host, &requirements);
+    if status.state != ato_host_facts::CapabilityState::Advertised {
+        let reason = status
+            .reasons
+            .iter()
+            .find(|reason| !reason.code.is_warning())
+            .or_else(|| status.reasons.first());
+        let (code, detail) = match reason {
+            Some(reason) => (reason.code.as_str(), reason.message.clone()),
+            None => ("execution_unavailable", status.describe()),
+        };
+        return refused(
+            code,
+            format!(
+                "{} runtime admission failed on this host: {detail}",
+                route.realization.label()
+            ),
+        );
+    }
+    if route.realization == PortableRealizationKind::NativeDesktop {
+        if route.native.is_none() {
+            return refused(
+                "native_descriptor_missing",
+                "the selected native route carries no validated descriptor",
+            );
+        }
+        if declares_runtime_egress(&route.derivation.requirements) {
+            // Inbound loopback Ports are enforced by the Seatbelt profile;
+            // an arbitrary declared TCP destination is not. A mandatory
+            // policy that cannot be enforced before launch is a refusal,
+            // never a receipt entry.
+            return refused(
+                "native_egress_policy_unavailable",
+                "this native Adapter can enforce inbound loopback Ports only; the route                      declares TCP egress that would not be enforced",
+            );
+        }
+    }
+    if requirements.needs_container && host.connector_choice().is_none() {
+        return refused(
+            "oci_connector_unavailable",
+            format!(
+                "{} runtime admission failed: no connector reaches this daemon \
+                 (a remote daemon cannot receive this Run's workspace)",
+                route.realization.label()
+            ),
+        );
+    }
+    if let Some(abi) = route
+        .derivation
+        .requirements
+        .startup
+        .as_ref()
+        .and_then(|startup| startup.abi.as_ref())
+        && let Err(error) =
+            ato_runtime_attempt::launch::process_abi::check(&abi.glibc_min, &abi.glibcxx_min)
+    {
+        return refused("process_abi_unavailable", format!("{error:#}"));
+    }
+    if !route.model_sets.is_empty() {
+        let checked = resolve_model_inputs(&route.model_sets, cache_root, runtime_root, false);
+        if let Err(error) = checked {
+            return refused(
+                "model_set_unavailable",
+                format!("local Model Set admission failed: {error:#}"),
+            );
+        }
+    }
+    None
+}
+
+pub fn run_authorization(
+    route: &ValidatedPortableApplication,
+    consent: NativeSourceConsent,
+) -> ato_runtime_attempt::admission::EffectAuthorization<'_> {
+    use ato_runtime_attempt::admission::EffectAuthorization;
+    if consent == NativeSourceConsent::Approved {
+        EffectAuthorization::UserAuthorizedDeclaredRequirements {
+            derivation_ref: route.derivation_ref.as_str(),
+        }
+    } else {
+        EffectAuthorization::UserInvoked {
+            derivation_ref: route.derivation_ref.as_str(),
+        }
+    }
+}
+
+fn native_surface_binding(route: &ValidatedPortableApplication) -> Option<(&str, &str)> {
+    let surface = route.derivation.native_surface.as_ref()?;
+    Some((surface.surface.profile(), route.derivation_ref.as_str()))
+}
+
+/// Evaluate the same admission used at Run time before asking for Binding values.
+/// Run admission still checks these facts and inputs again before effects.
+pub fn preflight_local_run(
+    route: &ValidatedPortableApplication,
+    runtime_root: &Path,
+    cache_root: &Path,
+    host: &ato_host_facts::HostFacts,
+    consent: NativeSourceConsent,
+) -> Option<AttemptFailure> {
+    let failure = ato_runtime_attempt::admission::admit_with_model_delivery(
+        &route.attempt_spec(None),
+        run_authorization(route, consent),
+        None,
+        route.realization == PortableRealizationKind::LocalProcess,
+        native_surface_binding(route),
+    )
+    .or_else(|| check_compatibility(route, runtime_root, cache_root, host));
+    if failure.is_some() {
+        return failure;
+    }
+    if matches!(
+        route.realization,
+        PortableRealizationKind::LocalProcess | PortableRealizationKind::ProcessServiceGroup
+    ) {
+        let reason = match host.os.as_str() {
+            "macos" if !host.native.sandbox_tool => Some(
+                "This machine cannot apply the macOS process sandbox. Start Ato outside any parent sandbox or use a supported Linux host.",
+            ),
+            "linux" if !ato_sandbox::is_sandbox_supported() => Some(
+                "This Linux host cannot apply Landlock. Use a Linux host with Landlock enabled.",
+            ),
+            "linux"
+                if !route.derivation.state.is_empty()
+                    && !ato_sandbox::bubblewrap_containment_available() =>
+            {
+                Some(
+                    "This route needs bubblewrap to mount its state safely. Install bubblewrap and run it on a Linux host that permits its namespaces.",
+                )
+            }
+            "macos" | "linux" => None,
+            _ => Some("Local process routes are supported on macOS and Linux."),
+        };
+        if let Some(reason) = reason {
+            return refused(
+                "process_sandbox_unavailable",
+                format!("portable process sandbox admission failed. {reason}"),
+            );
+        }
+    }
+    let mut python_versions = BTreeSet::new();
+    match route.realization {
+        PortableRealizationKind::LocalProcess => {
+            python_versions.extend(route.derivation.runtimes.get(PYTHON_RUNTIME));
+        }
+        PortableRealizationKind::ProcessServiceGroup => {
+            python_versions.extend(
+                route
+                    .derivation
+                    .steps
+                    .iter()
+                    .filter_map(|step| step.runtimes.get(PYTHON_RUNTIME)),
+            );
+        }
+        _ => {}
+    }
+    for version in python_versions {
+        if let Err(error) = resolve_pinned_python(version) {
+            return refused("python_runtime_unavailable", format!("{error:#}"));
+        }
+    }
+    None
+}
+
 impl CandidateRealizer for PortableBundleExecutor<'_> {
     fn delivers_model_sets(&self) -> bool {
         self.validated.realization == PortableRealizationKind::LocalProcess
@@ -358,115 +539,167 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
     /// can own; this is that statement, and admit() still establishes the
     /// physical availability and boundaries before anything starts.
     fn native_surface_binding(&self) -> Option<(&str, &str)> {
-        let surface = self.validated.derivation.native_surface.as_ref()?;
-        Some((
-            surface.surface.profile(),
-            self.validated.derivation_ref.as_str(),
-        ))
+        native_surface_binding(self.validated)
     }
 
     fn admit(&self, _profile: &RuntimeProfile) -> Option<AttemptFailure> {
-        if !self.validated.model_sets.is_empty() {
-            let checked = resolve_model_inputs(
-                &self.validated.model_sets,
-                self.context.cache_root,
-                self.runtime_root,
-                false,
-            );
-            if let Err(error) = checked {
-                return refused(
-                    "model_set_unavailable",
-                    format!("local Model Set admission failed: {error:#}"),
-                );
-            }
-        }
-        // The capability question is answered from observed host facts, not
-        // from the OS this binary was compiled for: a container route can run
-        // on a VM-backed or rootless daemon through the Run's connector, and
-        // the facts are what decide which connector that is.
-        let requirements = self.execution_requirements();
         let probed;
         let host = match self.context.host {
             Some(host) => host,
             None => {
-                probed = ato_host_facts::HostFacts::probe(std::slice::from_ref(&requirements));
+                probed = ato_host_facts::HostFacts::probe(std::slice::from_ref(
+                    &self.execution_requirements(),
+                ));
                 &probed
             }
         };
-        let status = ato_host_facts::execution_status(host, &requirements);
-        if status.state != ato_host_facts::CapabilityState::Advertised {
-            let reason = status
-                .reasons
-                .iter()
-                .find(|reason| !reason.code.is_warning())
-                .or_else(|| status.reasons.first());
-            let (code, detail) = match reason {
-                Some(reason) => (reason.code.as_str(), reason.message.clone()),
-                None => ("execution_unavailable", status.describe()),
-            };
-            return refused(
-                code,
-                format!(
-                    "{} runtime admission failed on this host: {detail}",
-                    self.validated.realization.label()
-                ),
-            );
-        }
-        if self.validated.realization == PortableRealizationKind::OciContainer
-            && host.connector_choice() == Some(ato_host_facts::ConnectorChoice::Relay)
-        {
-            // A single container has no group network for a relay to join, so
-            // this Run has no materialization for it. Refusing here is honest;
-            // silently trying the bridge would fail later, less clearly.
-            return refused(
-                "oci_container_relay_unsupported",
-                "this OCI container route needs a relay on this host (a VM-backed or rootless \
-                 daemon), which this Run does not implement for a single container; a service \
-                 group route runs through the relay, and a native Linux daemon runs directly",
-            );
-        }
-        if self.validated.realization == PortableRealizationKind::NativeDesktop {
-            if self.validated.native.is_none() {
-                return refused(
-                    "native_descriptor_missing",
-                    "the selected native route carries no validated descriptor",
-                );
-            }
-            if declares_runtime_egress(&self.validated.derivation.requirements) {
-                // Inbound loopback Ports are enforced by the Seatbelt profile;
-                // an arbitrary declared TCP destination is not. A mandatory
-                // policy that cannot be enforced before launch is a refusal,
-                // never a receipt entry.
-                return refused(
-                    "native_egress_policy_unavailable",
-                    "this native Adapter can enforce inbound loopback Ports only; the route                      declares TCP egress that would not be enforced",
-                );
-            }
-        }
-        if requirements.needs_container && host.connector_choice().is_none() {
-            return refused(
-                "oci_connector_unavailable",
-                format!(
-                    "{} runtime admission failed: no connector reaches this daemon \
-                     (a remote daemon cannot receive this Run's workspace)",
-                    self.validated.realization.label()
-                ),
-            );
-        }
-        None
+        check_compatibility(
+            self.validated,
+            self.runtime_root,
+            self.context.cache_root,
+            host,
+        )
     }
 
-    fn realize(&self, _attempt_id: &str, _attempt_root: &Path) -> Result<Realized, RealizeFailure> {
+    fn realize_controlled(
+        &self,
+        attempt_id: &str,
+        _attempt_root: &Path,
+        control: &ExecutionControl,
+    ) -> Result<Realized, RealizeFailure> {
+        use ato_formation::failure::{FailureStage, FormationFailure};
+
+        control.remaining(AttemptPhase::Launch)?;
         let route = self.validated;
-        if let Some(abi) = route
-            .derivation
-            .requirements
-            .startup
-            .as_ref()
-            .and_then(|s| s.abi.as_ref())
+        let supported = match route.realization {
+            PortableRealizationKind::StaticWeb => true,
+            // Its PID namespace dies even if a child leaves the process
+            // group. The supervisor can confirm the whole workload stopped.
+            PortableRealizationKind::LocalProcess => {
+                cfg!(target_os = "linux")
+                    && route.derivation.runtimes.contains_key(PYTHON_RUNTIME)
+                    && route.model_sets.is_empty()
+            }
+            PortableRealizationKind::ProcessServiceGroup => cfg!(target_os = "linux"),
+            PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup => {
+                cfg!(target_os = "linux") && self.offline()
+            }
+            PortableRealizationKind::NativeDesktop => {
+                cfg!(target_os = "macos") && supports_bounded_native_window(route)
+            }
+        };
+        if !supported
+            || self
+                .bundle
+                .portability
+                .as_ref()
+                .is_some_and(|transport| !transport.external_objects.is_empty())
         {
-            ato_runtime_attempt::launch::process_abi::check(&abi.glibc_min, &abi.glibcxx_min)?;
+            return Err(RealizeFailure::Execution(FormationFailure::new(
+                "portable_launch_deadline_unsupported",
+                FailureStage::Admission,
+                "This portable route does not yet support launch under a fixed verification budget",
+            ).into()));
         }
+        if matches!(
+            route.realization,
+            PortableRealizationKind::LocalProcess | PortableRealizationKind::ProcessServiceGroup
+        ) {
+            let failure = if !ato_sandbox::bubblewrap_containment_available() {
+                Some((
+                    "linux_bubblewrap_unavailable",
+                    "Native Python verification requires usable Linux bubblewrap namespaces",
+                ))
+            } else if !ato_sandbox::linux_tcp_sandbox_available() {
+                Some((
+                    "linux_landlock_tcp_unavailable",
+                    "Native Python verification requires a Linux kernel with Landlock TCP restrictions",
+                ))
+            } else {
+                None
+            };
+            if let Some((code, message)) = failure {
+                return Err(RealizeFailure::Execution(
+                    FormationFailure::new(code, FailureStage::Admission, message).into(),
+                ));
+            }
+        }
+        self.realize_bundle(attempt_id, Some(control))
+    }
+
+    fn realize(&self, attempt_id: &str, _attempt_root: &Path) -> Result<Realized, RealizeFailure> {
+        self.realize_bundle(attempt_id, None)
+    }
+}
+
+/// The self-contained native window profile that can be verified under a deadline.
+pub fn supports_bounded_native_window(route: &ValidatedPortableApplication) -> bool {
+    use ato_formation::native_desktop::{NativeArtifactFormat, NativeSignatureTarget};
+
+    route.native.as_ref().is_some_and(|native| {
+        native.descriptor.local_window
+            && native.descriptor.bundled_artifact().is_some()
+            && native.descriptor.format == NativeArtifactFormat::TarGz
+            && native.descriptor.signature_target == NativeSignatureTarget::Bundle
+    })
+}
+
+struct BoundedOciRun {
+    command: CommandControl,
+    daemon_socket: PathBuf,
+    ownership_labels: BTreeMap<String, String>,
+}
+
+impl BoundedOciRun {
+    fn new(
+        attempt_id: &str,
+        control: &ExecutionControl,
+        host: &ato_host_facts::HostFacts,
+    ) -> Result<Self> {
+        use ato_formation::failure::{FailureStage, FormationFailure};
+        let daemon_socket = match &host.docker.endpoint {
+            ato_host_facts::EndpointKind::Unix(socket) if host.docker.bridge_reachable() => {
+                PathBuf::from(socket)
+            }
+            _ => {
+                return Err(FormationFailure::new(
+                    "oci_native_daemon_required",
+                    FailureStage::Admission,
+                    "Bounded OCI verification requires a local Linux Docker Engine with a directly reachable bridge",
+                ).into());
+            }
+        };
+        let command = CommandControl::new(control.deadline_ms())
+            .cap(control.remaining(AttemptPhase::Launch)?);
+        Ok(Self {
+            command,
+            daemon_socket,
+            ownership_labels: BTreeMap::from([(
+                "run.ato.dev/publication-attempt".into(),
+                crate::bundle_sha256(attempt_id.as_bytes())[7..].into(),
+            )]),
+        })
+    }
+
+    fn remaining(&self) -> Result<std::time::Duration> {
+        self.command.remaining().map_err(|_| {
+            ato_formation::failure::FormationFailure::new(
+                "round_deadline_exceeded",
+                ato_formation::failure::FailureStage::Admission,
+                "The bounded OCI startup deadline elapsed",
+            )
+            .into()
+        })
+    }
+}
+
+impl PortableBundleExecutor<'_> {
+    fn realize_bundle(
+        &self,
+        attempt_id: &str,
+        control: Option<&ExecutionControl>,
+    ) -> Result<Realized, RealizeFailure> {
+        let route = self.validated;
         fs::create_dir_all(self.runtime_root)
             .with_context(|| format!("create {}", self.runtime_root.display()))?;
         let (hydrated, dependency_fetches) =
@@ -477,6 +710,16 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
         // One measurement of this host, used for both the connector choice and
         // the evidence that records it.
         let host = self.host_facts();
+        let bounded_oci = if matches!(
+            route.realization,
+            PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup
+        ) {
+            control
+                .map(|control| BoundedOciRun::new(attempt_id, control, &host))
+                .transpose()?
+        } else {
+            None
+        };
         let state_mounts =
             resolve_portable_state_mounts(route, self.runtime_root, self.filesystem_state)?;
         let input_mounts = if route.model_sets.is_empty() {
@@ -491,22 +734,33 @@ impl CandidateRealizer for PortableBundleExecutor<'_> {
         };
         let workspace = self.runtime_root.join("workspace");
         crate::materialize_tree(&hydrated, route, &workspace).map_err(anyhow::Error::from)?;
+        if let Some(control) = control {
+            control.remaining(AttemptPhase::Launch)?;
+        }
         let mut realized = match route.realization {
             PortableRealizationKind::StaticWeb => self.start_static(workspace)?,
             PortableRealizationKind::LocalProcess => {
-                self.start_process(workspace, &state_mounts, &input_mounts)?
+                self.start_process(workspace, &state_mounts, &input_mounts, control)?
             }
-            PortableRealizationKind::OciContainer => {
-                self.start_container(&hydrated, workspace, &state_mounts, &host)?
-            }
-            PortableRealizationKind::OciServiceGroup => {
-                self.start_service_group(&hydrated, workspace, &state_mounts, &host)?
-            }
+            PortableRealizationKind::OciContainer => self.start_container(
+                &hydrated,
+                workspace,
+                &state_mounts,
+                &host,
+                bounded_oci.as_ref(),
+            )?,
+            PortableRealizationKind::OciServiceGroup => self.start_service_group(
+                &hydrated,
+                workspace,
+                &state_mounts,
+                &host,
+                bounded_oci.as_ref(),
+            )?,
             PortableRealizationKind::ProcessServiceGroup => {
-                self.start_process_group(workspace, &state_mounts, &input_mounts)?
+                self.start_process_group(workspace, &state_mounts, &input_mounts, control)?
             }
             PortableRealizationKind::NativeDesktop => {
-                self.start_native_desktop(workspace, &state_mounts)?
+                self.start_native_desktop(workspace, &state_mounts, control)?
             }
         };
         realized.execution.dependency_fetches = dependency_fetches;
@@ -603,6 +857,7 @@ impl PortableBundleExecutor<'_> {
         workspace: PathBuf,
         state_mounts: &[PortableStateMount],
         input_mounts: &[PortableInputMount],
+        control: Option<&ExecutionControl>,
     ) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
         let step = &route.derivation.steps[0];
@@ -615,17 +870,33 @@ impl PortableBundleExecutor<'_> {
         let guest_port = guest_port.to_string();
         let host_port = host_port.to_string();
         let mut command = step.argv.clone();
-        let (executable, version) =
-            if let Some(python_version) = route.derivation.runtimes.get(PYTHON_RUNTIME) {
-                if !matches!(command[0].as_str(), "python" | "python3") {
-                    return Err(RealizeFailure::Execution(anyhow::anyhow!(
-                        "Python process derivation must use a logical python executable in argv[0]"
-                    )));
+        let (executable, version) = if let Some(python_version) =
+            route.derivation.runtimes.get(PYTHON_RUNTIME)
+        {
+            if !matches!(command[0].as_str(), "python" | "python3") {
+                return Err(RealizeFailure::Execution(anyhow::anyhow!(
+                    "Python process derivation must use a logical python executable in argv[0]"
+                )));
+            }
+            match find_pinned_python(python_version, control) {
+                Ok(interpreter) => interpreter,
+                Err(error) if control.is_none() => return Err(error.into()),
+                Err(_) => {
+                    use ato_formation::failure::{FailureStage, FormationFailure};
+                    if let Some(control) = control {
+                        control.remaining(AttemptPhase::Launch)?;
+                    }
+                    let failure = FormationFailure::new(
+                        "python_runtime_unavailable",
+                        FailureStage::Admission,
+                        "The pinned Python runtime is unavailable for bounded publication verification",
+                    );
+                    return Err(RealizeFailure::Execution(failure.into()));
                 }
-                resolve_pinned_python(python_version)?
-            } else {
-                (command[0].clone(), "unconstrained".to_owned())
-            };
+            }
+        } else {
+            (command[0].clone(), "unconstrained".to_owned())
+        };
         command[0] = executable.clone();
         let mut replaced = 0;
         for argument in &mut command {
@@ -687,7 +958,7 @@ impl PortableBundleExecutor<'_> {
         let process_home = process_runtime.join("home");
         fs::create_dir_all(&process_tmp).context("create the process tmp directory")?;
         fs::create_dir_all(&process_home).context("create the process home directory")?;
-        if state_mounts.is_empty() || state_by_path {
+        if control.is_none() && (state_mounts.is_empty() || state_by_path) {
             environment.insert(
                 "ATO_RUNTIME_DIR".to_owned(),
                 process_runtime.display().to_string(),
@@ -728,6 +999,7 @@ impl PortableBundleExecutor<'_> {
                 inputs: input_mounts,
                 state_by_path,
             },
+            control.is_some(),
             self.context.sandbox_shim,
             self.context.sandbox_subcommand,
         )?;
@@ -739,6 +1011,9 @@ impl PortableBundleExecutor<'_> {
             isolated_group: true,
         })
         .map_err(|error| launch(error.into(), &workspace))?;
+        if let Some(control) = control {
+            control.remaining(AttemptPhase::Launch)?;
+        }
         let handle = adapter
             .spawn(&workspace)
             .map_err(|error| launch(error.into(), &workspace))?;
@@ -771,6 +1046,7 @@ impl PortableBundleExecutor<'_> {
         &self,
         workspace: PathBuf,
         state_mounts: &[PortableStateMount],
+        control: Option<&ExecutionControl>,
     ) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
         let native = route.native.as_ref().ok_or_else(|| {
@@ -811,7 +1087,7 @@ impl PortableBundleExecutor<'_> {
             .iter()
             .map(|state| (state.id.clone(), state.host_path.clone()))
             .collect::<Vec<_>>();
-        crate::native_desktop::start(NativeStart {
+        let request = NativeStart {
             payload: acquired.payload,
             provenance: acquired.provenance,
             descriptor: &native.descriptor,
@@ -823,7 +1099,14 @@ impl PortableBundleExecutor<'_> {
             environment: self.binding_environment,
             local_override: self.context.native_local_override,
             declares_egress: declares_runtime_egress(&route.derivation.requirements),
-        })
+        };
+        #[cfg(target_os = "macos")]
+        if let Some(control) = control {
+            return crate::native_desktop::macos::start_controlled(request, control);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = control;
+        crate::native_desktop::start(request)
     }
 }
 
@@ -836,20 +1119,15 @@ impl PortableBundleExecutor<'_> {
         workspace: PathBuf,
         state_mounts: &[PortableStateMount],
         host: &ato_host_facts::HostFacts,
+        bounded: Option<&BoundedOciRun>,
     ) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
         // A single container has no group network to join, so the relay
         // materialization is not implemented for it. Admission refuses that
         // combination first; this is the same decision, stated where the
         // container would have been started.
-        if host.connector_choice() == Some(ato_host_facts::ConnectorChoice::Relay) {
-            return Err(launch(
-                anyhow::anyhow!(
-                    "a single OCI container route needs a relay on this host, which this Run does \
-                     not implement; use a service group route or a native Linux daemon"
-                ),
-                &workspace,
-            ));
+        if let Some(refusal) = host.single_container_refusal() {
+            return Err(launch(anyhow::anyhow!(refusal.message), &workspace));
         }
         let step = &route.derivation.steps[0];
         let port = &route.derivation.ports[0];
@@ -901,11 +1179,12 @@ impl PortableBundleExecutor<'_> {
             mounts,
             limits: oci_limits(runtime)?,
             stop_timeout_seconds: 5,
-            // A local Run is not Runner-owned; recovery never scans it.
-            labels: BTreeMap::new(),
+            labels: bounded
+                .map(|run| run.ownership_labels.clone())
+                .unwrap_or_default(),
         };
         let oci_runtime = self.runtime_root.join("oci");
-        let handle = local_oci_adapter(hydrated, spec)
+        let handle = local_oci_adapter(hydrated, spec, &oci_runtime, bounded)
             .and_then(|adapter| adapter.spawn(&workspace, &oci_runtime))
             .map_err(|error| oci_launch_failure(error, &workspace, &oci_runtime))?;
         let base = format!("http://127.0.0.1:{host_port}");
@@ -939,6 +1218,7 @@ impl PortableBundleExecutor<'_> {
         workspace: PathBuf,
         state_mounts: &[PortableStateMount],
         host: &ato_host_facts::HostFacts,
+        bounded: Option<&BoundedOciRun>,
     ) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
         let derivation = &route.derivation;
@@ -1007,13 +1287,15 @@ impl PortableBundleExecutor<'_> {
                 mounts,
                 limits: oci_limits(runtime)?,
                 stop_timeout_seconds: 5,
-                // A local Run is not Runner-owned; recovery never scans it.
-                labels: BTreeMap::new(),
+                labels: bounded
+                    .map(|run| run.ownership_labels.clone())
+                    .unwrap_or_default(),
             };
+            let runtime_root = oci_runtime.join(&step.id);
             services.push(ServiceStart {
                 name: step.id.clone(),
-                adapter: local_oci_adapter(hydrated, spec)?,
-                runtime_root: oci_runtime.join(&step.id),
+                adapter: local_oci_adapter(hydrated, spec, &runtime_root, bounded)?,
+                runtime_root,
                 networks: Vec::new(),
                 guards: Vec::new(),
             });
@@ -1042,7 +1324,17 @@ impl PortableBundleExecutor<'_> {
             }
             _ => None,
         };
-        let mut group = OciNetwork::create(&route.derivation_ref.to_string(), &BTreeMap::new())
+        let label = route.derivation_ref.as_str();
+        let network = if bounded.is_some() {
+            services
+                .first()
+                .context("OCI service group has no service")?
+                .adapter
+                .create_internal_network(label)
+        } else {
+            OciNetwork::create(label, &BTreeMap::new())
+        };
+        let mut group = network
             .and_then(|network| {
                 start_service_group(
                     network,
@@ -1050,7 +1342,7 @@ impl PortableBundleExecutor<'_> {
                     services,
                     StopBudget::DEFAULT,
                     relay,
-                    &mut |name, group| wait_until_service_accepts_tcp(route, name, group),
+                    &mut |name, group| wait_until_service_accepts_tcp(route, name, group, bounded),
                 )
             })
             .map_err(|error| oci_launch_failure(error, &workspace, &oci_runtime))?;
@@ -1069,25 +1361,32 @@ impl PortableBundleExecutor<'_> {
                 .into_iter()
                 .map(|observation| observation.port_id),
         );
-        for port_id in observation_ports {
-            if port_id == surface_port.id || observation_endpoints.contains_key(&port_id) {
-                continue;
+        let expose_observations = (|| -> Result<()> {
+            for port_id in observation_ports {
+                if port_id == surface_port.id || observation_endpoints.contains_key(&port_id) {
+                    continue;
+                }
+                if let Some(run) = bounded {
+                    run.remaining()?;
+                }
+                let port = derivation
+                    .ports
+                    .iter()
+                    .find(|port| port.id == port_id)
+                    .context("observation names undeclared service Port")?;
+                let guest_port = port
+                    .guest_port
+                    .context("observation Port omitted guest port")?;
+                let address = group
+                    .expose(port.from.as_str(), guest_port)
+                    .context("expose the observation's service Port")?;
+                observation_endpoints.insert(port.id.clone(), format!("http://{address}"));
             }
-            let port = derivation
-                .ports
-                .iter()
-                .find(|port| port.id == port_id)
-                .context("observation names undeclared service Port")?;
-            let guest_port = port
-                .guest_port
-                .context("observation Port omitted guest port")?;
-            // The observation reaches the Port the way this Run reaches any
-            // Port: the group's connector decides, and hands back an address
-            // the observation path can dial.
-            let address = group
-                .expose(port.from.as_str(), guest_port)
-                .context("expose the observation's service Port")?;
-            observation_endpoints.insert(port.id.clone(), format!("http://{address}"));
+            Ok(())
+        })();
+        if let Err(error) = expose_observations {
+            let failure = abandon_group(group, StopBudget::DEFAULT, error);
+            return Err(oci_launch_failure(failure, &workspace, &oci_runtime));
         }
         let surface = group
             .services()
@@ -1153,6 +1452,7 @@ impl PortableBundleExecutor<'_> {
         workspace: PathBuf,
         state_mounts: &[PortableStateMount],
         input_mounts: &[PortableInputMount],
+        control: Option<&ExecutionControl>,
     ) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
         let derivation = &route.derivation;
@@ -1166,6 +1466,12 @@ impl PortableBundleExecutor<'_> {
                 &workspace,
             ));
         }
+        #[cfg(target_os = "linux")]
+        if let Some(control) = control {
+            return self.start_bounded_process_group(workspace, control);
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = control;
         let process_runtime = self.runtime_root.join("process");
         let peer_root = self.runtime_root.join("peer");
         fs::create_dir_all(&process_runtime)
@@ -1237,13 +1543,7 @@ impl PortableBundleExecutor<'_> {
                 .and_then(|()| fs::create_dir_all(&process_home))
                 .map_err(|error| launch(error.into(), &workspace))?;
 
-            let mut environment = step.env.clone();
-            for binding in &step.bindings {
-                let name = crate::binding_environment_name(binding);
-                if let Some(value) = self.binding_environment.get(&name) {
-                    environment.insert(name, value.clone());
-                }
-            }
+            let mut environment = self.process_service_environment(step);
             for port in derivation.ports.iter().filter(|port| port.from == step.id) {
                 environment.insert(
                     endpoint_port_env_name(&port.id),
@@ -1273,20 +1573,9 @@ impl PortableBundleExecutor<'_> {
                 process_home.join(".cache").display().to_string(),
             );
 
-            let python_version = step
-                .runtimes
-                .get(PYTHON_RUNTIME)
-                .context("native process service omitted python")
-                .map_err(|error| launch(error, &workspace))?;
-            let mut command = step.argv.clone();
-            if !matches!(command[0].as_str(), "python" | "python3") {
-                return Err(RealizeFailure::Execution(anyhow::anyhow!(
-                    "Python process service `{}` must use a logical python executable in argv[0]",
-                    step.id
-                )));
-            }
             let (executable, version) =
-                resolve_pinned_python(python_version).map_err(|error| launch(error, &workspace))?;
+                resolve_service_python(step, None).map_err(|error| launch(error, &workspace))?;
+            let mut command = step.argv.clone();
             command[0] = executable.clone();
             // No argv port rewrite: the new path binds explicitly through the
             // environment and refuses a hardcoded guest port.
@@ -1396,52 +1685,79 @@ impl PortableBundleExecutor<'_> {
             });
         }
 
+        let owned = vec![workspace.clone(), process_runtime, peer_root];
         let group = ProcessServiceGroup::start(&workspace, services)
-            .map_err(|error| launch(error, &workspace))?;
-        let surface_port = derivation
+            .map_err(|error| process_group_launch_failure(error, &owned))?;
+        Ok(self.realized_process_group(
+            ProcessServiceGroupCandidate {
+                group: Some(group),
+                broker,
+                #[cfg(target_os = "linux")]
+                namespace: None,
+                endpoints,
+                owned,
+            },
+            &runtime_identity,
+        ))
+    }
+
+    #[cfg(unix)]
+    fn process_service_environment(
+        &self,
+        step: &ato_formation::authoring::BoundStep,
+    ) -> BTreeMap<String, String> {
+        let mut environment = step.env.clone();
+        for binding in &step.bindings {
+            let name = crate::binding_environment_name(binding);
+            if let Some(value) = self.binding_environment.get(&name) {
+                environment.insert(name, value.clone());
+            }
+        }
+        environment
+    }
+
+    #[cfg(unix)]
+    fn realized_process_group(
+        &self,
+        candidate: ProcessServiceGroupCandidate,
+        runtime_identity: &BTreeMap<String, (String, String)>,
+    ) -> Realized {
+        let surface_port = self
+            .validated
+            .derivation
             .ports
             .iter()
             .find(|port| port.protocol == ato_formation::authoring::HTTP_PROTOCOL)
-            .context("native process group omitted its Surface Port")
-            .map_err(|error| launch(error, &workspace))?;
-        let surface_step = derivation
-            .steps
-            .iter()
-            .find(|step| step.id == surface_port.from)
-            .context("Surface Port has no serving step")
-            .map_err(|error| launch(error, &workspace))?;
+            .expect("the validator requires exactly one HTTP Surface Port");
         let (executable, version) = runtime_identity
-            .get(&surface_step.id)
+            .get(&surface_port.from)
             .cloned()
             .expect("every service resolved its runtime");
-        let pid = group
+        let pid = candidate
+            .group
+            .as_ref()
+            .expect("the service group is live")
             .pids()
             .into_iter()
-            .find(|(name, _)| name == &surface_step.id)
+            .find(|(name, _)| name == &surface_port.from)
             .map(|(_, pid)| pid);
-        let base = endpoints
+        let base = candidate
+            .endpoints
             .get(&surface_port.id)
-            .cloned()
             .expect("the Surface Port has an endpoint");
-        let mut execution = evidence(
+        let execution = evidence(
             "process_service_group",
             Some(executable),
             Some(version),
             pid,
-            &base,
+            base,
         );
-        execution.endpoint = Some(base.clone());
-        Ok(Realized {
-            candidate: Box::new(ProcessServiceGroupCandidate {
-                group: Some(group),
-                broker,
-                endpoints,
-                owned: vec![workspace, process_runtime, peer_root],
-            }),
+        Realized {
+            candidate: Box::new(candidate),
             evidence: None,
             execution,
             kept: None,
-        })
+        }
     }
 
     #[cfg(not(unix))]
@@ -1450,6 +1766,7 @@ impl PortableBundleExecutor<'_> {
         workspace: PathBuf,
         _state_mounts: &[PortableStateMount],
         _input_mounts: &[PortableInputMount],
+        _control: Option<&ExecutionControl>,
     ) -> Result<Realized, RealizeFailure> {
         Err(launch(
             anyhow::anyhow!("a native process service group requires a Unix host"),
@@ -1471,6 +1788,7 @@ fn wait_until_service_accepts_tcp(
     route: &ValidatedPortableApplication,
     name: &str,
     group: &ato_adapter_oci::OciServiceGroup,
+    bounded: Option<&BoundedOciRun>,
 ) -> Result<()> {
     let guest_port = route
         .derivation
@@ -1481,19 +1799,30 @@ fn wait_until_service_accepts_tcp(
         .context("OCI service serves no Port")?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
+        if let Some(run) = bounded {
+            run.remaining()?;
+        }
         if let Some((service, code)) = group.exited_service()? {
             bail!("OCI service `{service}` exited before the group was ready: {code}");
         }
         // Readiness is a connection to the logical Port through the Run's
         // connector, not a dial to a container address.
         if group.connect(name, guest_port).is_ok() {
+            if let Some(run) = bounded {
+                run.remaining()?;
+            }
             return Ok(());
         }
         anyhow::ensure!(
             std::time::Instant::now() < deadline,
             "OCI service `{name}` did not accept TCP on {guest_port} within 60s"
         );
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        let interval = std::time::Duration::from_millis(100);
+        let pause = match bounded {
+            Some(run) => interval.min(run.remaining()?),
+            None => interval,
+        };
+        std::thread::sleep(pause);
     }
 }
 
@@ -1515,12 +1844,18 @@ fn free_loopback_port() -> Result<u16> {
 fn local_oci_adapter(
     bundle: &ato_objects::PortableApplicationBundle,
     spec: OciSpec,
+    runtime: &Path,
+    bounded: Option<&BoundedOciRun>,
 ) -> Result<DockerOciAdapter> {
     if !bundle
         .portability
         .as_ref()
         .is_some_and(|portability| portability.profile == PortableDependencyProfile::Offline)
     {
+        ensure!(
+            bounded.is_none(),
+            "Bounded OCI startup requires embedded images"
+        );
         return DockerOciAdapter::new(spec);
     }
     let archive = bundle
@@ -1534,21 +1869,36 @@ fn local_oci_adapter(
         })
         .context("offline OCI image archive is missing")?;
     let verified = crate::oci_archive::verify_oci_archive(archive)?;
-    DockerOciAdapter::new_offline(spec, verified.bytes, verified.config_reference)
+    let adapter = DockerOciAdapter::new_offline(spec, verified.bytes, verified.config_reference)?;
+    if let Some(run) = bounded {
+        run.remaining()?;
+        fs::create_dir_all(runtime)?;
+        return Ok(adapter
+            .with_isolated_owner(
+                &run.daemon_socket,
+                &runtime.canonicalize()?.join("docker-client"),
+            )?
+            .with_control(run.command.clone()));
+    }
+    Ok(adapter)
 }
 
 /// Preserve partial execution separately from a failure that started nothing.
 fn oci_launch_failure(error: anyhow::Error, workspace: &Path, runtime: &Path) -> RealizeFailure {
     let mut resources =
-        if let Some(left) = error.downcast_ref::<ato_adapter_oci::SpawnCleanupUnconfirmed>() {
-            let mut ids = vec![format!("container:{}", left.container)];
-            ids.extend(left.networks.iter().map(|name| format!("network:{name}")));
-            Some(ids)
+        if let Some(left) = error.downcast_ref::<ato_adapter_oci::NetworkCleanupUnconfirmed>() {
+            Some(vec![format!("network:{}", left.network)])
         } else {
-            error
-                .downcast_ref::<ato_runtime_attempt::launch::oci::OciStartFailure>()
-                .filter(|failure| !failure.confirmed())
-                .map(|failure| failure.resources())
+            if let Some(left) = error.downcast_ref::<ato_adapter_oci::SpawnCleanupUnconfirmed>() {
+                let mut ids = vec![format!("container:{}", left.container)];
+                ids.extend(left.networks.iter().map(|name| format!("network:{name}")));
+                Some(ids)
+            } else {
+                error
+                    .downcast_ref::<ato_runtime_attempt::launch::oci::OciStartFailure>()
+                    .filter(|failure| !failure.confirmed())
+                    .map(|failure| failure.resources())
+            }
         };
     if let Some(resources) = resources.as_mut() {
         resources.push(format!("scratch:{}", workspace.display()));
@@ -1569,6 +1919,56 @@ fn launch(error: anyhow::Error, workspace: &Path) -> RealizeFailure {
     RealizeFailure::Launch {
         error,
         evidence: None,
+    }
+}
+
+#[cfg(unix)]
+fn process_group_launch_failure(error: anyhow::Error, owned: &[PathBuf]) -> RealizeFailure {
+    if let Some(failure) = error.downcast_ref::<crate::process_group::StartCleanupUnconfirmed>() {
+        let mut resources = failure.resources.clone();
+        resources.extend(
+            owned
+                .iter()
+                .map(|path| format!("scratch:{}", path.display())),
+        );
+        return RealizeFailure::Abandoned {
+            cleanup: failure.cleanup.clone(),
+            error,
+            resources,
+        };
+    }
+    match remove_owned(owned) {
+        Ok(()) => RealizeFailure::Launch {
+            error,
+            evidence: None,
+        },
+        Err(cleanup) => RealizeFailure::Stopped {
+            error,
+            evidence: Box::new(process_group_evidence(
+                "native_process_group",
+                BTreeMap::new(),
+            )),
+            stop: ato_runtime_attempt::realize::StopClass::ScratchKept {
+                reason: format!("{cleanup:#}"),
+            },
+        },
+    }
+}
+
+#[cfg(unix)]
+fn process_group_evidence(
+    containment: &str,
+    endpoints: BTreeMap<String, String>,
+) -> ato_formation::request::RealizationEvidence {
+    ato_formation::request::RealizationEvidence {
+        port_operations: Vec::new(),
+        executor: "process_service_group".into(),
+        containment: containment.into(),
+        workspace: "read_only".into(),
+        build_network: "not_applicable".into(),
+        candidate_network: "declared_peers".into(),
+        endpoints,
+        destroyed: false,
     }
 }
 
@@ -1645,9 +2045,10 @@ impl RunningCandidate for PortableProcessCandidate {
             // child behind is still running in the same group. The group is
             // stopped and shown empty, and a group that survives is an error
             // this Run reports instead of a cleanup the Drop path hides.
-            handle
-                .stop_group(ProcessStopBudget::default())
-                .context("stopping the selected process group")?;
+            if let Err(error) = handle.stop_group(ProcessStopBudget::default()) {
+                self.owned.clear();
+                return Err(error).context("stopping the selected process group");
+            }
         }
         remove_owned(&self.owned)
     }
@@ -1673,6 +2074,8 @@ impl Drop for PortableProcessCandidate {
 pub struct ProcessServiceGroupCandidate {
     group: Option<ProcessServiceGroup>,
     broker: Option<PeerBroker>,
+    #[cfg(target_os = "linux")]
+    namespace: Option<process_group_linux::ScopedNetwork>,
     endpoints: BTreeMap<String, String>,
     owned: Vec<PathBuf>,
 }
@@ -1691,13 +2094,7 @@ impl RunningCandidate for ProcessServiceGroupCandidate {
     }
 
     fn stop(mut self: Box<Self>) -> Result<()> {
-        if let Some(group) = self.group.take() {
-            group.stop()?;
-        }
-        // The broker goes after every consumer and shim is gone, so no live
-        // connection is left pointing at a removed socket.
-        drop(self.broker.take());
-        remove_owned(&self.owned)
+        self.shutdown()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1706,11 +2103,42 @@ impl RunningCandidate for ProcessServiceGroupCandidate {
 }
 
 #[cfg(unix)]
+impl ProcessServiceGroupCandidate {
+    fn shutdown(&mut self) -> Result<()> {
+        use ato_runtime_attempt::realize::CandidateStopFailure;
+
+        let owned = std::mem::take(&mut self.owned);
+        if let Some(group) = self.group.take() {
+            let mut resources = group.resources();
+            if let Err(error) = group.stop() {
+                resources.extend(
+                    owned
+                        .iter()
+                        .map(|path| format!("scratch:{}", path.display())),
+                );
+                return Err(CandidateStopFailure::Unconfirmed {
+                    reason: format!("{error:#}"),
+                    resources,
+                }
+                .into());
+            }
+        }
+        drop(self.broker.take());
+        #[cfg(target_os = "linux")]
+        drop(self.namespace.take());
+        remove_owned(&owned).map_err(|error| {
+            CandidateStopFailure::ScratchKept {
+                reason: format!("{error:#}"),
+            }
+            .into()
+        })
+    }
+}
+
+#[cfg(unix)]
 impl Drop for ProcessServiceGroupCandidate {
     fn drop(&mut self) {
-        drop(self.group.take());
-        drop(self.broker.take());
-        if let Err(error) = remove_owned(&self.owned) {
+        if let Err(error) = self.shutdown() {
             eprintln!("[ato run] {error:#}");
         }
     }
@@ -2059,16 +2487,61 @@ struct PortableProcessMounts<'a> {
 }
 
 fn resolve_pinned_python(version: &str) -> Result<(String, String)> {
-    if let Ok(output) = Command::new("uv")
-        .args(["python", "find", version])
-        .env("UV_PYTHON_DOWNLOADS", "never")
-        .output()
+    find_pinned_python(version, None)
+}
+
+#[cfg(unix)]
+fn resolve_service_python(
+    step: &ato_formation::authoring::BoundStep,
+    control: Option<&ExecutionControl>,
+) -> Result<(String, String)> {
+    let version = step
+        .runtimes
+        .get(PYTHON_RUNTIME)
+        .context("native process service omitted python")?;
+    ensure!(
+        matches!(
+            step.argv.first().map(String::as_str),
+            Some("python" | "python3")
+        ),
+        "Python process service `{}` must use a logical python executable in argv[0]",
+        step.id
+    );
+    match (find_pinned_python(version, control), control) {
+        (Err(error), Some(control)) => {
+            control.remaining(AttemptPhase::Launch)?;
+            Err(error.context(ato_formation::failure::FormationFailure::new(
+                "python_runtime_unavailable",
+                ato_formation::failure::FailureStage::Admission,
+                format!(
+                    "Service `{}` requires an installed Python {version}",
+                    step.id
+                ),
+            )))
+        }
+        (result, _) => result,
+    }
+}
+
+fn find_pinned_python(
+    version: &str,
+    control: Option<&ExecutionControl>,
+) -> Result<(String, String)> {
+    let mut uv = Command::new("uv");
+    uv.args(["python", "find", version])
+        .env("UV_PYTHON_DOWNLOADS", "never");
+    if control.is_some() {
+        uv.env("UV_OFFLINE", "true")
+            .env("UV_NO_CONFIG", "true")
+            .current_dir("/");
+    }
+    if let Ok(output) = python_probe(&mut uv, control)
         && output.status.success()
     {
         let path = String::from_utf8(output.stdout)?.trim().to_owned();
         if !path.is_empty() {
             let executable = executable_path(&path).unwrap_or_else(|| PathBuf::from(&path));
-            return verified_python(&executable.display().to_string(), version);
+            return verified_python(&executable.display().to_string(), version, control);
         }
     }
     let provisioned_root = PathBuf::from("/opt/ato/toolchains/python");
@@ -2085,12 +2558,12 @@ fn resolve_pinned_python(version: &str) -> Result<(String, String)> {
         for candidate in candidates.into_iter().rev() {
             let executable = provisioned_root.join(candidate).join("bin").join("python3");
             if executable.is_file() {
-                return verified_python(&executable.display().to_string(), version);
+                return verified_python(&executable.display().to_string(), version, control);
             }
         }
     }
     for executable in ["python3", "python"] {
-        let Ok(output) = Command::new(executable).arg("--version").output() else {
+        let Ok(output) = python_probe(Command::new(executable).arg("--version"), control) else {
             continue;
         };
         let reported = format!(
@@ -2103,8 +2576,11 @@ fn resolve_pinned_python(version: &str) -> Result<(String, String)> {
                 .unwrap_or_else(|| PathBuf::from(executable))
                 .display()
                 .to_string();
-            return verified_python(&selected, version);
+            return verified_python(&selected, version, control);
         }
+    }
+    if let Some(control) = control {
+        control.remaining(AttemptPhase::Launch)?;
     }
     bail!(
         "selected derivation requires Python {version}; install that runtime with `uv python install {version}`"
@@ -2130,10 +2606,12 @@ fn python_version_matches(reported: &str, required: &str) -> bool {
         .is_some_and(|actual| actual == required || actual.starts_with(&format!("{required}.")))
 }
 
-fn verified_python(executable: &str, version: &str) -> Result<(String, String)> {
-    let output = Command::new(executable)
-        .arg("--version")
-        .output()
+fn verified_python(
+    executable: &str,
+    version: &str,
+    control: Option<&ExecutionControl>,
+) -> Result<(String, String)> {
+    let output = python_probe(Command::new(executable).arg("--version"), control)
         .with_context(|| format!("inspect selected Python executable {executable}"))?;
     let reported = format!(
         "{}{}",
@@ -2146,18 +2624,88 @@ fn verified_python(executable: &str, version: &str) -> Result<(String, String)> 
             reported.trim()
         );
     }
-    let identity = Command::new(executable)
-        .args([
-            "-c",
-            "import os,sys; print(os.path.realpath(sys.executable))",
-        ])
-        .output()
+    let mut interpreter = Command::new(executable);
+    if control.is_some() {
+        interpreter.args(["-I", "-S"]);
+    }
+    interpreter.args([
+        "-c",
+        "import os,sys; print(os.path.realpath(sys.executable))",
+    ]);
+    let identity = python_probe(&mut interpreter, control)
         .with_context(|| format!("resolve selected Python executable {executable}"))?;
     let resolved = String::from_utf8(identity.stdout)?.trim().to_owned();
     if !identity.status.success() || resolved.is_empty() || !PathBuf::from(&resolved).is_file() {
         bail!("selected Python executable {executable} did not resolve to a file");
     }
     Ok((resolved, reported.trim().to_owned()))
+}
+
+fn python_probe(
+    command: &mut Command,
+    control: Option<&ExecutionControl>,
+) -> Result<std::process::Output> {
+    probe_host_command(command, control).context("Probe the installed Python runtime")
+}
+
+pub(crate) fn probe_host_command(
+    command: &mut Command,
+    control: Option<&ExecutionControl>,
+) -> Result<std::process::Output> {
+    use std::io::{Read, Seek};
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let Some(control) = control else {
+        return Ok(command.output()?);
+    };
+    const MAX_OUTPUT: u64 = 16 * 1024;
+    let allowance = control.cap(AttemptPhase::Launch, Duration::from_secs(5))?;
+    let mut stdout = tempfile::tempfile()?;
+    let mut stderr = tempfile::tempfile()?;
+    command
+        .stdin(Stdio::null())
+        .stdout(stdout.try_clone()?)
+        .stderr(stderr.try_clone()?);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let started = Instant::now();
+    let mut child = command.spawn()?;
+    let status: Result<_> = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Err(error) => break Err(error.into()),
+            Ok(None) if started.elapsed() >= allowance => {
+                break Err(anyhow::anyhow!("Local verification command timed out"));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(15)),
+        }
+    };
+    if status.is_err() {
+        #[cfg(unix)]
+        let _ = ato_adapter_process::force_kill_process_tree(child.id(), child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let status = status?;
+    let read = |file: &mut std::fs::File| -> Result<Vec<u8>> {
+        file.rewind()?;
+        let mut bytes = Vec::new();
+        file.take(MAX_OUTPUT + 1).read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() as u64 <= MAX_OUTPUT,
+            "Local verification command output exceeded its limit"
+        );
+        Ok(bytes)
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: read(&mut stdout)?,
+        stderr: read(&mut stderr)?,
+    })
 }
 
 fn resolve_portable_state_mounts(
@@ -2217,6 +2765,7 @@ fn portable_process_sandbox_command(
     host_port: u16,
     working_dir: &str,
     mounts: PortableProcessMounts<'_>,
+    require_namespace: bool,
     sandbox_shim: &Path,
     sandbox_subcommand: &str,
 ) -> Result<Vec<String>> {
@@ -2238,7 +2787,7 @@ fn portable_process_sandbox_command(
         .and_then(std::path::Path::parent)
         .context("portable runtime has no readable installation root")?
         .to_path_buf();
-    if !state_mounts.is_empty() {
+    if require_namespace || !state_mounts.is_empty() {
         #[cfg(target_os = "linux")]
         {
             return portable_process_bwrap_command(
@@ -2255,7 +2804,7 @@ fn portable_process_sandbox_command(
         }
         #[cfg(not(target_os = "linux"))]
         {
-            if !mounts.state_by_path {
+            if require_namespace || !mounts.state_by_path {
                 // A route that declares a fixed mount but does not say it can
                 // be found by path cannot run where there is no mount
                 // namespace. Refusing is the point: `mount` is not ignored.
@@ -2327,13 +2876,6 @@ fn portable_process_bwrap_command(
 ) -> Result<Vec<String>> {
     let state_mounts = mounts.state;
     let input_mounts = mounts.inputs;
-    let bwrap = executable_path("bwrap")
-        .context("local process runtime admission failed: `bwrap` is not on PATH")?;
-    let guest_working_dir = if working_dir == "." {
-        "/app".to_owned()
-    } else {
-        format!("/app/{working_dir}")
-    };
     let policy = SandboxPolicy::new()
         .allow_read_write(
             state_mounts
@@ -2368,52 +2910,7 @@ fn portable_process_bwrap_command(
     fs::write(&policy_path, serde_json::to_vec_pretty(&policy)?)
         .with_context(|| format!("write portable sandbox policy {}", policy_path.display()))?;
 
-    let mut command = vec![
-        bwrap.display().to_string(),
-        "--unshare-all".to_owned(),
-        "--share-net".to_owned(),
-        "--die-with-parent".to_owned(),
-        "--new-session".to_owned(),
-        "--proc".to_owned(),
-        "/proc".to_owned(),
-        "--dev".to_owned(),
-        "/dev".to_owned(),
-        "--tmpfs".to_owned(),
-        "/tmp".to_owned(),
-    ];
-    for (source, target, required) in [
-        ("/bin", "/bin", false),
-        ("/sbin", "/sbin", false),
-        ("/lib", "/lib", false),
-        ("/lib64", "/lib64", false),
-        ("/usr", "/usr", true),
-        ("/etc/resolv.conf", "/etc/resolv.conf", false),
-        ("/etc/hosts", "/etc/hosts", false),
-        ("/etc/ssl", "/etc/ssl", false),
-    ] {
-        command.extend([
-            if required {
-                "--ro-bind"
-            } else {
-                "--ro-bind-try"
-            }
-            .to_owned(),
-            source.to_owned(),
-            target.to_owned(),
-        ]);
-    }
-    if !interpreter_root.starts_with("/usr") {
-        command.extend([
-            "--ro-bind".to_owned(),
-            interpreter_root.display().to_string(),
-            interpreter_root.display().to_string(),
-        ]);
-    }
-    command.extend([
-        "--ro-bind".to_owned(),
-        workspace.display().to_string(),
-        "/app".to_owned(),
-    ]);
+    let mut command = process_bwrap_base(workspace, interpreter_root, true)?;
     for state in state_mounts {
         command.extend([
             "--bind".to_owned(),
@@ -2441,7 +2938,7 @@ fn portable_process_bwrap_command(
         policy_path.display().to_string(),
         "/.ato/sandbox-policy.json".to_owned(),
         "--chdir".to_owned(),
-        guest_working_dir,
+        format!("/app/{working_dir}"),
         "/.ato/ato".to_owned(),
         sandbox_subcommand.to_owned(),
         "--policy".to_owned(),
@@ -2449,6 +2946,69 @@ fn portable_process_bwrap_command(
         "--".to_owned(),
     ]);
     command.extend(workload.iter().cloned());
+    Ok(command)
+}
+
+#[cfg(target_os = "linux")]
+fn process_bwrap_base(
+    workspace: &Path,
+    interpreter_root: &Path,
+    share_network: bool,
+) -> Result<Vec<String>> {
+    ensure!(
+        interpreter_root != Path::new("/"),
+        "The interpreter needs a dedicated installation root"
+    );
+    let bwrap = executable_path("bwrap")
+        .context("local process runtime admission failed: `bwrap` is not on PATH")?;
+    let mut command = vec![bwrap.display().to_string(), "--unshare-all".to_owned()];
+    if share_network {
+        command.push("--share-net".to_owned());
+    } else {
+        command.extend([
+            "--unshare-user".into(),
+            "--disable-userns".into(),
+            "--cap-drop".into(),
+            "ALL".into(),
+        ]);
+    }
+    command.extend(
+        [
+            "--die-with-parent",
+            "--new-session",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--tmpfs",
+            "/tmp",
+        ]
+        .map(str::to_owned),
+    );
+    for (path, option) in [
+        ("/bin", "--ro-bind-try"),
+        ("/sbin", "--ro-bind-try"),
+        ("/lib", "--ro-bind-try"),
+        ("/lib64", "--ro-bind-try"),
+        ("/usr", "--ro-bind"),
+        ("/etc/resolv.conf", "--ro-bind-try"),
+        ("/etc/hosts", "--ro-bind-try"),
+        ("/etc/ssl", "--ro-bind-try"),
+    ] {
+        command.extend([option, path, path].map(str::to_owned));
+    }
+    if !interpreter_root.starts_with("/usr") {
+        command.extend([
+            "--ro-bind".into(),
+            interpreter_root.display().to_string(),
+            interpreter_root.display().to_string(),
+        ]);
+    }
+    command.extend([
+        "--ro-bind".into(),
+        workspace.display().to_string(),
+        "/app".into(),
+    ]);
     Ok(command)
 }
 
@@ -2785,6 +3345,7 @@ default = "pure"
                 inputs: &[],
                 state_by_path: true,
             },
+            false,
             Path::new("/usr/bin/true"),
             "__portable-sandbox-exec",
         )
@@ -2915,7 +3476,7 @@ Server(("127.0.0.1", int(os.environ["ATO_ENDPOINT_APP_HTTP_PORT"])), Handler).se
                 binding_environment: &BTreeMap::new(),
                 context: &context,
             };
-            let realized = match executor.start_process(workspace, &state_mounts, &[]) {
+            let realized = match executor.start_process(workspace, &state_mounts, &[], None) {
                 Ok(realized) => realized,
                 Err(RealizeFailure::Execution(error))
                 | Err(RealizeFailure::Launch { error, .. })
@@ -3017,6 +3578,7 @@ Server(("127.0.0.1", int(os.environ["ATO_ENDPOINT_APP_HTTP_PORT"])), Handler).se
                 inputs: &[],
                 state_by_path: false,
             },
+            false,
             Path::new("/usr/bin/true"),
             "__portable-sandbox-exec",
         )

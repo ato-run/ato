@@ -342,17 +342,21 @@ pub(crate) fn verified_cache_path(
     digest: &str,
     size: u64,
 ) -> Result<Option<PathBuf>> {
-    let Some(hex) = digest.strip_prefix("sha256:") else {
+    let Some(path) = bundle_cache_path(ato_home, digest) else {
         return Ok(None);
     };
-    let path = ato_home.join("hub").join(format!("{hex}.capsule"));
-    if !path.is_file() {
+    if !std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
         return Ok(None);
     }
     let Ok((stored, stored_digest)) = stream_file_sha256(&path) else {
         return Ok(None);
     };
     Ok((stored == size && stored_digest == digest).then_some(path))
+}
+
+pub(super) fn bundle_cache_path(ato_home: &Path, digest: &str) -> Option<PathBuf> {
+    let hex = digest.strip_prefix("sha256:")?;
+    Some(ato_home.join("hub").join(format!("{hex}.capsule")))
 }
 
 /// Stream the URL into $ATO_HOME/hub/<digest>.capsule, verifying size and digest

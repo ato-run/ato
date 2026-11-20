@@ -10,10 +10,13 @@ use std::{io::Read, path::PathBuf};
 
 #[derive(Debug, Args)]
 pub(super) struct InputArgs {
+    /// Search ID printed by `ato form --runtime-network` when it reports needs_input.
     #[arg(long)]
     search_id: String,
+    /// Coordinator URL used by the original Formation command.
     #[arg(long, env = "ATO_RUNTIME_NETWORK_API")]
     api: String,
+    /// File holding the requesting account's token for that Coordinator.
     #[arg(long, env = "ATO_RUNTIME_NETWORK_TOKEN_FILE")]
     token_file: PathBuf,
     /// Zero-based item in the inspect response's required array.
@@ -22,8 +25,10 @@ pub(super) struct InputArgs {
     /// Read the value from stdin, never from an argument or environment.
     #[arg(long,requires_all=["item","reuse"],conflicts_with="credential_id")]
     value_stdin: bool,
+    /// ID of an existing reusable credential shown for this pending item.
     #[arg(long, requires = "item", conflicts_with = "value_stdin")]
     credential_id: Option<String>,
+    /// Limit a new value to this Formation, or register it for explicit reuse.
     #[arg(long,value_parser=["this_formation","reusable"])]
     reuse: Option<String>,
     /// Required for reusable values. Saved once; retry never extends expiry.

@@ -323,6 +323,10 @@ impl BrowserVerifierSandboxSpec {
         chrome: ChromeSandbox,
     ) -> Result<Vec<String>> {
         let mut argv = Self::base_argv(scratch)?;
+        if scratch.join("operator").is_dir() {
+            // Keep the owner's command mailbox out of the browser's namespace.
+            argv.extend(["--tmpfs".to_owned(), format!("{GUEST_SCRATCH}/operator")]);
+        }
         argv.extend([
             "--ro-bind".to_owned(),
             utf8(&self.chrome_root)?,

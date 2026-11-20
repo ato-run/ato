@@ -452,7 +452,7 @@ pub fn start_service_group(
 
 /// Stop what a failed group start had started, in reverse, and report it with
 /// the start error.
-fn abandon_group(
+pub fn abandon_group(
     mut group: OciServiceGroup,
     budget: StopBudget,
     error: anyhow::Error,

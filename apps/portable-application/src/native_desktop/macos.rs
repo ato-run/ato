@@ -21,16 +21,19 @@ use ato_formation::verify::{
     RuntimeTerminalObservation, VerificationExecutionEvidence, VerificationNativeEvidence,
 };
 use ato_pty_host::PtySession;
+use ato_runtime_attempt::control::{AttemptPhase, ExecutionControl};
 use ato_runtime_attempt::launch::process_executor::state_path_env_name;
 use ato_runtime_attempt::realize::{RealizeFailure, Realized, RunningCandidate};
 use ato_sandbox::SandboxPolicy;
 
-use super::artifact::{ExtractedArtifact, adopt_tree, extract_archive, extract_archive_file};
+use super::artifact::{
+    ExtractedArtifact, adopt_tree, extract_archive, extract_archive_file, extract_budgeted_tar,
+};
 use super::terminal;
 use super::{
     NativeArchiveSource, NativeArtifactPayload, NativeRefusal, NativeStart, resolve_entry,
 };
-use crate::portable_run::{endpoint_port_env_name, remove_owned};
+use crate::portable_run::{endpoint_port_env_name, probe_host_command, remove_owned};
 use crate::process_group::{ProcessServiceGroup, ServiceSpec};
 
 /// How long the declared Ports may take to accept after the process started.
@@ -103,7 +106,15 @@ fn bounded_detail(bytes: &[u8]) -> Option<String> {
 }
 
 /// Observe the signature and Gatekeeper verdicts for one executable.
+#[cfg(test)]
 pub(crate) fn probe_signature(entry: &Path) -> SignatureReport {
+    probe_signature_with_control(entry, None)
+}
+
+fn probe_signature_with_control(
+    entry: &Path,
+    control: Option<&ExecutionControl>,
+) -> SignatureReport {
     let (Some(codesign), Some(spctl)) = (codesign_tool(), spctl_tool()) else {
         return SignatureReport {
             codesign_verify: "invalid",
@@ -113,10 +124,12 @@ pub(crate) fn probe_signature(entry: &Path) -> SignatureReport {
             gatekeeper_detail: Some("spctl is not available on this host".to_owned()),
         };
     };
-    let verify = Command::new(&codesign)
-        .args(["--verify", "--deep", "--strict", "--verbose=2"])
-        .arg(entry)
-        .output();
+    let verify = probe_host_command(
+        Command::new(&codesign)
+            .args(["--verify", "--deep", "--strict", "--verbose=2"])
+            .arg(entry),
+        control,
+    );
     let (codesign_verify, codesign_detail) = match verify {
         Ok(output) if output.status.success() => ("valid", None),
         Ok(output) => (
@@ -127,7 +140,7 @@ pub(crate) fn probe_signature(entry: &Path) -> SignatureReport {
     };
     // `codesign -dvvv` describes what the signature IS, which is what decides
     // whether "valid" means the Developer ID minimum admission asks for.
-    let described = Command::new(&codesign).args(["-dvvv"]).arg(entry).output();
+    let described = probe_host_command(Command::new(&codesign).args(["-dvvv"]).arg(entry), control);
     let description = described
         .as_ref()
         .map(|output| {
@@ -155,10 +168,12 @@ pub(crate) fn probe_signature(entry: &Path) -> SignatureReport {
     } else {
         "unknown"
     };
-    let assess = Command::new(&spctl)
-        .args(["--assess", "--type", "execute", "--verbose=2"])
-        .arg(entry)
-        .output();
+    let assess = probe_host_command(
+        Command::new(&spctl)
+            .args(["--assess", "--type", "execute", "--verbose=2"])
+            .arg(entry),
+        control,
+    );
     let (gatekeeper, gatekeeper_detail) = match assess {
         Ok(output) if output.status.success() => ("accepted", None),
         Ok(output) => (
@@ -229,11 +244,22 @@ pub(crate) struct SignaturePreparation {
 /// `executable` verifies the entry file; `bundle` verifies the `.app` root that
 /// contains it, because a bundle's signature covers its contents and "the
 /// entry is signed" is not "the application the Run launches is signed".
+#[cfg(test)]
 pub(crate) fn prepare_signature(
     descriptor: &ato_formation::native_desktop::NativeDescriptor,
     artifact_root: &Path,
     entry: &Path,
     local_override: bool,
+) -> Result<SignaturePreparation, NativeRefusal> {
+    prepare_signature_with_control(descriptor, artifact_root, entry, local_override, None)
+}
+
+fn prepare_signature_with_control(
+    descriptor: &ato_formation::native_desktop::NativeDescriptor,
+    artifact_root: &Path,
+    entry: &Path,
+    local_override: bool,
+    control: Option<&ExecutionControl>,
 ) -> Result<SignaturePreparation, NativeRefusal> {
     use ato_formation::native_desktop::{NativeSignatureTarget, native_bundle_root};
 
@@ -285,7 +311,7 @@ pub(crate) fn prepare_signature(
             (resolved, relative.to_owned())
         }
     };
-    let report = probe_signature(&target_path);
+    let report = probe_signature_with_control(&target_path, control);
     let override_used = authorize_signature(&report, descriptor.signature, local_override)?;
     Ok(SignaturePreparation {
         report,
@@ -386,9 +412,18 @@ pub(crate) struct PreparedNative {
     pub profile: String,
 }
 
+#[cfg(test)]
 pub(crate) fn prepare(
     request: &NativeStart<'_>,
     native_root: &Path,
+) -> Result<PreparedNative, NativeRefusal> {
+    prepare_with_control(request, native_root, None)
+}
+
+fn prepare_with_control(
+    request: &NativeStart<'_>,
+    native_root: &Path,
+    control: Option<&ExecutionControl>,
 ) -> Result<PreparedNative, NativeRefusal> {
     if request.declares_egress {
         return Err(NativeRefusal {
@@ -411,6 +446,14 @@ pub(crate) fn prepare(
     // produced. A format this Adapter cannot unpack keeps its own code so it is
     // not reported as a corrupted artifact.
     let extracted = match &request.payload {
+        NativeArtifactPayload::Archive(NativeArchiveSource::Memory(bytes)) if control.is_some() => {
+            extract_budgeted_tar(bytes, &artifact_root, || {
+                control
+                    .expect("controlled archive")
+                    .remaining(AttemptPhase::Launch)
+                    .map(|_| ())
+            })
+        }
         NativeArtifactPayload::Archive(NativeArchiveSource::Memory(bytes)) => {
             extract_archive(bytes, request.descriptor.format, &artifact_root)
         }
@@ -427,11 +470,12 @@ pub(crate) fn prepare(
         _ => &request.descriptor.entry,
     };
     let entry = resolve_entry(&extracted.root, physical_entry)?;
-    let mut signature = prepare_signature(
+    let mut signature = prepare_signature_with_control(
         request.descriptor,
         &extracted.root,
         &entry,
         request.local_override,
+        control,
     )?;
     if matches!(request.payload, NativeArtifactPayload::WindowApp { .. }) {
         signature.target = physical_entry.to_owned();
@@ -871,6 +915,20 @@ fn fail_started(
 
 /// Start one selected native desktop Derivation.
 pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure> {
+    start_inner(request, None)
+}
+
+pub(crate) fn start_controlled(
+    request: NativeStart<'_>,
+    control: &ExecutionControl,
+) -> Result<Realized, RealizeFailure> {
+    start_inner(request, Some(control))
+}
+
+fn start_inner(
+    request: NativeStart<'_>,
+    control: Option<&ExecutionControl>,
+) -> Result<Realized, RealizeFailure> {
     let native_root = request.runtime_root.join("native");
     if native_root.exists() {
         let _ = fs::remove_dir_all(&native_root);
@@ -883,12 +941,46 @@ pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure
     })?;
     let owned = vec![native_root.clone(), request.workspace.clone()];
 
-    let prepared = prepare(&request, &native_root).map_err(|refusal| {
-        // `prepare` may have created scratch; whatever it created belongs to
-        // this Run and goes with the refusal.
-        let _ = fs::remove_dir_all(&native_root);
-        RealizeFailure::Execution(anyhow::Error::new(refusal))
-    })?;
+    let mut prepared =
+        prepare_with_control(&request, &native_root, control).map_err(|refusal| {
+            // `prepare` may have created scratch; whatever it created belongs to
+            // this Run and goes with the refusal.
+            let _ = fs::remove_dir_all(&native_root);
+            let error = match control {
+                Some(control) => control
+                    .remaining(AttemptPhase::Launch)
+                    .err()
+                    .unwrap_or_else(|| {
+                        ato_formation::failure::FormationFailure::new(
+                            refusal.code,
+                            ato_formation::failure::FailureStage::Admission,
+                            refusal.detail,
+                        )
+                        .into()
+                    }),
+                None => anyhow::Error::new(refusal),
+            };
+            RealizeFailure::Execution(error)
+        })?;
+    if let Some(control) = control {
+        control
+            .remaining(AttemptPhase::Launch)
+            .map_err(|error| launch_failure(error, &owned))?;
+        if prepared.signature.override_used
+            && (prepared.signature.report.codesign_verify != "valid"
+                || prepared.signature.report.signature_kind != "adhoc")
+        {
+            return Err(launch_failure(
+                anyhow!(
+                    "Native publication verification requires a valid Developer ID or explicitly authorized valid ad-hoc signature"
+                ),
+                &owned,
+            ));
+        }
+        // The Run owns this single application's process. Prevent launch-time
+        // helpers from surviving it in a different process group.
+        prepared.profile.push_str("\n(deny process-fork)\n");
+    }
     let scratch_root = native_root.join("runtime");
     let profile_path = native_root.join("sandbox.sb");
     fs::write(&profile_path, &prepared.profile).map_err(|error| {
@@ -957,6 +1049,11 @@ pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure
         readiness,
         helpers: Vec::new(),
     };
+    if let Some(control) = control {
+        control
+            .remaining(AttemptPhase::Launch)
+            .map_err(|error| launch_failure(error, &owned))?;
+    }
     let mut group = if request.descriptor.local_window {
         ProcessServiceGroup::start_unobserved(&request.state_paths[0].1, vec![spec])
     } else {
@@ -966,7 +1063,7 @@ pub(crate) fn start(request: NativeStart<'_>) -> Result<Realized, RealizeFailure
     let window_probe = if request.descriptor.local_window {
         let started = group.pids();
         let pid = started[0].1;
-        match super::window::WindowProbe::observe(&mut group, pid) {
+        match super::window::WindowProbe::observe(&mut group, pid, control) {
             Ok(probe) => Some(probe),
             Err(error) => return Err(fail_started(error, group, &owned, &started, &native_root)),
         }

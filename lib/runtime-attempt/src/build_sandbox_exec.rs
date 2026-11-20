@@ -36,9 +36,21 @@ pub fn sandbox_exec(args: &[String]) -> Result<()> {
     if workload.is_empty() {
         return Err(anyhow!("sandbox-exec: no workload to execute"));
     }
+    if head.iter().any(|arg| arg == "--require-landlock")
+        && !ato_sandbox::linux_tcp_sandbox_available()
+    {
+        return Err(anyhow!(
+            "sandbox-exec: Linux Landlock TCP restrictions are required"
+        ));
+    }
     // Environment and cwd for the workload alone, applied by its `exec`
     // after the restrictions below: never this process's own.
     let mut workload_env = Vec::new();
+    if let Some(path) = flag(head, "--workload-env-file") {
+        let values: std::collections::BTreeMap<String, String> =
+            serde_json::from_slice(&std::fs::read(path)?)?;
+        workload_env.extend(values);
+    }
     for (index, arg) in head.iter().enumerate() {
         if arg == "--env" {
             let pair = head

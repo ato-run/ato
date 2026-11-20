@@ -19,6 +19,7 @@
 // never a guessed pass.
 
 import type { BrowserDriver, Observation, Snapshot } from "./browser.ts";
+import { operate, type InteractiveDriver } from "./interactive.ts";
 import { type Judge, type JudgeState, JudgeUnavailable } from "./judge.ts";
 import {
   type Action,
@@ -51,6 +52,7 @@ export interface Dependencies {
   judge: Judge | null;
   /// The run's shared sequence (also given to the browser for its events).
   sequence: () => number;
+  operator?: InteractiveDriver;
   now?: () => number;
 }
 
@@ -159,13 +161,20 @@ export async function verify(
           throw new JudgeUnavailable("judge_not_configured");
         }
         // The one step that acts on the application.
-        const task = await within((signal) =>
-          deps.browser.runTask(
+        const task = request.operation_session
+          ? await within((signal) => {
+            if (!deps.operator) throw new Error("operator_not_configured");
+            return operate(request.scratch_dir, request.operation_session!, deps.operator,
+              request.budget.max_browser_steps, signal, (snapshot) => {
+                const ref = keepSnapshot(snapshot);
+                if (ref) refs.push(ref);
+              });
+          })
+          : await within((signal) => deps.browser.runTask(
             taskInstruction(criterion.instruction, request.url),
             request.budget.max_browser_steps,
             signal,
-          ),
-        );
+          ));
         task.claimedActions.forEach(record);
         const gaps: string[] = [];
         if (!task.completed) gaps.push("the browser agent did not finish the task");
