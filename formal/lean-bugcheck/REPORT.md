@@ -570,6 +570,21 @@ A2 と A3 は実機の症状からではなく、A1 のモデルを書くため�
 
 限界: バックオフの遅延と、健全期間による失敗回数のリセットは抽象化した（起動の有無ではなく時刻だけを変えるため）。未確認（`unconfirmed`）の復旧は writer の隔離と合わせて別の検証が必要で、ここでは固定 TCP を解放しないことをテストで確認したのみ。複数 Instance が同じ Runner の枠を争う場合と、再調整の同時実行は対象外。
 
+## 第5回 実運用の Mail をセルフホストへ移したときの運用上の不具合（2026-11-20）
+
+配布（ato `deploy/selfhost/`）と ato-api の判定を、1 ファイル 1 モデルで追加した。`run.sh` はこのディレクトリの全 `.lean` を検査する。
+
+| ファイル | 対象 | 不具合の定理 | 修正後の定理 | 修正の状態 |
+|---|---|---|---|---|
+| `ValidatorNamespaceFollow.lean` | API コンテナの再起動・置き換えで validator が古いネットワーク名前空間に残る。検証ジョブが取得されず、期限（10 分）で常駐 Run が停止・再起動される | `replacement_strands_validator_BUG`、`replacement_restart_loop_BUG`（期限ごとに 1 回、気付くまで繰り返す） | 配布: `follow_reattaches`、`replacements_never_restart`。API: `unclaimed_job_never_stops_run`、`unclaimed_job_is_reported` | 配布は修正済み（ato#1919 `0c9e2a9ed`）。API（未取得のジョブで Run を止めない）は提案のみ |
+| `FirstRunResidency.lean` | 取り込み時に起動した Run は更新可能な実行許可を持たず、60 分で終了して再開しない。所有者に見える情報は終了まで変わらず、終了理由は一般の失敗と同じ `realization_failed` | `first_run_ends_and_stays_stopped_BUG`、`no_warning_before_the_end_BUG`、`lifetime_end_looks_like_a_crash_BUG`、`silent_non_resident_instance_BUG` | `stop_time_is_shown_and_exact`、`first_run_is_told_apart`、`resident_never_ends`、`keep_running_is_resident`、`lifetime_end_is_distinct`、`ended_first_run_says_why` | API・PWA・Runner の変更は提案のみ。配布の受け入れ確認は常駐を検査する（ato#1919 `87d704165`） |
+| `ControlPlaneClaimReclaim.lean` | 応答が失われた lease の claim と、クライアントが離れた poll | ファイル内の `_BUG` 定理 | 同ファイル | ato-api `feat/oss-selfhost-node` で修正済み |
+| `FixedTcpBindReachability.lean` | validator が届かないアドレスへの固定 TCP の割当 | 同上 | 同上 | 同上 |
+| `RecoveredLeaseRepair.lean` | 復旧報告が lease のエラーより先に書いた行の修復 | 同上 | 同上 | 同上 |
+| `TrustedProxyIngress.lean` | `trusted_proxy`（`tailscale_whois`）で、配布パッチの PROXY protocol をゲートウェイのアドレスで許可すると、ゲスト上の任意のプロセス（Runner の利用者を含む）が所有者の tailnet アドレスを名乗ってサインインできる | `local_process_becomes_owner_BUG` | `fixed_no_non_proxy_actor_becomes_owner`、`fixed_owner_device_still_signs_in`、`fixed_public_listener_ignores_proxy`、`fixed_dedicated_listener_only_proxy` | 決定のみ（ato-project-docs `docs/rfcs/draft/independent-selfhost.md` の認証の節）。配布と API は未修正 |
+
+限界: `ValidatorNamespaceFollow` は配布の 3 つの追従手段（`./stack` の照合、Compose の `depends_on.restart`、validator の自己終了）をまとめて 1 つの「追従する」として扱う。Docker と Compose の実際の挙動はモデルの外で、実機では未確認。API がクラッシュを繰り返す間に validator が再起動に失敗した場合は、次の `./stack up` まで回復しない。`FirstRunResidency` は時間を分単位にし、実行許可の更新拒否と、オンデマンドの HTTP 要求による再起動を対象外とした。`TrustedProxyIngress` は Docker・Caddy・Tailscale の実際の挙動と `web` 名前空間の分離を前提としており、それらはモデルの外である。
+
 ## 引き継ぎ後の修正
 
 対象は `feat/lean-bugcheck` @ `bbeea6f` を起点とする worktree。下の5件を修正し、Lean 4.36.0 で修正版のモデルを検査した。`run.sh` は失敗時に非ゼロ終了し、ソースを書き換えずに回帰検証する。Lean は `$LEAN` または `~/.elan/bin/lean` から指定する。

@@ -10,8 +10,10 @@ export TMPDIR="$OUT"
 trap 'rm -rf "$OUT"' EXIT
 LEAN="${LEAN:-$HOME/.elan/bin/lean}"
 echo '== Lean kernel check'
-"$LEAN" "$HERE/AtoBugcheck.lean"
-if grep -nE '(^|[^[:alnum:]_])sorry([^[:alnum:]_]|$)' "$HERE/AtoBugcheck.lean"; then
+for model in "$HERE"/*.lean; do
+  "$LEAN" "$model"
+done
+if grep -nE '(^|[^[:alnum:]_])sorry([^[:alnum:]_]|$)' "$HERE"/*.lean; then
   echo 'Lean source contains sorry' >&2
   exit 1
 fi
