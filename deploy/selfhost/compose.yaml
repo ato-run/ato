@@ -14,6 +14,18 @@ services:
       CAPSULE_VALIDATOR_AGENT_TOKEN_FILE: /run/secrets/validator_token
       HOST: 0.0.0.0
       PORT: 8787
+      # Operator settings: each is passed through from .env only when set there.
+      ATO_AUTH_METHODS:
+      ATO_AUTH_AUTO_METHODS:
+      ATO_MAIL:
+      ATO_MAIL_SMTP_HOST:
+      ATO_MAIL_SMTP_PORT:
+      ATO_MAIL_SMTP_TLS:
+      ATO_MAIL_SMTP_USERNAME:
+      ATO_MAIL_SMTP_PASSWORD_FILE:
+      ATO_MAIL_SMTP_CA_FILE:
+      ATO_MAIL_FROM:
+      ATO_FIXED_TCP_BIND_ADDRESSES:
     volumes:
       - api-data:/var/lib/ato-api
       - ./.tmp/trust:/run/ato-ca:ro

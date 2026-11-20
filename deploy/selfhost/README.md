@@ -55,7 +55,7 @@ Linux、Docker Engine、Docker Compose v2.17.0以上（`depends_on` の `restart
 
 ## 更新
 
-配布ディレクトリのファイルと `versions.env` を新しいものに置き換え、次を実行します。`.env` と `.tmp/` は置き換えません。
+配布ディレクトリのファイルと `versions.env` を新しいものに置き換え、次を実行します。`.env`、`compose.local.yaml`、`.tmp/` は置き換えません。
 
 ```sh
 ./prepare.sh
@@ -73,6 +73,35 @@ validatorはAPIコンテナのネットワーク名前空間に入って動作�
 | `./stack up`・`start`・`restart`（`./start.sh` を含む） | 実行後に `./stack` がvalidatorの接続先コンテナと起動時刻をAPIと照合し、一致しなければvalidatorを作り直す。Composeの `depends_on.restart` も同じ操作でvalidatorを再起動する |
 | APIプロセスの異常終了によるDockerの自動再起動 | validatorが検証用listenerに30秒到達できなければ終了し、Dockerの再起動でAPIの現在の名前空間に入り直す |
 | 上記以外（`docker restart`、`docker compose` の直接実行） | 追従しない。`./stack ps` のvalidatorが `unhealthy` になるので `./stack up -d` を実行する |
+
+## サインインとメール
+
+APIの設定は `.env` に書きます。メールとサインイン方式の設定は、`versions.env` の `ATO_API_REV` がそれらを実装したリビジョンの場合に有効です。`compose.yaml` は次の変数を、`.env` に書かれているものだけAPIコンテナへ渡します。
+
+| 変数 | 内容 |
+|---|---|
+| `ATO_AUTH_METHODS`、`ATO_AUTH_AUTO_METHODS` | 有効にするサインイン方式（既定は `password`） |
+| `ATO_MAIL` | `none`（既定）、`smtp`（外部のSMTPサーバー）、`ato_mail`（同じインストールのMailアプリ） |
+| `ATO_MAIL_SMTP_HOST`、`ATO_MAIL_SMTP_PORT`、`ATO_MAIL_SMTP_TLS`、`ATO_MAIL_SMTP_USERNAME`、`ATO_MAIL_FROM` | 送信に使うサーバーと差出人 |
+| `ATO_MAIL_SMTP_PASSWORD_FILE`、`ATO_MAIL_SMTP_CA_FILE` | コンテナ内の絶対パス。ファイルは下の `compose.local.yaml` で渡す |
+| `ATO_FIXED_TCP_BIND_ADDRESSES` | validatorが到達できる固定TCPのbindアドレスを明示する場合に指定 |
+
+このホスト固有の追加（秘密ファイル、ホスト名の割り当て、追加のmount）は `compose.local.yaml` に書きます。このファイルがあれば `./stack` はすべての操作に `-f compose.local.yaml` を加えます。配布の更新で上書きされず、Gitの管理対象にもなりません。[compose.local.example.yaml](compose.local.example.yaml) を雛形にしてください。
+
+APIは内部ネットワーク `control` だけに接続し、外部への経路を持ちません。メールサーバーへの接続は、サーバー名を `control` のホスト側アドレス（`docker network inspect ato-selfhost_control` のGateway）に割り当てて行います。割り当ては `compose.local.yaml` の `extra_hosts` に書きます。validatorも同じ割り当てを使います。
+
+- `ATO_MAIL=ato_mail`: Mailアプリの固定TCP listener（[Mailの実機検証](#mailの実機検証)）をそのGatewayアドレスにbindし、Mailのホスト名を割り当てます。
+- `ATO_MAIL=smtp`: 管理者がホストに転送用のsocketを1つ設置します。`control` のサブネットからGatewayの指定ポートへ来た接続だけを、指定した1つのSMTPサーバーとポートへ中継します。TLSはAPIとSMTPサーバーの間で終端し、証明書は `ATO_MAIL_SMTP_HOST` の名前で検証されます。APIにそれ以外の外向き経路は加わりません。
+
+  ```sh
+  docker network inspect -f '{{range .IPAM.Config}}{{.Gateway}} {{.Subnet}}{{end}}' ato-selfhost_control
+  ./install-smtp-egress.sh --print 172.18.0.1:587 smtp.example.com:587 172.18.0.0/16
+  sudo ./install-smtp-egress.sh 172.18.0.1:587 smtp.example.com:587 172.18.0.0/16
+  ```
+
+  `--print` は設置するsystemd unitを表示するだけです。listenするポートは `ATO_MAIL_SMTP_PORT` と同じにします。送信元の制限（`IPAddressAllow`）にはcgroup v2が必要です。取り外しは `sudo ./install-smtp-egress.sh --remove` です。
+
+設定後に `./start.sh` を実行し、`./stack run --rm --no-deps -T api mail-test <宛先>` で送信を確認します。
 
 ## Runnerの登録と再接続
 

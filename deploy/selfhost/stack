@@ -14,8 +14,16 @@ else
 fi
 export ATO_API_REV ATO_PWA_REV ATO_RUNNER_REV ATO_VALIDATOR_REV ATO_TLS
 
+# compose.local.yaml holds this host's own additions and is never replaced by
+# an update of the distribution.
 compose() {
-  docker compose --project-directory "$site" --env-file "$site/.env" -f "$site/compose.yaml" "$@"
+  if [ -f "$site/compose.local.yaml" ]; then
+    docker compose --project-directory "$site" --env-file "$site/.env" \
+      -f "$site/compose.yaml" -f "$site/compose.local.yaml" "$@"
+  else
+    docker compose --project-directory "$site" --env-file "$site/.env" \
+      -f "$site/compose.yaml" "$@"
+  fi
 }
 
 # The validator must be inside the network namespace of the API container that
