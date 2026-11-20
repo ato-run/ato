@@ -103,6 +103,46 @@ APIは内部ネットワーク `control` だけに接続し、外部への経路
 
 設定後に `./start.sh` を実行し、`./stack run --rm --no-deps -T api mail-test <宛先>` で送信を確認します。
 
+### パスキー
+
+パスキーを使うには、`ATO_AUTH_METHODS` に `passkey` を含めます。relying party は管理用ホスト名（`ATO_HOST`）です。管理用ホスト名を変えると登録済みのパスキーは使えないため、常に同じ名前の `https://` URL を開きます。パスキーの追加・削除には、5分以内に認証したセッションが必要です。時間がたっている場合は、いったんサインインし直してください。
+
+### Tailscale
+
+tailnet 内の端末の Tailscale ID でサインインする場合は、`.env` で Tailscale profile と WhoIs による検証を有効にします。
+
+```sh
+COMPOSE_PROFILES=tailscale
+ATO_AUTH_METHODS=passkey,password,trusted_proxy
+ATO_AUTH_AUTO_METHODS=trusted_proxy
+ATO_TRUSTED_PROXY_PROVIDER=tailscale
+ATO_TRUSTED_PROXY_VERIFY=tailscale_whois
+ATO_TRUSTED_PROXY_TAILSCALE_SOCKET=/run/ato-whois/whois.sock
+ATO_TAILSCALE_HOSTNAME=ato-selfhost
+```
+
+sidecar のイメージは配布物に含まれないため、初回と更新後に一度取得します。外部ネットワークのないゲストでは、ビルド端末で同じ digest のイメージを取得して `docker image load` します。
+
+```sh
+./stack pull tailscale
+```
+
+`./start.sh` は `web` の後に `tailscale` と `whois` を起動します。sidecar のログインは、`.env` の `TS_AUTHKEY` を設定してから `./start.sh` を実行するか、起動後に次を実行します。
+
+```sh
+./stack exec tailscale tailscale up
+```
+
+sidecar の tailnet アドレスは `./stack exec tailscale tailscale ip -4` で確認できます。管理用ホスト名とアプリ用ワイルドカード名（既定は `*.apps.<管理用ホスト>`）が、このアドレスを指すように DNS を設定します。tailnet から管理画面を開いた後、所有者と tailnet のログインを対応付けます。
+
+```sh
+./stack run --rm --no-deps -T api link-identity OWNER_EMAIL tailscale TAILNET_LOGIN
+```
+
+tailnet のログインは所有者のメールアドレスと異なることがあります。メールアドレスが一致しても自動ではリンクされないため、`link-identity` で明示的に対応付けます。対応付けを解除するときは `unlink-identity`、一覧を確認するときは `list-identities` を同じ形で実行します。
+
+`127.0.0.1:8444` の専用 listener に到達できるのは、`web` コンテナのネットワーク名前空間を共有する `tailscale` コンテナだけです。ホストにインストールした tailscaled は公開 listener へ TCP を中継することしかできず、`trusted_proxy` の身元判定には使われません。`ATO_TRUSTED_PROXY_VERIFY=header` を指定すると `./start.sh` は起動を拒否します。
+
 ## アプリを常駐させる
 
 Runの準備完了とContractの検証成功は、そのアプリが動き続けることを意味しません。取り込み時の起動や「Run」で始めたRunは、開始から60分でRunnerが終了し、自動では再開しません。動かし続けるアプリは、所有者がSettingsの「Keep running」を選ぶか、`PATCH /v1/compute-instances/<Instance ID>/runtime-policy` に `{"mode":"always_on","desired_state":"running"}` を送って常駐を指定します。指定すると現在のRunは停止し、更新可能な実行許可を持つRunに置き換わります。
