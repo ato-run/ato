@@ -9,5 +9,5 @@ FROM caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac523
 # Caddy listens on 8443. An executable with an effective file capability
 # cannot start with all capabilities dropped on a normal Linux host.
 RUN setcap -r /usr/bin/caddy && chown -R 1000:1000 /data /config
-COPY --from=build /src/dist-selfhost/ /srv/
+COPY --from=build --chown=1000:1000 /src/dist-selfhost/ /srv/
 USER 1000:1000
