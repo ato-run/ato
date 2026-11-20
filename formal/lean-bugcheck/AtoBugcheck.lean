@@ -3194,3 +3194,147 @@ theorem fixed_dead_runner_still_interrupted :
   decide
 
 end VolumeOperationReport
+
+/-! ## ato-api (cross-repo) :: with-data export of a Runner-local volume
+
+`src/services/portable_instance_export.ts` (`quiescePortableFilesystemState`,
+`filesystemStateHead`) behind `POST /v1/portable-application-exports/instances/:id`.
+Found on production on 2026-11-20: the export stopped the always-on App, waited for its
+writer and only then failed `state_volume_checkpoint_required`.
+
+A `runner_volume` slot is exportable only when its head is a checkpoint taken at the
+current writer generation. Every Run takes a new generation when it acquires the
+writer, and stopping a Run does not change the generation. -/
+namespace VolumeExportGate
+
+structure World where
+  writerEpoch : Nat
+  /-- The generation at which the head was recorded as a checkpoint, if ever. -/
+  checkpointEpoch : Option Nat
+  runLive : Bool
+  deriving DecidableEq, Repr
+
+def checkpointCurrent (w : World) : Bool := w.checkpointEpoch == some w.writerEpoch
+
+/-- `acquireWriter` for a Run: the next generation. -/
+def startRun (w : World) : World := { w with writerEpoch := w.writerEpoch + 1, runLive := true }
+
+def stopRun (w : World) : World := { w with runLive := false }
+
+/-- A successful checkpoint operation: it takes the next generation itself, from a
+    confirmed-stopped volume, and records the head at that generation. -/
+def checkpoint (w : World) : World :=
+  if w.runLive then w
+  else { w with writerEpoch := w.writerEpoch + 1, checkpointEpoch := some (w.writerEpoch + 1) }
+
+inductive Reachable : World → Prop where
+  | init : Reachable ⟨0, none, false⟩
+  | startRun {w} : Reachable w → w.runLive = false → Reachable (startRun w)
+  | stopRun {w} : Reachable w → Reachable (stopRun w)
+  | checkpoint {w} : Reachable w → Reachable (checkpoint w)
+
+structure Outcome where
+  accepted : Bool
+  /-- The export stopped a Run that was serving. -/
+  stoppedRun : Bool
+  after : World
+  deriving DecidableEq, Repr
+
+/-- Before the fix: stop, wait for the writer, then look at the checkpoint. -/
+def exportStopFirst (w : World) : Outcome :=
+  ⟨checkpointCurrent (stopRun w), w.runLive, stopRun w⟩
+
+/-- The fix: look at the checkpoint first; stop only what can then be captured. -/
+def exportCheckFirst (w : World) : Outcome :=
+  if checkpointCurrent w then ⟨checkpointCurrent (stopRun w), w.runLive, stopRun w⟩
+  else ⟨false, false, w⟩
+
+/-- BUG: a reachable state in which the export stops the Run and then fails. -/
+theorem export_stops_run_then_fails_BUG :
+    ∃ w, Reachable w ∧ (exportStopFirst w).stoppedRun = true ∧ (exportStopFirst w).accepted = false :=
+  ⟨startRun ⟨0, none, false⟩, .startRun .init rfl, by decide, by decide⟩
+
+/-- The same holds after a checkpoint, as soon as a Run has started again. -/
+theorem checkpoint_then_run_still_fails_BUG :
+    ∃ w, Reachable w ∧ (exportStopFirst w).stoppedRun = true ∧ (exportStopFirst w).accepted = false :=
+  ⟨startRun (checkpoint ⟨0, none, false⟩), .startRun (.checkpoint .init) (by decide), by decide, by decide⟩
+
+/-- Stopping a Run never turns a stale checkpoint into a current one, so the answer is
+    known before anything is stopped. -/
+theorem stop_does_not_change_the_answer (w : World) :
+    checkpointCurrent (stopRun w) = checkpointCurrent w := rfl
+
+/-- In every reachable state the checkpoint generation is at most the writer's, and a
+    live Run is strictly ahead of it. -/
+theorem reachable_checkpoint_bound {w : World} (h : Reachable w) :
+    ∀ c, w.checkpointEpoch = some c → c ≤ w.writerEpoch ∧ (w.runLive = true → c < w.writerEpoch) := by
+  induction h with
+  | init => intro c hc; simp at hc
+  | @startRun w _ hlive ih =>
+    intro c hc
+    have := ih c hc
+    simp only [startRun]
+    exact ⟨Nat.le_succ_of_le this.1, fun _ => Nat.lt_succ_of_le this.1⟩
+  | @stopRun w _ ih =>
+    intro c hc
+    have := ih c hc
+    simp only [stopRun]
+    exact ⟨this.1, fun h => by simp at h⟩
+  | @checkpoint w _ ih =>
+    intro c hc
+    unfold checkpoint at hc ⊢
+    split
+    · next hl => simp only [hl, ite_true] at hc; exact ih c hc
+    · next hl =>
+      simp only [hl] at hc
+      simp only [Bool.false_eq_true, ite_false, Option.some.injEq] at hc
+      subst hc
+      exact ⟨Nat.le_refl _, fun h => by simp_all⟩
+
+/-- A serving Run always means the export is refused: there is never a reason to stop
+    one for an export. -/
+theorem live_run_is_never_exportable {w : World} (h : Reachable w) (hl : w.runLive = true) :
+    checkpointCurrent w = false := by
+  unfold checkpointCurrent
+  cases hc : w.checkpointEpoch with
+  | none => rfl
+  | some c =>
+    have := (reachable_checkpoint_bound h c hc).2 hl
+    simp only [beq_eq_false_iff_ne, ne_eq, Option.some.injEq]
+    exact Nat.ne_of_lt this
+
+/-- HOLDS (the fix): a refused export leaves the Instance exactly as it was. -/
+theorem fixed_refusal_has_no_side_effect (w : World) (h : (exportCheckFirst w).accepted = false) :
+    (exportCheckFirst w).stoppedRun = false ∧ (exportCheckFirst w).after = w := by
+  unfold exportCheckFirst at h ⊢
+  split
+  · next hc => simp [stop_does_not_change_the_answer, hc] at h
+  · exact ⟨rfl, rfl⟩
+
+/-- HOLDS: in reachable states the fixed export never stops a Run at all. -/
+theorem fixed_never_stops_a_run {w : World} (h : Reachable w) :
+    (exportCheckFirst w).stoppedRun = false := by
+  unfold exportCheckFirst
+  split
+  · next hc =>
+    cases hl : w.runLive with
+    | false => rfl
+    | true => rw [live_run_is_never_exportable h hl] at hc; exact absurd hc (by decide)
+  · rfl
+
+/-- HOLDS: the fix refuses exactly the exports that failed before; nothing that used to
+    succeed is rejected. -/
+theorem fixed_accepts_the_same_exports (w : World) :
+    (exportCheckFirst w).accepted = (exportStopFirst w).accepted := by
+  unfold exportCheckFirst exportStopFirst
+  split
+  · rfl
+  · next hc => simp [stop_does_not_change_the_answer, hc]
+
+/-- HOLDS: stop, checkpoint, export — the sequence the owner is told to use — is
+    accepted. -/
+theorem checkpoint_after_stop_is_exportable (w : World) :
+    (exportCheckFirst (checkpoint (stopRun w))).accepted = true := by
+  simp [exportCheckFirst, checkpoint, stopRun, checkpointCurrent]
+
+end VolumeExportGate
