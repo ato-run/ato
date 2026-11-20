@@ -30,6 +30,8 @@ echo '== grant and subprotocol regressions'
 (cd "$REPO" && cargo test -p netd --lib surface_websocket_auth::tests)
 echo '== Runner claim delivery regression'
 (cd "$REPO" && cargo test -p ato-connected-realization-worker --lib claim_delivery_tests)
+echo '== validator TLS observation regression'
+(cd "$REPO" && cargo test -p ato-tls-observe && cargo test -p ato-runtime-attempt --lib an_unreachable_tls_endpoint_fails_only_its_own_observation && cargo test -p ato-portable-application --lib validator_agent::tests)
 echo '== manifest error regression'
 (cd "$REPO" && cargo test -p ato-materializer-static-web --lib distinguishes_empty_and_invalid_materialization_ids)
 echo '== discontinuous record counterexample'
