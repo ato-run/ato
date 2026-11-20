@@ -1,0 +1,42 @@
+{
+	admin off
+	auto_https disable_redirects
+	https_port 8443
+	skip_install_trust
+}
+
+https://{$ATO_HOST} {
+	tls internal
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy same-origin
+	}
+	@api path /api /api/* /v1 /v1/* /health
+	handle @api {
+		reverse_proxy api:8787
+	}
+	handle /assets/* {
+		root * /srv
+		file_server
+	}
+	handle {
+		root * /srv
+		header Content-Security-Policy "connect-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'"
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+https://*.{$ATO_APPS_HOST} {
+	tls internal
+	reverse_proxy api:8787
+}
+
+https://runner.{$ATO_HOST} {
+	tls internal
+	@asserted header X-Ato-Run-Assertion *
+	handle @asserted {
+		reverse_proxy unix//run/ato-runner-ingress/surface.sock
+	}
+	respond 403
+}

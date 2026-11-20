@@ -1,0 +1,86 @@
+name: ato-selfhost
+services:
+  api:
+    image: ato-selfhost-api:${ATO_API_REV:?use ./stack}
+    build:
+      context: ./.tmp/src/${ATO_API_REV}
+      dockerfile: ../../../Dockerfile.api
+    environment:
+      ATO_PUBLIC_ORIGIN: https://${ATO_HOST:?set ATO_HOST in .env}:${ATO_HTTPS_PORT:-443}
+      ATO_DATA_DIR: /var/lib/ato-api
+      ATO_APPS_HOST: ${ATO_APPS_HOST:-apps.${ATO_HOST}}
+      ATO_RUNNER_INGRESS_ORIGIN: ${ATO_RUNNER_INGRESS_ORIGIN:-https://runner.${ATO_HOST}:8443}
+      NODE_EXTRA_CA_CERTS: /run/ato-ca/root.crt
+      CAPSULE_VALIDATOR_AGENT_TOKEN_FILE: /run/secrets/validator_token
+      HOST: 0.0.0.0
+      PORT: 8787
+    volumes:
+      - api-data:/var/lib/ato-api
+      - ./.tmp/trust:/run/ato-ca:ro
+    secrets: [validator_token]
+    networks: [control]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+  validator:
+    image: ato-selfhost-validator:${ATO_RUNNER_REV:?use ./stack}
+    build:
+      context: ./.tmp/src/${ATO_RUNNER_REV}
+      dockerfile: ../../../Dockerfile.validator
+    network_mode: service:api
+    environment:
+      CAPSULE_VALIDATOR_API_URL: http://localhost:8788
+      CAPSULE_VALIDATOR_AGENT_ID: selfhost-validator
+      CAPSULE_VALIDATOR_WORK_ROOT: /tmp/validator
+    secrets: [validator_token]
+    tmpfs:
+      - /tmp:mode=1777,size=128m
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  web:
+    image: ato-selfhost-web:${ATO_PWA_REV:?use ./stack}
+    build:
+      context: ./.tmp/src/${ATO_PWA_REV}
+      dockerfile: ../../../Dockerfile.pwa
+    environment:
+      ATO_HOST: ${ATO_HOST}
+      ATO_APPS_HOST: ${ATO_APPS_HOST:-apps.${ATO_HOST}}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - type: bind
+        source: ${ATO_RUNNER_INGRESS_DIR:-./.tmp/runner-ingress}
+        target: /run/ato-runner-ingress
+        read_only: true
+        bind:
+          create_host_path: false
+      - tls-data:/data
+      - tls-config:/config
+    ports:
+      - "${ATO_BIND_IP:-127.0.0.1}:${ATO_HTTPS_PORT:-443}:8443"
+    networks:
+      control:
+        aliases: ["runner.${ATO_HOST}"]
+      ingress: {}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+volumes:
+  api-data:
+  tls-data:
+  tls-config:
+networks:
+  control:
+    internal: true
+  ingress: {}
+secrets:
+  validator_token:
+    file: ./.tmp/secrets/validator_token
