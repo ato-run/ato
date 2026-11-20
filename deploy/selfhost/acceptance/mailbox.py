@@ -42,9 +42,21 @@ def verify(client, evidence):
     mid = evidence["message_id"]
     if mid != f"<{uuid.UUID(mid[1:37])}@selfhost-test.invalid>":
         raise ValueError("Invalid evidence Message-ID")
-    matches = require_ok(client.uid("search", None, "HEADER", "Message-ID", mid), "SEARCH")
-    uids = matches[0].split()
-    if len(uids) != 1 or not uids[0].isdigit():
+    # The test account can have mail whose headers are not in the server's
+    # search index yet. Read only the Message-ID field to identify the draft.
+    listed = require_ok(client.uid("search", None, "ALL"), "SEARCH")
+    uids = []
+    for uid in listed[0].split():
+        if not uid.isdigit():
+            raise ValueError("Invalid IMAP UID")
+        headers = require_ok(client.uid("fetch", uid, "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])"), "FETCH")
+        for item in headers:
+            if not isinstance(item, tuple):
+                continue
+            fields = BytesParser(policy=policy.default).parsebytes(item[1], headersonly=True)
+            if fields["Message-ID"] == mid:
+                uids.append(uid)
+    if len(uids) != 1:
         raise ValueError("Expected exactly one matching draft")
     data = require_ok(client.uid("fetch", uids[0], "(BODY.PEEK[]<0.16384>)"), "FETCH")
     literals = [entry[1] for entry in data if isinstance(entry, tuple)]
