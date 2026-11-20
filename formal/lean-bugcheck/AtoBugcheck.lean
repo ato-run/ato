@@ -3068,3 +3068,129 @@ theorem waits_for_writer (waitForSlot : Bool) (w : World)
     simp [poll]
 
 end VolumeOperationDispatch
+
+/-! ## ato-api (cross-repo) :: the Runner's report against a concurrent poll
+
+`completeVolumeOperation` and the `running` branch of `advanceVolumeOperation` in the
+same file. Found on production on 2026-11-20: the Runner logged the checkpoint as
+succeeded, the API recorded the operation `interrupted` ("the Runner ended the
+operation without reporting") two seconds later, and the slot's checkpoint columns had
+nevertheless advanced.
+
+The report used to be a sequence of independent writes: record the checkpoint, end the
+lease, then take the operation out of `running`. `GET /state/operations/:id` advances
+the operation, and it interrupts a running operation whose lease has ended and whose
+writer is free. The checkpoint commit already released the writer, so the poll only
+needs to land after "end the lease". -/
+namespace VolumeOperationReport
+
+inductive Status where
+  | running | succeeded | interrupted
+  deriving DecidableEq, Repr
+
+structure World where
+  status : Status
+  leaseEnded : Bool
+  checkpointRecorded : Bool
+  deriving DecidableEq, Repr
+
+inductive Event where
+  | poll              -- GET /state/operations/:id, or the cron
+  | leaseExpired      -- the lease ends without a report (Runner died, lease expired)
+  | recordCheckpoint  -- report, write 1 (unfixed)
+  | endLease          -- report, write 2 (unfixed)
+  | finish            -- report, write 3 (unfixed): CAS out of `running`
+  | report            -- the fixed report: one transaction
+  deriving DecidableEq, Repr
+
+def step (w : World) : Event → World
+  | .poll =>
+    if w.status == .running && w.leaseEnded then { w with status := .interrupted } else w
+  | .leaseExpired => { w with leaseEnded := true }
+  | .recordCheckpoint => { w with checkpointRecorded := true }
+  | .endLease => { w with leaseEnded := true }
+  | .finish => if w.status == .running then { w with status := .succeeded } else w
+  | .report =>
+    if w.status == .running then ⟨.succeeded, true, true⟩ else w
+
+def run (w : World) : List Event → World
+  | [] => w
+  | e :: rest => run (step w e) rest
+
+/-- The Runner committed the checkpoint; its lease is live and it is about to report. -/
+def committed : World := ⟨.running, false, false⟩
+
+/-- What the owner and the export read must agree: a checkpoint is recorded as the
+    volume's current one exactly when its operation succeeded. -/
+def consistent (w : World) : Bool :=
+  w.checkpointRecorded == (w.status == .succeeded)
+
+def unfixedEvent : Event → Bool
+  | .report => false
+  | _ => true
+
+def fixedEvent : Event → Bool
+  | .recordCheckpoint | .endLease | .finish => false
+  | _ => true
+
+/-- BUG: a poll between the report's second and third write records a successful
+    checkpoint as interrupted while its checkpoint columns stay advanced. -/
+theorem poll_between_report_writes_interrupts_success_BUG :
+    ∃ events, events.all unfixedEvent = true ∧ ¬ events.contains .leaseExpired ∧
+      (run committed events).status = .interrupted ∧
+      (run committed events).checkpointRecorded = true ∧
+      consistent (run committed events) = false :=
+  ⟨[.recordCheckpoint, .endLease, .poll, .finish], by decide, by decide, by decide, by decide, by decide⟩
+
+/-- Without the poll in that window the same report succeeds. -/
+theorem unfixed_report_without_poll_succeeds :
+    run committed [.poll, .recordCheckpoint, .poll, .endLease, .finish, .poll] = ⟨.succeeded, true, true⟩ := by
+  decide
+
+/-- HOLDS (the fix): with the report as one transaction, status and checkpoint columns
+    agree after every interleaving of polls, lease expiry and (repeated) reports. -/
+theorem fixed_always_consistent (events : List Event) (h : events.all fixedEvent = true) :
+    ∀ w, consistent w = true → consistent (run w events) = true := by
+  induction events with
+  | nil => intro w hw; exact hw
+  | cons e rest ih =>
+    intro w hw
+    simp only [List.all_cons, Bool.and_eq_true] at h
+    apply ih h.2
+    cases w with
+    | mk status leaseEnded checkpointRecorded =>
+      cases e <;> cases status <;> cases leaseEnded <;> cases checkpointRecorded <;>
+        simp_all [step, consistent, fixedEvent]
+
+/-- HOLDS: while the lease has not ended by itself, polls cannot change the outcome
+    of a report: the operation ends `succeeded`. -/
+theorem fixed_polls_cannot_interrupt_report (before after : Nat) :
+    (run committed (List.replicate before .poll ++ .report :: List.replicate after .poll)).status
+      = .succeeded := by
+  have hbefore : ∀ n, run committed (List.replicate n .poll ++ .report :: List.replicate after .poll)
+      = run committed (.report :: List.replicate after .poll) := by
+    intro n
+    induction n with
+    | zero => rfl
+    | succ n ih => simpa [List.replicate_succ, run, step, committed] using ih
+  have hafter : ∀ n, run ⟨.succeeded, true, true⟩ (List.replicate n .poll) = ⟨.succeeded, true, true⟩ := by
+    intro n
+    induction n with
+    | zero => rfl
+    | succ n ih => simpa [List.replicate_succ, run, step] using ih
+  rw [hbefore before]
+  simp only [run, step, committed]
+  simpa using congrArg World.status (hafter after)
+
+/-- HOLDS (negative case): a report that arrives after a recorded interruption changes
+    nothing; the interrupted operation is not presented as a checkpoint. -/
+theorem fixed_late_report_changes_nothing :
+    run committed [.leaseExpired, .poll, .report] = ⟨.interrupted, true, false⟩ := by
+  decide
+
+/-- HOLDS: a lease that ended without any report is still recorded as interrupted. -/
+theorem fixed_dead_runner_still_interrupted :
+    (run committed [.leaseExpired, .poll]).status = .interrupted := by
+  decide
+
+end VolumeOperationReport
