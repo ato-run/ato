@@ -781,20 +781,25 @@ fn start(store: &Store, id: &str) -> Result<Value> {
 
 fn status(store: &Store, id: &str) -> Result<Value> {
     let mut entry = store.read(id)?;
-    match entry.phase {
+    let uncertain = match entry.phase {
+        Phase::Queued if unix_millis().saturating_sub(entry.changed_at_ms) <= 15_000 => None,
         Phase::Queued | Phase::Verifying if store.job_idle(id)? => {
-            if entry.phase == Phase::Verifying
-                || unix_millis().saturating_sub(entry.changed_at_ms) > 15_000
-            {
-                entry.phase = Phase::Inconclusive;
-                entry.issue = Some("verification_outcome_unknown".into());
-            }
+            Some((Phase::Inconclusive, "verification_outcome_unknown"))
         }
         Phase::Publishing if store.edit_idle(id)? => {
-            entry.phase = Phase::PublicationUnknown;
-            entry.issue = Some("upload_outcome_unknown".into());
+            Some((Phase::PublicationUnknown, "upload_outcome_unknown"))
         }
-        _ => {}
+        _ => None,
+    };
+    if let Some((phase, issue)) = uncertain {
+        // The owner may have saved a final outcome and released the lock
+        // after our first read. Use that outcome if the phase moved.
+        let observed = entry.phase;
+        entry = store.read(id)?;
+        if entry.phase == observed {
+            entry.phase = phase;
+            entry.issue = Some(issue.into());
+        }
     }
     view(&entry)
 }
