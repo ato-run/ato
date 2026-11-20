@@ -120,6 +120,17 @@ Runnerの同じユーザー・権限でデータと資格情報を戻し、元�
 
 内部CAでMailを試す場合は、検証用の公開CAをDER化し、`openssl dgst -sha256` で照合した `<64 hex>.der` を `.tmp/mail-ca/` に0644で配置します。validatorはここを読み取り専用で参照し、CLIで同じ条件を試すときは `ATO_TLS_ROOT_DIR` に同じ公開証明書ディレクトリを指定します。検証用の作業コピーの4つのTLS観測に `use = "ato.contract.tls-pinned-root@1"`、`root_ca_digest = "sha256:<64 hex>"` と検証用ホスト名を明記して、新しいbundleをsealします。CA秘密鍵は配布物・binding・validatorに含めません。[固定rootのTLS観測](../../docs/rfcs/draft/PINNED_TLS_ROOT_OBSERVATION.md)
 
+Mailの固定TCP listenerを割り当てる場合は、他サービスで使用していないゲスト側のIP・ポートを確認します。同居構成のvalidatorから到達できるcontrol bridgeのゲスト側アドレスを使用できます。Runnerの `runner.env` に `ATO_RUNTIME_NETWORK_CONTROLS=true` と `ATO_RUNTIME_FIXED_TCP_ALLOWLIST=<IP>:<port>,...` を指定し、heartbeatの固定TCP・egress能力を確認します。
+
+所有者は対象Runnerを明示してInstanceを停止状態で作成します。運用者は `./stack run --rm --no-deps -T api configure-network INSTANCE_ID RUNNER_ID /run/policy.json` に、読み取り専用でマウントしたポリシーを渡します。ファイルをマウントする実行例です。
+
+```sh
+./stack run --rm --no-deps -T -v "$PWD/policy.json:/run/policy.json:ro" api \
+  configure-network "$instance_id" "$runner_id" /run/policy.json
+```
+
+`fixed_tcp` の各要素はdeclared `port_id`、`bind_ip`、`port` を持ち、`egress` の各要素はdeclared `binding_id`、`destination_ipv4`、`ports` を持ちます。relay宛先・SNI・CAを試験用Dと揃え、メールの資格情報はInstanceのBindingとして設定します。`mail_data` に初期State Revisionを結合する場合は、v4のsaved-state bundleまたはホストの初期化経路が必要です。
+
 1. Cloudflareと商用ato.runへの通信を遮断します。操作端末とRunnerはローカルDNS、管理用URL、アプリ用URL、テストに必要なMail endpointだけへ到達できるようにします。
 2. 別端末から所有者としてログインし、Runnerを明示的に選択してMailのテストInstanceを起動します。検証receiptに同一bundle digest、ContractRef、選択Derivation、今回のattempt、`fully_satisfied=true` があることを確認します。
 3. [メールボックス照合](acceptance/mailbox.py)を使って専用テストアカウントの下書きを保存します。アプリを保存・再開後、同じアプリURLから同じメールを確認します。
