@@ -287,7 +287,11 @@ fn connection_refused_is_an_error() {
         test_anchors("valid/cert.pem"),
     );
 
-    assert!(result.is_err());
+    let error = result.expect_err("nothing listens there");
+    assert_eq!(
+        error.class(),
+        ato_tls_observe::TlsProbeFailureClass::Refused
+    );
 }
 
 #[test]
@@ -422,7 +426,11 @@ fn a_silent_peer_exhausts_the_observation_budget() {
         test_anchors("valid/cert.pem"),
     );
 
-    assert!(result.is_err());
+    let error = result.expect_err("a silent peer presents nothing");
+    assert_eq!(
+        error.class(),
+        ato_tls_observe::TlsProbeFailureClass::Timeout
+    );
     assert!(started.elapsed() < Duration::from_secs(5));
 }
 

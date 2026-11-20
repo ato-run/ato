@@ -115,18 +115,68 @@ pub struct TlsFacts {
     pub handshake_error: Option<String>,
 }
 
+/// Where an observation that produced no certificate stopped.
+///
+/// The labels are stable: callers record them as evidence and decide from
+/// them whether asking again could change the answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TlsProbeFailureClass {
+    /// There is no route to the address from where the probe runs.
+    Unreachable,
+    /// The address answered and refused the connection.
+    Refused,
+    /// The observation budget was spent before a certificate arrived.
+    Timeout,
+    /// The TCP connection failed for another reason.
+    ConnectFailed,
+    /// Connected, but the exchange produced no readable certificate.
+    NoCertificate,
+}
+
+impl TlsProbeFailureClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unreachable => "unreachable",
+            Self::Refused => "refused",
+            Self::Timeout => "timeout",
+            Self::ConnectFailed => "connect_failed",
+            Self::NoCertificate => "no_certificate",
+        }
+    }
+
+    fn of_connect(error: &io::Error) -> Self {
+        match error.kind() {
+            io::ErrorKind::NetworkUnreachable | io::ErrorKind::HostUnreachable => Self::Unreachable,
+            io::ErrorKind::ConnectionRefused => Self::Refused,
+            _ if is_timeout(error) => Self::Timeout,
+            _ => Self::ConnectFailed,
+        }
+    }
+}
+
 /// Why no certificate could be observed.
 #[derive(Debug, thiserror::Error)]
 #[error("TLS observation failed: {reason}")]
 pub struct TlsProbeError {
     reason: String,
+    class: TlsProbeFailureClass,
 }
 
 impl TlsProbeError {
     fn new(reason: impl Into<String>) -> Self {
+        Self::classed(TlsProbeFailureClass::NoCertificate, reason)
+    }
+
+    fn classed(class: TlsProbeFailureClass, reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
+            class,
         }
+    }
+
+    /// Where the observation stopped.
+    pub fn class(&self) -> TlsProbeFailureClass {
+        self.class
     }
 
     /// Why the observation could not be made.
@@ -244,8 +294,12 @@ pub fn observe_tls(
         ))
     })?;
 
-    let mut tcp = TcpStream::connect_timeout(&address, timeout)
-        .map_err(|err| TlsProbeError::new(format!("could not connect to {address}: {err}")))?;
+    let mut tcp = TcpStream::connect_timeout(&address, timeout).map_err(|err| {
+        TlsProbeError::classed(
+            TlsProbeFailureClass::of_connect(&err),
+            format!("could not connect to {address}: {err}"),
+        )
+    })?;
 
     if start == TlsStart::SmtpStarttls {
         smtp::start_tls(&mut tcp, server_name, deadline)?;
@@ -255,9 +309,9 @@ pub fn observe_tls(
     let mut connection = ClientConnection::new(Arc::new(config), server_name_owned)
         .map_err(|err| TlsProbeError::new(format!("could not start the TLS handshake: {err}")))?;
 
-    let handshake_error = drive_handshake(&mut connection, &mut tcp, deadline)
-        .err()
-        .map(|err| err.to_string());
+    let handshake_failure = drive_handshake(&mut connection, &mut tcp, deadline).err();
+    let handshake_timed_out = handshake_failure.as_ref().is_some_and(is_timeout);
+    let handshake_error = handshake_failure.map(|err| err.to_string());
 
     let certificate = presented.lock().ok().and_then(|slot| slot.clone());
     let Some(certificate) = certificate else {
@@ -265,7 +319,12 @@ pub fn observe_tls(
             Some(err) => format!("the TLS handshake presented no certificate: {err}"),
             None => "the TLS handshake completed without presenting a certificate".to_string(),
         };
-        return Err(TlsProbeError::new(reason));
+        let class = if handshake_timed_out {
+            TlsProbeFailureClass::Timeout
+        } else {
+            TlsProbeFailureClass::NoCertificate
+        };
+        return Err(TlsProbeError::classed(class, reason));
     };
 
     build_facts(
@@ -332,7 +391,7 @@ pub(crate) fn remaining_budget(deadline: Instant) -> Option<Duration> {
 }
 
 pub(crate) fn timeout_error() -> TlsProbeError {
-    TlsProbeError::new(TIMEOUT_REASON)
+    TlsProbeError::classed(TlsProbeFailureClass::Timeout, TIMEOUT_REASON)
 }
 
 fn is_timeout(error: &io::Error) -> bool {
@@ -515,5 +574,20 @@ mod tests {
             "TLS observation failed: no route to host"
         );
         assert_eq!(error.reason(), "no route to host");
+    }
+
+    #[test]
+    fn a_connect_failure_is_classified_by_what_the_network_answered() {
+        let class = |kind| TlsProbeFailureClass::of_connect(&io::Error::from(kind)).as_str();
+        assert_eq!(class(io::ErrorKind::NetworkUnreachable), "unreachable");
+        assert_eq!(class(io::ErrorKind::HostUnreachable), "unreachable");
+        assert_eq!(class(io::ErrorKind::ConnectionRefused), "refused");
+        assert_eq!(class(io::ErrorKind::TimedOut), "timeout");
+        assert_eq!(class(io::ErrorKind::PermissionDenied), "connect_failed");
+        assert_eq!(timeout_error().class().as_str(), "timeout");
+        assert_eq!(
+            TlsProbeError::new("no STARTTLS").class().as_str(),
+            "no_certificate"
+        );
     }
 }

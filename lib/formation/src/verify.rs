@@ -236,6 +236,10 @@ pub struct RuntimeTlsObservation {
     pub server_name_matches: bool,
     /// Observation time was inside the certificate's validity.
     pub within_validity: bool,
+    /// Why the probe obtained no certificate at all, when it did not: the
+    /// failure class and the bounded reason. The certificate fields above are
+    /// then empty and state nothing.
+    pub failure: Option<String>,
 }
 
 /// One declared terminal exchange, as a Run measured it.
@@ -620,6 +624,9 @@ impl ContractVerificationReceipt {
                             .tls
                             .iter()
                             .find(|observation| observation.requirement_id == requirement.id)
+                            // A probe that obtained no certificate has no
+                            // certificate evidence; its verdict says why.
+                            .filter(|observation| observation.failure.is_none())
                             .map(|observation| VerificationEvidence {
                                 method: None,
                                 path: None,
@@ -1066,6 +1073,15 @@ pub fn verify_runtime(
                                     observation.start.as_str(),
                                     server_name,
                                     start.as_str()
+                                ),
+                            }
+                        }
+                        Some(observation) if observation.failure.is_some() => {
+                            ObservationOutcome::Failed {
+                                code: "tls_probe_failed",
+                                detail: format!(
+                                    "no certificate was observed for {server_name} on {port}: {}",
+                                    observation.failure.as_deref().unwrap_or_default()
                                 ),
                             }
                         }

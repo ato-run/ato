@@ -228,6 +228,36 @@ pub fn runtime_tls_observation(
         handshake_completed: facts.handshake_completed,
         server_name_matches: facts.server_name_matches,
         within_validity: facts.within_validity,
+        failure: None,
+    }
+}
+
+/// A probe that obtained no certificate, as a decided observation of this
+/// requirement: it fails with the probe's failure class instead of leaving
+/// the requirement unobserved. The reason is the probe's own bounded text
+/// (address and OS error); it carries nothing the Run or the job supplied.
+pub fn runtime_tls_probe_failure(
+    requirement: &RequiredTlsObservation,
+    error: &ato_tls_observe::TlsProbeError,
+) -> RuntimeTlsObservation {
+    let reason: String = error.reason().chars().take(300).collect();
+    RuntimeTlsObservation {
+        requirement_id: requirement.requirement_id.clone(),
+        port: requirement.port_id.clone(),
+        server_name: requirement.server_name.clone(),
+        start: requirement.start,
+        presented_serial: String::new(),
+        san: Vec::new(),
+        not_before: String::new(),
+        not_after: String::new(),
+        days_remaining: 0,
+        chain_length: 0,
+        trust_anchor: String::new(),
+        trusted: false,
+        handshake_completed: false,
+        server_name_matches: false,
+        within_validity: false,
+        failure: Some(format!("{}: {reason}", error.class().as_str())),
     }
 }
 
@@ -1025,6 +1055,7 @@ mod tests {
             handshake_completed: true,
             server_name_matches: true,
             within_validity: true,
+            failure: None,
         }
     }
 
@@ -1112,6 +1143,74 @@ mod tests {
         };
         ato_formation::receipt::accept_receipt(&assignment, &point.receipt)
             .expect("the TLS receipt is internally consistent");
+    }
+
+    /// The selfhost incident: one fixed-TCP endpoint the validator cannot
+    /// reach must fail that observation alone, with the connect error class,
+    /// while every other observation of K is still decided on its own.
+    #[test]
+    fn an_unreachable_tls_endpoint_fails_only_its_own_observation() {
+        let mut contract = tls_contract(tls_requirement(
+            "imaps",
+            "app.http",
+            "mail.example",
+            TlsStart::Implicit,
+        ));
+        contract.requirements.push(tls_requirement(
+            "smtps",
+            "app.http",
+            "mail.example",
+            TlsStart::Implicit,
+        ));
+        let derivation = derivation();
+        let spec = spec(&contract, &derivation, TREE, None);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let error = ato_tls_observe::observe_tls(
+            address,
+            "mail.example",
+            ato_tls_observe::TlsStart::Implicit,
+            std::time::Duration::from_secs(2),
+            ato_tls_observe::TrustAnchors::PublicRoots,
+        )
+        .expect_err("nothing listens there");
+        let required = required_tls_observations(&spec);
+        let point = verify_observed_candidate(
+            &spec,
+            Vec::new(),
+            Vec::new(),
+            vec![
+                runtime_tls_probe_failure(&required[0], &error),
+                tls_facts("smtps", "app.http", "mail.example"),
+            ],
+            execution(),
+            &hosted(),
+        );
+        assert!(!point.receipt.fully_satisfied);
+        let imaps = &point.receipt.observations[0];
+        assert_eq!(imaps.id, "imaps");
+        let failure = imaps.failure.as_deref().expect("the failure is stated");
+        assert!(
+            failure.starts_with("tls_probe_failed: ") && failure.contains(": refused: "),
+            "{failure}"
+        );
+        assert!(imaps.evidence.is_none(), "no certificate was observed");
+        let smtps = &point.receipt.observations[1];
+        assert_eq!(
+            smtps.outcome,
+            ato_formation::verify::ReceiptOutcome::Satisfied
+        );
+        assert!(smtps.evidence.as_ref().unwrap().tls.is_some());
+        let assignment = ato_formation::receipt::ReceiptAssignment {
+            contract: &contract,
+            contract_ref: spec.contract_ref,
+            derivation_ref: spec.derivation_ref,
+            attempt_id: "attempt-1",
+            request_id: None,
+        };
+        ato_formation::receipt::accept_receipt(&assignment, &point.receipt)
+            .expect("a receipt with a failed probe is internally consistent");
     }
 
     fn tls_failure_code(contract: &BoundContract, tls: RuntimeTlsObservation) -> &'static str {
