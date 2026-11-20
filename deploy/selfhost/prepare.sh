@@ -3,8 +3,8 @@ set -eu
 umask 077
 site=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo=$(git -C "$site" rev-parse --show-toplevel)
-# shellcheck disable=SC1091
 unset ATO_VALIDATOR_REV
+# shellcheck disable=SC1091
 . "$site/versions.env"
 mkdir -p "$site/.tmp/src"
 stage=$(mktemp -d "$site/.tmp/prepare.XXXXXXXX")
