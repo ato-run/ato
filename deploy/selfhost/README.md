@@ -157,7 +157,7 @@ acceptance/residency.sh "$instance_id"
 
 ## Runnerの登録と再接続
 
-同じゲストではCaddyとRunnerの間に専用Unix socketを使用します。Runnerユーザーで `install -d -m 0711 "$HOME/.local/share/ato-selfhost/ingress"` を実行し、その絶対パスを `.env` の `ATO_RUNNER_INGRESS_DIR` に設定して `./start.sh` を再実行してください。Caddyコンテナにはこのディレクトリだけを読み取り専用でmountします。systemdのsocket proxyが各リクエストをloopback上の署名gateへ中継します。外部ホストのRunnerを追加する場合は、APIからそのホスト専用のTLS ingressへの経路を用意し、`ATO_RUNNER_INGRESS_ORIGIN` と `ATO_RUNNER_PUBLIC_BASE_URL` を揃えます。
+同じゲストではCaddyとRunnerの間に専用Unix socketを使用します。Runnerユーザーで `install -d -m 0711 "$HOME/.local/share/ato-selfhost/ingress"` を実行し、その絶対パスを `.env` の `ATO_RUNNER_INGRESS_DIR` に設定して `./start.sh` を再実行してください。Caddyコンテナにはこのディレクトリだけを読み取り専用でmountします。systemdのsocket proxyが各リクエストをloopback上の署名gateへ中継します。外部ホストのRunnerを追加する場合は、APIからそのホスト専用のTLS ingressへの経路を用意し、`ATO_RUNNER_INGRESS_ORIGIN` と `ATO_RUNNER_PUBLIC_BASE_URL` を揃えます。同じゲストで複数のRunnerを動かす場合は、[複数のアプリを同時に動かす](#複数のアプリを同時に動かす)を参照してください。
 
 同一ゲストでもRunner専用の非特権ユーザーで操作してください。次の例はLinux上のこのユーザーのホームにインストールします。別ホストへRunnerを増やす場合は同じソースと公開CAを移送し、新しい登録コードを使用します。
 
@@ -173,7 +173,9 @@ install -m 0644 selfhost-root.crt "$HOME/.config/ato-selfhost/root.crt"
     'ATO_RUNNER_PUBLIC_BASE_URL=https://runner.ato.home.arpa:8443' \
     > "$HOME/.config/ato-selfhost/runner.env"
 )
-install -m 0644 ato-selfhost-runner.service ato-selfhost-ingress.{socket,service} "$HOME/.config/systemd/user/"
+install -m 0644 ato-selfhost-runner.service ato-selfhost-ingress.{socket,service} \
+  ato-selfhost-runner@.service ato-selfhost-ingress@.{socket,service} \
+  "$HOME/.config/systemd/user/"
 mkdir -p -m 0700 "$HOME/.local/share/ato-selfhost/"{work,volumes}
 "$HOME/.cargo/bin/ato-connected-realization-worker" doctor \
   --work-root "$HOME/.local/share/ato-selfhost/work" \
@@ -194,6 +196,49 @@ journalctl --user -u ato-selfhost-runner.service -n 20
 
 ホストの管理者は、ログイン前から起動できるよう専用ユーザーのlingeringと、ゲスト起動時のDocker起動を設定します。登録後はデバイス鍵と資格情報を使って同じRunnerに再接続します。ブラウザでRunner ID、heartbeat、利用可能な実行方式と容量を確認してください。
 
+## 複数のアプリを同時に動かす
+
+Runnerのプロセス1つは、同時に1つのRunだけを実行します。1台のゲストで複数のアプリを同時に動かすには、Runnerを1〜3の番号で追加し、アプリごとに使うRunnerを明示して取り込みます。Runner 0は現在のファイル、ユニット名、ポート、保存先のまま変更しません。追加したRunnerもそれぞれ独立したRunnerとして登録され、ゲスト全体のリソースを報告します。
+
+追加のRunner k（kは1、2、3）が使うポートは次のとおりです。8445〜8447はゲストの外へ公開しません。APIだけが `control` ネットワーク上で `runner.<管理ホスト>` の同じホスト名に接続します。
+
+| 用途 | Runner 1 | Runner 2 | Runner 3 |
+|---|---|---|---|
+| 公開HTTPS（Caddy、API専用） | 8445 | 8446 | 8447 |
+| surface（systemd-socket-proxydの転送先） | 127.0.0.1:8421 | 127.0.0.1:8422 | 127.0.0.1:8423 |
+| hidden surface（Contract検証用） | 127.0.0.1:18431 | 127.0.0.1:18432 | 127.0.0.1:18433 |
+| surface target | 127.0.0.1:18441 | 127.0.0.1:18442 | 127.0.0.1:18443 |
+
+Runnerユーザーで、Runner kの設定ファイル `~/.config/ato-selfhost/runner-k.env` を作ります。`ATO_API_URL` と `ATO_RUNNER_API_CA_FILE` はRunner 0と同じ値です。`ATO_RUNNER_PUBLIC_BASE_URL` はRunner kの公開HTTPSポートに合わせます。固定TCPの設定（`ATO_RUNTIME_NETWORK_CONTROLS`、`ATO_RUNTIME_FIXED_TCP_ALLOWLIST`）は書きません。Mailの固定TCP listenerはRunner 0だけに残します。
+
+```bash
+(
+  umask 077
+  printf '%s\n' \
+    'ATO_API_URL=https://ato.home.arpa' \
+    "ATO_RUNNER_API_CA_FILE=$HOME/.config/ato-selfhost/root.crt" \
+    'ATO_RUNTIME_SURFACE_LISTEN=127.0.0.1:8421' \
+    'ATO_RUNTIME_HIDDEN_SURFACE_LISTEN=127.0.0.1:18431' \
+    'ATO_RUNTIME_SURFACE_TARGET=127.0.0.1:18441' \
+    'ATO_RUNNER_PUBLIC_BASE_URL=https://runner.ato.home.arpa:8445' \
+    > "$HOME/.config/ato-selfhost/runner-1.env"
+)
+./enroll-runner.sh 1
+systemctl --user daemon-reload
+systemctl --user enable --now ato-selfhost-ingress@1.socket ato-selfhost-runner@1.service
+journalctl --user -u ato-selfhost-runner@1.service -n 20
+```
+
+Runner 2、3も同じ形で、ユニット名と上の表の4つの値をkに合わせます。登録コードはRunnerごとに新しく発行します。登録後のRunner ID、heartbeat、実行方式と容量は所有者のブラウザの `/runners` で確認します。
+
+`.env` に、追加したRunnerの公開HTTPSオリジンを `ATO_RUNNER_INGRESS_ORIGINS` としてカンマ区切りで設定し、`./start.sh` を実行します。Runner 0のオリジンは従来どおり `ATO_RUNNER_INGRESS_ORIGIN` から読まれ、両方に書いたオリジンは1つとして扱われます。APIは設定されたオリジンにだけアプリを転送します。
+
+```
+ATO_RUNNER_INGRESS_ORIGINS=https://runner.ato.home.arpa:8445,https://runner.ato.home.arpa:8446,https://runner.ato.home.arpa:8447
+```
+
+アプリの取り込み時に、動かすRunnerを明示して配置します（placement `user_runner`、対象の `runner_id`）。Runner 0を選んだアプリは従来と同じです。同じRunner上の2つのアプリは同時ではなく1つずつ実行されるため、同時に動かすアプリの数だけRunnerを追加してください。
+
 ## バックアップと復元
 
 所有者はRunnerをDrainし、実行中のアプリを保存・停止して停止確認を待ちます。バックアップ中はRunnerとComposeサービスを停止します。下記は管理面のコールドバックアップ例です。バックアップ先は管理者だけが読める暗号化された領域を指定してください。
@@ -209,7 +254,7 @@ cp .env versions.env .tmp/secrets/validator_token "$backup/"
 cp -R .tmp/mail-ca "$backup/"
 ```
 
-Runnerではsystemdサービスの停止後、専用ユーザーの `~/.local/share/ato-selfhost`（work、volumes、identity）と `~/.config/ato-selfhost` をアクセス制限付きで別途保存します。同じデバイス資格情報を複製した2台を同時起動しないでください。
+Runnerではsystemdサービスの停止後、専用ユーザーの `~/.local/share/ato-selfhost`（work、volumes、identityと、追加Runnerの `runners/`）と `~/.config/ato-selfhost` をアクセス制限付きで別途保存します。同じデバイス資格情報を複製した2台を同時起動しないでください。
 
 空の復元先で同一バージョンのイメージ、同じDNS名、保存済みの `.env` を用意します。`./init-runtime.sh` 実行後、保管した専用トークンを `.tmp/secrets/validator_token` に0444で配置し（親ディレクトリは0700）、保管したMailの公開CAを `.tmp/mail-ca/` に戻します。APIやCaddyを初めて起動する前に、**空の専用volume**に復元します。
 

@@ -1,7 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 umask 077
-state_dir="$HOME/.local/share/ato-selfhost"
+
+# Runner 0 is the installation this distribution has always enrolled: its own
+# env file, state directory and surface target. Runner 1..3 are extra
+# single-slot Runners on the same guest, each enrolled with its own identity.
+case "${1:-}" in
+  "") runner=0 ;;
+  1 | 2 | 3) runner=$1 ;;
+  *)
+    echo 'Usage: enroll-runner.sh [runner-number 1|2|3]' >&2
+    exit 1
+    ;;
+esac
+if [[ $# -gt 1 ]]; then
+  echo 'Usage: enroll-runner.sh [runner-number 1|2|3]' >&2
+  exit 1
+fi
+
+if [[ "$runner" = 0 ]]; then
+  state_dir="$HOME/.local/share/ato-selfhost"
+  env_file="$HOME/.config/ato-selfhost/runner.env"
+  surface_target=127.0.0.1:18421
+else
+  state_dir="$HOME/.local/share/ato-selfhost/runners/$runner"
+  env_file="$HOME/.config/ato-selfhost/runner-$runner.env"
+  surface_target="127.0.0.1:$((18440 + runner))"
+fi
 credentials="$state_dir/identity/runner.json"
 if [[ -e "$credentials" ]]; then
   echo "This host already has a Runner identity at $credentials" >&2
@@ -12,9 +37,9 @@ mkdir -p -- "$state_dir"/{work,volumes,identity}
 # and environment assignments supported by both systemd and the shell.
 set -a
 # shellcheck disable=SC1091
-source "$HOME/.config/ato-selfhost/runner.env"
+source "$env_file"
 set +a
-: "${ATO_API_URL:?Set the local Coordinator URL in runner.env}"
+: "${ATO_API_URL:?Set the local Coordinator URL in ${env_file##*/}}"
 case "$ATO_API_URL" in
   https://*) ;;
   *) echo 'Runner enrollment requires an HTTPS API origin' >&2; exit 1 ;;
@@ -28,4 +53,4 @@ exec "$HOME/.cargo/bin/ato-connected-realization-worker" \
   --state-volume-root "$state_dir/volumes" \
   --runner-credentials-file "$credentials" \
   --require-explicit-runtime-placement \
-  --surface-target 127.0.0.1:18421 --once
+  --surface-target "$surface_target" --once

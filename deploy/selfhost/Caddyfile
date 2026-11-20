@@ -83,7 +83,12 @@ https://*.{$ATO_APPS_HOST}:8444 {
 	import apps
 }
 
-https://runner.{$ATO_HOST} {
+# Every Runner has its own site and socket. Runner 0 keeps the site this
+# distribution started with; Runners 1..3 are numbered in the URL and the
+# socket name. The body lives in one snippet so the four sites cannot drift.
+# Only the API reaches Runner 1..3, over the control network: compose.yaml
+# never publishes 8445..8447.
+(runner_ingress) {
 	tls {$ATO_TLS:internal}
 	import no_network_identity
 	@asserted header X-Ato-Run-Assertion *
@@ -92,7 +97,7 @@ https://runner.{$ATO_HOST} {
 		# that name as Host, not this site's name, so its own Origin and
 		# redirect checks work. The gate still verifies the assertion first.
 		@public_host header X-Forwarded-Host *
-		reverse_proxy @public_host unix//run/ato-runner-ingress/surface.sock {
+		reverse_proxy @public_host unix//run/ato-runner-ingress/{args[0]} {
 			header_up Host {http.request.header.X-Forwarded-Host}
 			header_up X-Forwarded-Host {http.request.header.X-Forwarded-Host}
 			# One request per upstream connection: the Runner gate verifies each
@@ -101,7 +106,7 @@ https://runner.{$ATO_HOST} {
 				keepalive off
 			}
 		}
-		reverse_proxy unix//run/ato-runner-ingress/surface.sock {
+		reverse_proxy unix//run/ato-runner-ingress/{args[0]} {
 			# One request per upstream connection: the Runner gate verifies each
 			# request's assertion only when its connection opens.
 			transport http {
@@ -110,4 +115,20 @@ https://runner.{$ATO_HOST} {
 		}
 	}
 	respond 403
+}
+
+https://runner.{$ATO_HOST} {
+	import runner_ingress surface.sock
+}
+
+https://runner.{$ATO_HOST}:8445 {
+	import runner_ingress surface-1.sock
+}
+
+https://runner.{$ATO_HOST}:8446 {
+	import runner_ingress surface-2.sock
+}
+
+https://runner.{$ATO_HOST}:8447 {
+	import runner_ingress surface-3.sock
 }
