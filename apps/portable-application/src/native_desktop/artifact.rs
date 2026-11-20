@@ -430,13 +430,27 @@ pub fn extract_archive_file(
 /// still recomputed from the bytes on disk so the receipt names what was
 /// actually launched.
 pub fn adopt_tree(root: &Path) -> Result<ExtractedArtifact> {
+    inspect_tree(root, false)
+}
+
+pub(super) fn inspect_archive_tree(
+    root: &Path,
+    format: NativeArtifactFormat,
+) -> Result<ExtractedArtifact> {
+    inspect_tree(root, format == NativeArtifactFormat::Dmg)
+}
+
+fn inspect_tree(root: &Path, app_links: bool) -> Result<ExtractedArtifact> {
     ensure!(
-        root.is_dir(),
+        fs::symlink_metadata(root)?.is_dir(),
         "the built artifact root {} is not a directory",
         root.display()
     );
     let mut files = Vec::new();
+    let mut links = Vec::new();
+    let mut entries = 0_u64;
     let mut total_bytes = 0_u64;
+    let mut dmg_limit = super::dmg::DmgSizeLimit::default();
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
         for entry in fs::read_dir(&directory)
@@ -446,6 +460,24 @@ pub fn adopt_tree(root: &Path) -> Result<ExtractedArtifact> {
             let path = entry.path();
             let metadata = fs::symlink_metadata(&path)
                 .with_context(|| format!("inspect the built file {}", path.display()))?;
+            entries += 1;
+            ensure!(
+                entries <= MAX_EXTRACTED_ENTRIES,
+                "native tree exceeds its entry limit"
+            );
+            if app_links && metadata.is_symlink() {
+                let target = fs::read_link(&path)?;
+                super::dmg::validate_link_name(root, &path, &target)?;
+                let target_bytes = target.as_os_str().as_encoded_bytes();
+                files.push(PlacedFile {
+                    path: slash_path(path.strip_prefix(root)?),
+                    mode: 0o120000,
+                    size: target_bytes.len() as u64,
+                    digest: format!("{:x}", Sha256::digest(target_bytes)),
+                });
+                links.push(path);
+                continue;
+            }
             if metadata.is_dir() {
                 pending.push(path);
                 continue;
@@ -462,10 +494,14 @@ pub fn adopt_tree(root: &Path) -> Result<ExtractedArtifact> {
             let mode = built_mode(&metadata);
             let size = metadata.len();
             total_bytes = total_bytes.saturating_add(size);
-            ensure!(
-                total_bytes <= MAX_EXTRACTED_BYTES,
-                "the built tree is larger than {MAX_EXTRACTED_BYTES} bytes"
-            );
+            if app_links {
+                dmg_limit.check(root, total_bytes)?;
+            } else {
+                ensure!(
+                    total_bytes <= MAX_EXTRACTED_BYTES,
+                    "the built tree is larger than {MAX_EXTRACTED_BYTES} bytes"
+                );
+            }
             let relative = path.strip_prefix(root).with_context(|| {
                 format!("the built file {} is outside its root", path.display())
             })?;
@@ -482,7 +518,14 @@ pub fn adopt_tree(root: &Path) -> Result<ExtractedArtifact> {
             });
         }
     }
-    ensure!(!files.is_empty(), "the built tree carries no regular file");
+    // Every link spelling in the tree has been checked before resolving any chain.
+    for link in &links {
+        super::dmg::validate_link_destination(root, link)?;
+    }
+    ensure!(
+        files.len() > links.len(),
+        "the built tree carries no regular file"
+    );
     finish(root, files, total_bytes)
 }
 
@@ -890,7 +933,7 @@ pub fn cached_archive_tree(
     let entry = cache.join(archive_digest.trim_start_matches("sha256:"));
     let validate = || -> Result<PathBuf> {
         let tree = entry.join("tree");
-        let observed = adopt_tree(&tree)?;
+        let observed = inspect_archive_tree(&tree, format)?;
         let manifest = fs::read_to_string(entry.join("verified-tree"))?;
         ensure!(
             manifest == format!("{archive_digest}\n{}\n", observed.tree_digest),

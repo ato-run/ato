@@ -123,19 +123,35 @@ fn declared_connections_can_be_found_for_a_bundle_and_an_installed_app() {
     );
 }
 
+/// One single-container OCI route with two required Bindings, plus a fake
+/// Docker CLI that answers probes only. Any command that would change
+/// something is recorded and refused, so a test can assert nothing started.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn run_refuses_an_incompatible_container_before_requesting_bindings() {
-    use std::os::unix::fs::PermissionsExt;
+struct PortableOciFixture {
+    root: tempfile::TempDir,
+    bundle: PathBuf,
+    home: PathBuf,
+    mutations: PathBuf,
+}
 
-    let root = tempfile::tempdir().unwrap();
-    let project = root.path().join("project");
-    fs::create_dir(&project).unwrap();
-    let manifest = fs::read_to_string(sample("portable-oci-startup-json").join("capsule.toml"))
-        .unwrap()
-        .replace(
-            "[contract]",
-            r#"[[binding]]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl PortableOciFixture {
+    fn new(rootless: bool, endpoint: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let security_options = if rootless {
+            r#"["name=rootless"]"#
+        } else {
+            "[]"
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        fs::create_dir(&project).unwrap();
+        let manifest = fs::read_to_string(sample("portable-oci-startup-json").join("capsule.toml"))
+            .unwrap()
+            .replace(
+                "[contract]",
+                r#"[[binding]]
 id = "admin_password"
 protocol = "ato.secret@1"
 required = true
@@ -146,65 +162,103 @@ protocol = "ato.config@1"
 required = true
 
 [contract]"#,
-        );
-    fs::write(project.join("capsule.toml"), &manifest).unwrap();
-    fs::write(project.join("fixture.txt"), "a non-empty workspace").unwrap();
-    let bundle = root.path().join("test app.capsule");
-    let (bytes, _) = ato_portable_application::build_authored_bundle_v2(&project).unwrap();
-    fs::write(&bundle, bytes).unwrap();
+            );
+        fs::write(project.join("capsule.toml"), &manifest).unwrap();
+        fs::write(project.join("fixture.txt"), "a non-empty workspace").unwrap();
+        let bundle = root.path().join("test app.capsule");
+        let (bytes, _) = ato_portable_application::build_authored_bundle_v2(&project).unwrap();
+        fs::write(&bundle, bytes).unwrap();
 
-    let docker = root.path().join("docker");
-    fs::write(
-        &docker,
-        r#"#!/bin/sh
+        let docker = root.path().join("docker");
+        fs::write(
+            &docker,
+            format!(
+                r#"#!/bin/sh
 case "$1 $2" in
   "context show") printf '%s\n' default ;;
-  "context inspect") printf '%s\n' 'unix:///var/run/docker.sock' ;;
+  "context inspect") printf '%s\n' '{endpoint}' ;;
   "info --format")
-    printf '%s\n' '{"OSType":"linux","Architecture":"x86_64","OperatingSystem":"Test Linux","SecurityOptions":["name=rootless"]}'
+    printf '%s\n' '{{"OSType":"linux","Architecture":"x86_64","OperatingSystem":"Test Linux","SecurityOptions":{security_options}}}'
     ;;
   *) printf '%s\n' "$1" >> "$ATO_TEST_DOCKER_MUTATIONS"; exit 1 ;;
 esac
-"#,
-    )
-    .unwrap();
-    fs::set_permissions(docker, fs::Permissions::from_mode(0o700)).unwrap();
-    let home = root.path().join("home");
-    let mutations = root.path().join("docker-mutations");
-    let run = || {
+"#
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&docker, fs::Permissions::from_mode(0o700)).unwrap();
+        Self {
+            home: root.path().join("home"),
+            mutations: root.path().join("docker-mutations"),
+            bundle,
+            root,
+        }
+    }
+
+    fn run(&self) -> Command {
         let mut command = ato();
         command
-            .env("PATH", root.path())
-            .env("ATO_HOME", &home)
-            .env("ATO_TEST_DOCKER_MUTATIONS", &mutations)
+            .env("PATH", self.root.path())
+            .env("ATO_HOME", &self.home)
+            .env("ATO_TEST_DOCKER_MUTATIONS", &self.mutations)
             .env_remove("DOCKER_HOST")
             .env_remove("DOCKER_CONTEXT")
             .arg("run")
-            .arg(&bundle)
+            .arg(&self.bundle)
             .arg("--no-open");
         command
-    };
-    let output = run().output().unwrap();
+    }
+
+    fn routes(&self) -> Value {
+        serde_json::from_str(&assert_success(
+            self.run()
+                .args(["--list-derivations", "--json"])
+                .output()
+                .unwrap(),
+        ))
+        .unwrap()
+    }
+}
+
+/// A remote daemon cannot receive this Run's workspace, so the route is
+/// refused before the CLI asks for any of the Bindings it declares.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn run_refuses_an_incompatible_container_before_requesting_bindings() {
+    let container = PortableOciFixture::new(false, "tcp://10.0.0.5:2375");
+    let output = container.run().output().unwrap();
     assert!(!output.status.success());
     let error = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        error.contains("Docker Engine is running in rootless mode"),
-        "{error}"
-    );
-    assert!(error.contains("No containers were started"), "{error}");
-    assert!(error.contains("--list-derivations"), "{error}");
+    assert!(error.contains("from another machine"), "{error}");
     assert!(!error.contains("admin_password"), "{error}");
-    assert_eq!(fs::read_dir(home.join("cache")).unwrap().count(), 0);
-    let routes: Value = serde_json::from_str(&assert_success(
-        run()
-            .args(["--list-derivations", "--json"])
-            .output()
-            .unwrap(),
-    ))
-    .unwrap();
-    let route = &routes["derivations"][0];
-    assert_eq!(route["runnable"], false);
-    assert!(!mutations.exists());
+    assert!(!container.mutations.exists());
+    assert_eq!(
+        fs::read_dir(container.home.join("cache")).unwrap().count(),
+        0
+    );
+    assert_eq!(container.routes()["derivations"][0]["runnable"], false);
+}
+
+/// A rootless daemon used to refuse a single container outright. The Run's own
+/// relay reaches that container's Port, so the route is admitted and the CLI
+/// moves on to the Bindings it declares — still without starting a container.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn run_admits_a_single_container_on_a_rootless_daemon() {
+    let container = PortableOciFixture::new(true, "unix:///var/run/docker.sock");
+    let output = container.run().output().unwrap();
+    assert!(
+        !output.status.success(),
+        "the required Bindings are missing"
+    );
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("Required Bindings are missing"), "{error}");
+    assert!(!error.contains("rootless mode"), "{error}");
+    assert!(
+        !container.mutations.exists(),
+        "no container command may run"
+    );
+    assert_eq!(container.routes()["derivations"][0]["runnable"], true);
 }
 
 #[test]

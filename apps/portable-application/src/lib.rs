@@ -94,6 +94,7 @@ pub const OCI_ENTRYPOINT_RUNTIME: &str = "oci.entrypoint";
 /// Optional read-only mount target for the materialized workspace. Omitting
 /// this key preserves the original `/app` target and existing DerivationRefs.
 pub const OCI_WORKSPACE_MOUNT_RUNTIME: &str = "oci.workspace_mount";
+pub const OCI_SCRATCH_VOLUMES_RUNTIME: &str = "oci.scratch_volumes";
 /// Optional container working directory for the single-container route, taken
 /// from the verified image when it is not `/app`. Omitting this key preserves
 /// the original `/app` working directory and existing DerivationRefs. It is
@@ -3313,6 +3314,19 @@ fn validate_route_profile(
             if let Some(directory) = derivation.runtimes.get(OCI_WORKING_DIR_RUNTIME) {
                 validate_oci_working_dir(directory)?;
             }
+            if host_native
+                && derivation
+                    .runtimes
+                    .contains_key(OCI_SCRATCH_VOLUMES_RUNTIME)
+            {
+                return Err(profile(
+                    "native-surface OCI routes do not support scratch volumes",
+                ));
+            }
+            validate_scratch_volumes(
+                &derivation.runtimes,
+                derivation.state.iter().map(|s| s.mount.as_str()),
+            )?;
             if derivation.runtimes.len()
                 != 5 + usize::from(derivation.runtimes.contains_key(OCI_ENTRYPOINT_RUNTIME))
                     + usize::from(
@@ -3321,6 +3335,11 @@ fn validate_route_profile(
                             .contains_key(OCI_WORKSPACE_MOUNT_RUNTIME),
                     )
                     + usize::from(derivation.runtimes.contains_key(OCI_WORKING_DIR_RUNTIME))
+                    + usize::from(
+                        derivation
+                            .runtimes
+                            .contains_key(OCI_SCRATCH_VOLUMES_RUNTIME),
+                    )
                     + usize::from(derivation.runtimes.contains_key(OCI_USER_RUNTIME))
                 || step.op != "serve"
                 || step.argv.is_empty()
@@ -3554,6 +3573,22 @@ fn validate_oci_entrypoint(entrypoint: &str) -> Result<(), PortableApplicationEr
         ));
     }
     Ok(())
+}
+
+fn validate_scratch_volumes<'a>(
+    runtimes: &'a BTreeMap<String, String>,
+    state_paths: impl Iterator<Item = &'a str>,
+) -> Result<(), PortableApplicationError> {
+    let workspace = runtimes
+        .get(OCI_WORKSPACE_MOUNT_RUNTIME)
+        .map_or("/app", String::as_str);
+    ato_adapter_oci::ScratchVolumes::parse(
+        runtimes
+            .get(OCI_SCRATCH_VOLUMES_RUNTIME)
+            .map(String::as_str),
+    )
+    .and_then(|volumes| volumes.check_conflicts(std::iter::once(workspace).chain(state_paths)))
+    .map_err(|err| profile(err.to_string()))
 }
 
 fn validate_oci_workspace_mount(target: &str) -> Result<(), PortableApplicationError> {
@@ -3954,12 +3989,21 @@ fn validate_oci_service_group(
                 input_readers.insert(id);
             }
         }
+        validate_scratch_volumes(
+            &step.runtimes,
+            derivation
+                .state
+                .iter()
+                .filter(|s| step.state.contains(&s.id))
+                .map(|s| s.mount.as_str()),
+        )?;
         if step.runtimes.len()
             != 4 + usize::from(
                 step.runtimes
                     .contains_key(ato_ipc::oci_component_inputs::OCI_INPUT_IDS_RUNTIME),
             ) + usize::from(step.runtimes.contains_key(OCI_ENTRYPOINT_RUNTIME))
                 + usize::from(step.runtimes.contains_key(OCI_WORKSPACE_MOUNT_RUNTIME))
+                + usize::from(step.runtimes.contains_key(OCI_SCRATCH_VOLUMES_RUNTIME))
                 + usize::from(step.runtimes.contains_key(OCI_USER_RUNTIME))
         {
             return Err(profile(format!(

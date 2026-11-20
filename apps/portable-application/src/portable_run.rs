@@ -266,10 +266,10 @@ pub fn execution_requirements_for(
         PortableRealizationKind::LocalProcess | PortableRealizationKind::ProcessServiceGroup => {
             ato_host_facts::ExecutionRequirements::process()
         }
-        PortableRealizationKind::OciContainer => {
-            ato_host_facts::ExecutionRequirements::single_container(route_platform(derivation))
-        }
-        PortableRealizationKind::OciServiceGroup => {
+        // One container or several, this Run reaches their Ports the same way:
+        // directly where the daemon's bridge is visible, or through the Run's
+        // own relay where it is not. The container count is not a host fact.
+        PortableRealizationKind::OciContainer | PortableRealizationKind::OciServiceGroup => {
             ato_host_facts::ExecutionRequirements::container(route_platform(derivation))
         }
         PortableRealizationKind::NativeDesktop => {
@@ -1122,13 +1122,7 @@ impl PortableBundleExecutor<'_> {
         bounded: Option<&BoundedOciRun>,
     ) -> Result<Realized, RealizeFailure> {
         let route = self.validated;
-        // A single container has no group network to join, so the relay
-        // materialization is not implemented for it. Admission refuses that
-        // combination first; this is the same decision, stated where the
-        // container would have been started.
-        if let Some(refusal) = host.single_container_refusal() {
-            return Err(launch(anyhow::anyhow!(refusal.message), &workspace));
-        }
+
         let step = &route.derivation.steps[0];
         let port = &route.derivation.ports[0];
         let guest_port = port.guest_port.context("OCI route omitted guest_port")?;
@@ -1184,8 +1178,41 @@ impl PortableBundleExecutor<'_> {
                 .unwrap_or_default(),
         };
         let oci_runtime = self.runtime_root.join("oci");
-        let handle = local_oci_adapter(hydrated, spec, &oci_runtime, bounded)
-            .and_then(|adapter| adapter.spawn(&workspace, &oci_runtime))
+        // A single container joins the Run's own network exactly like a
+        // service group does. Where the daemon keeps that network out of
+        // reach, the same relay reaches its Port; a direct bridge needs none.
+        let relayed = host.connector_choice() == Some(ato_host_facts::ConnectorChoice::Relay);
+        let runtime_root = if relayed {
+            oci_runtime.join(&step.id)
+        } else {
+            oci_runtime.clone()
+        };
+        let adapter = local_oci_adapter(hydrated, spec, &runtime_root, bounded)?
+            .with_scratch_volumes(ato_adapter_oci::ScratchVolumes::parse(
+                runtime
+                    .get(crate::OCI_SCRATCH_VOLUMES_RUNTIME)
+                    .map(String::as_str),
+            )?)?;
+        if relayed {
+            let service = ServiceStart {
+                name: step.id.clone(),
+                adapter,
+                runtime_root,
+                networks: Vec::new(),
+                guards: Vec::new(),
+            };
+            return self.run_oci_network(
+                workspace,
+                oci_runtime,
+                vec![service],
+                host,
+                port,
+                host_port,
+                bounded,
+            );
+        }
+        let handle = adapter
+            .spawn(&workspace, &oci_runtime)
             .map_err(|error| oci_launch_failure(error, &workspace, &oci_runtime))?;
         let base = format!("http://127.0.0.1:{host_port}");
         let mut execution = evidence("oci", Some("docker".to_owned()), None, None, &base);
@@ -1294,16 +1321,57 @@ impl PortableBundleExecutor<'_> {
             let runtime_root = oci_runtime.join(&step.id);
             services.push(ServiceStart {
                 name: step.id.clone(),
-                adapter: local_oci_adapter(hydrated, spec, &runtime_root, bounded)?,
+                adapter: local_oci_adapter(hydrated, spec, &runtime_root, bounded)?
+                    .with_scratch_volumes(ato_adapter_oci::ScratchVolumes::parse(
+                        runtime
+                            .get(crate::OCI_SCRATCH_VOLUMES_RUNTIME)
+                            .map(String::as_str),
+                    )?)?,
                 runtime_root,
                 networks: Vec::new(),
                 guards: Vec::new(),
             });
         }
+        self.run_oci_network(
+            workspace,
+            oci_runtime,
+            services,
+            host,
+            surface_port,
+            host_port,
+            bounded,
+        )
+    }
+
+    /// Start `services` on one Run-owned internal network and record what
+    /// reached the Surface Port in this Run's evidence.
+    ///
+    /// A single-container route is this same materialization with one service:
+    /// a relay is how a Run reaches Ports its daemon keeps out of reach, and
+    /// that is a fact about the host, not about how many containers the route
+    /// declares. Where the connector is direct there is no relay at all.
+    fn run_oci_network(
+        &self,
+        workspace: PathBuf,
+        oci_runtime: PathBuf,
+        services: Vec<ServiceStart>,
+        host: &ato_host_facts::HostFacts,
+        surface_port: &ato_formation::authoring::BoundPort,
+        host_port: u16,
+        bounded: Option<&BoundedOciRun>,
+    ) -> Result<Realized, RealizeFailure> {
+        let route = self.validated;
+        let derivation = &route.derivation;
+        let platform = derivation
+            .runtimes
+            .get(OCI_PLATFORM_RUNTIME)
+            .context("OCI route omitted platform")?;
         // Which materialization reaches the Ports is a fact about the daemon,
         // recorded in this Run's evidence. A native Linux daemon keeps the
         // direct bridge; a VM-backed or rootless one needs the Run's relay.
         let connector_choice = host.connector_choice();
+        let platform_emulated = platform_is_emulated(host, platform);
+        let service_timeout = oci_service_timeout(host, platform);
         let relay = match connector_choice {
             Some(ato_host_facts::ConnectorChoice::Relay) => {
                 let destinations = derivation
@@ -1342,7 +1410,9 @@ impl PortableBundleExecutor<'_> {
                     services,
                     StopBudget::DEFAULT,
                     relay,
-                    &mut |name, group| wait_until_service_accepts_tcp(route, name, group, bounded),
+                    &mut |name, group| {
+                        wait_until_service_accepts_tcp(route, name, group, bounded, service_timeout)
+                    },
                 )
             })
             .map_err(|error| oci_launch_failure(error, &workspace, &oci_runtime))?;
@@ -1392,8 +1462,9 @@ impl PortableBundleExecutor<'_> {
             .services()
             .find(|(name, _)| *name == surface_port.from)
             .map(|(_, handle)| handle);
+        let single = route.realization == PortableRealizationKind::OciContainer;
         let mut execution = evidence(
-            "oci_service_group",
+            if single { "oci" } else { "oci_service_group" },
             Some("docker".to_owned()),
             None,
             None,
@@ -1409,21 +1480,23 @@ impl PortableBundleExecutor<'_> {
             execution.connector = Some(group.connector_kind().as_str().to_owned());
             execution.relay_image_digest = Some(relay.image_digest);
             execution.relay_container_id = Some(relay.container_id);
-            execution.platform_emulated = Some(matches!(
-                host.docker.platforms.get(platform.as_str()),
-                Some(ato_host_facts::PlatformSupport::Emulated { .. })
-            ));
+            execution.platform_emulated = Some(platform_emulated);
         }
-        execution.services = group
-            .services()
-            .map(
-                |(name, handle)| ato_formation::verify::VerificationServiceEvidence {
-                    name: name.to_owned(),
-                    container_id: handle.container_id().to_owned(),
-                    image: handle.image().to_owned(),
-                },
-            )
-            .collect();
+        if single && self.offline() {
+            execution.embedded_oci_image_loaded = execution.image.clone();
+        }
+        if !single {
+            execution.services = group
+                .services()
+                .map(
+                    |(name, handle)| ato_formation::verify::VerificationServiceEvidence {
+                        name: name.to_owned(),
+                        container_id: handle.container_id().to_owned(),
+                        image: handle.image().to_owned(),
+                    },
+                )
+                .collect();
+        }
         Ok(Realized {
             candidate: Box::new(OciCandidate::new(
                 LaunchedOci::Group(group),
@@ -1782,13 +1855,35 @@ impl PortableBundleExecutor<'_> {
     }
 }
 
-/// The service accepts TCP on its first Port within 60s, and no service of
+/// Whether this host runs the route's pinned platform under emulation.
+fn platform_is_emulated(host: &ato_host_facts::HostFacts, platform: &str) -> bool {
+    matches!(
+        host.docker.platforms.get(platform),
+        Some(ato_host_facts::PlatformSupport::Emulated { .. })
+    )
+}
+
+/// How long a service has to accept TCP on its Port before this Run gives up.
+///
+/// A fresh database can spend over a minute initializing its state under
+/// instruction emulation before it opens its first socket; a native daemon
+/// opens it in seconds.
+fn oci_service_timeout(host: &ato_host_facts::HostFacts, platform: &str) -> std::time::Duration {
+    std::time::Duration::from_secs(if platform_is_emulated(host, platform) {
+        180
+    } else {
+        60
+    })
+}
+
+/// The service accepts TCP on its first Port before its deadline, and no service of
 /// the group has exited meanwhile.
 fn wait_until_service_accepts_tcp(
     route: &ValidatedPortableApplication,
     name: &str,
     group: &ato_adapter_oci::OciServiceGroup,
     bounded: Option<&BoundedOciRun>,
+    timeout: std::time::Duration,
 ) -> Result<()> {
     let guest_port = route
         .derivation
@@ -1797,7 +1892,7 @@ fn wait_until_service_accepts_tcp(
         .find(|port| port.from == name)
         .and_then(|port| port.guest_port)
         .context("OCI service serves no Port")?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + timeout;
     loop {
         if let Some(run) = bounded {
             run.remaining()?;
@@ -1815,7 +1910,8 @@ fn wait_until_service_accepts_tcp(
         }
         anyhow::ensure!(
             std::time::Instant::now() < deadline,
-            "OCI service `{name}` did not accept TCP on {guest_port} within 60s"
+            "OCI service `{name}` did not accept TCP on {guest_port} within {}s",
+            timeout.as_secs()
         );
         let interval = std::time::Duration::from_millis(100);
         let pause = match bounded {
@@ -3706,5 +3802,133 @@ mod runtime_egress_tests {
         );
         requirements.network[0].phase = ato_formation::requirements::ExecutionPhase::Runtime;
         assert!(declares_runtime_egress(&requirements));
+    }
+}
+
+#[cfg(test)]
+mod single_container_relay_tests {
+    use super::*;
+
+    const SINGLE_CONTAINER_TOML: &str = r#"schema = "ato.capsule/2"
+
+[application]
+title = "One container"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "root"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/"
+status = 200
+
+[[derivation]]
+id = "serve"
+use = "ato.oci@1"
+argv = ["--addr", "0.0.0.0"]
+cwd = "."
+guest_port = 8080
+runtimes = { "oci.image" = "docker.io/library/nginx@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "oci.platform" = "linux/amd64", "oci.memory_bytes" = "268435456", "oci.cpu_limit_millis" = "1000", "oci.pids_limit" = "128" }
+
+[effects]
+default = "pure"
+"#;
+
+    /// Docker Desktop's daemon as this crate sees it: present, answering over
+    /// a local socket, in another kernel, emulating the pinned platform.
+    fn vm_backed_desktop() -> ato_host_facts::HostFacts {
+        ato_host_facts::HostFacts {
+            os: "macos".to_owned(),
+            arch: "arm64".to_owned(),
+            docker: ato_host_facts::DockerFacts {
+                cli_present: true,
+                cli_path: Some(PathBuf::from("/usr/local/bin/docker")),
+                daemon_reachable: true,
+                operating_system: Some("Docker Desktop".to_owned()),
+                os_type: Some("linux".to_owned()),
+                architecture: Some("arm64".to_owned()),
+                endpoint: ato_host_facts::EndpointKind::Unix("/var/run/docker.sock".to_owned()),
+                same_kernel: false,
+                // The test's runtime root can live anywhere on this host.
+                workspace_sharing: ato_host_facts::WorkspaceSharing::VmFileSharing {
+                    roots: vec![PathBuf::from("/")],
+                },
+                platforms: BTreeMap::from([(
+                    "linux/amd64".to_owned(),
+                    ato_host_facts::PlatformSupport::Emulated {
+                        detail: "Rosetta".to_owned(),
+                    },
+                )]),
+                ..Default::default()
+            },
+            linux_sandbox: false,
+            native: ato_host_facts::NativeFacts {
+                sandbox_tool: true,
+                sandbox_detail: None,
+                signature_tools: true,
+            },
+        }
+    }
+
+    /// One container is not a reason to refuse a host that answers through a
+    /// relay: the Run's relay reaches a single service's Port exactly as it
+    /// reaches a group's Surface.
+    #[test]
+    fn a_single_container_route_is_admitted_through_the_relay() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("index.txt"), b"payload").unwrap();
+        fs::write(root.path().join("capsule.toml"), SINGLE_CONTAINER_TOML).unwrap();
+        let (_, bundle) = crate::build_authored_bundle_v2(root.path()).unwrap();
+        let route_ref = bundle.index.derivations[0].to_string();
+        let validated = crate::validate_bundle_for_derivation(&bundle, &route_ref).unwrap();
+        assert_eq!(
+            validated.realization,
+            PortableRealizationKind::OciContainer,
+            "this fixture is the single-container OCI route"
+        );
+
+        let host = vm_backed_desktop();
+        assert_eq!(
+            host.connector_choice(),
+            Some(ato_host_facts::ConnectorChoice::Relay)
+        );
+        let runtime_root = root.path().join("run");
+        let requirements = execution_requirements_for(&validated, &runtime_root);
+        // The same host facts a service group states: how many containers a
+        // route declares is not a fact about the host.
+        assert_eq!(
+            requirements,
+            ato_host_facts::ExecutionRequirements::container(Some("linux/amd64".to_owned()))
+                .binding(&runtime_root)
+        );
+        let status = ato_host_facts::execution_status(&host, &requirements);
+        assert_eq!(status.state, ato_host_facts::CapabilityState::Advertised);
+        assert!(
+            check_compatibility(&validated, &runtime_root, root.path(), &host).is_none(),
+            "admission used to refuse this route as oci_container_relay_unsupported"
+        );
+    }
+
+    /// A container that initializes its database under emulation gets the
+    /// longer deadline; a native one is not made to wait for it.
+    #[test]
+    fn an_emulated_platform_gets_a_longer_startup_deadline() {
+        let host = vm_backed_desktop();
+        assert_eq!(
+            oci_service_timeout(&host, "linux/amd64"),
+            std::time::Duration::from_secs(180)
+        );
+        assert_eq!(
+            oci_service_timeout(&host, "linux/arm64"),
+            std::time::Duration::from_secs(60)
+        );
     }
 }

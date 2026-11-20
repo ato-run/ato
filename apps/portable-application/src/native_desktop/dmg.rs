@@ -1,11 +1,61 @@
 //! Bounded, read-only macOS disk-image materialization. No mounted code runs.
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use super::artifact::{self, ExtractedArtifact, MAX_EXTRACTED_BYTES, MAX_EXTRACTED_ENTRIES};
 use anyhow::{Context, Result, ensure};
+
+const MAX_SIGNED_APP_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Above the ordinary archive bound only one Apple Developer ID-signed app
+/// can be materialized. Check the physical tree independently on cache reads.
+#[derive(Default)]
+pub(super) struct DmgSizeLimit {
+    verified_large_app: bool,
+}
+
+impl DmgSizeLimit {
+    pub(super) fn check(&mut self, root: &Path, bytes: u64) -> Result<()> {
+        ensure!(
+            bytes <= MAX_SIGNED_APP_BYTES,
+            "disk image exceeds the signed app extraction limit of {MAX_SIGNED_APP_BYTES} bytes"
+        );
+        if bytes <= MAX_EXTRACTED_BYTES || self.verified_large_app {
+            return Ok(());
+        }
+        let mut apps = Vec::new();
+        for item in fs::read_dir(root)? {
+            let item = item?;
+            if item.path().extension().is_some_and(|ext| ext == "app") {
+                ensure!(
+                    item.file_type()?.is_dir(),
+                    "disk image app must be a real directory"
+                );
+                apps.push(item.path());
+            }
+        }
+        let [app] = apps.as_slice() else {
+            anyhow::bail!(
+                "a disk image above {MAX_EXTRACTED_BYTES} bytes must contain one signed app"
+            );
+        };
+        let (status, detail) = bounded_command(
+            Command::new("/usr/bin/codesign")
+                .args(["--verify", "--deep", "--strict", "--all-architectures", "-R",
+                    "=anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"])
+                .arg(app),
+            Duration::from_secs(180),
+        )?;
+        ensure!(
+            status.success(),
+            "large app requires a valid Developer ID signature: {detail}"
+        );
+        self.verified_large_app = true;
+        Ok(())
+    }
+}
 
 pub fn extract_file(image: &Path, destination: &Path) -> Result<ExtractedArtifact> {
     #[cfg(not(target_os = "macos"))]
@@ -106,6 +156,61 @@ pub fn extract_bytes(bytes: &[u8], destination: &Path) -> Result<ExtractedArtifa
     extract_file(image.path(), destination)
 }
 
+/// Permit relative framework links within the real top-level app that owns them.
+/// Parent steps must come first: a parent after a symlink component does not
+/// necessarily move up one directory in the original lexical path.
+pub(super) fn validate_link_name(root: &Path, link: &Path, target: &Path) -> Result<()> {
+    let relative = link.strip_prefix(root)?;
+    let app = relative.components().next().context("missing app name")?;
+    ensure!(
+        Path::new(app.as_os_str())
+            .extension()
+            .is_some_and(|e| e == "app"),
+        "link outside an app"
+    );
+    let mut depth = relative
+        .components()
+        .count()
+        .checked_sub(2)
+        .context("app root cannot be a link")?;
+    let mut has_name = false;
+    for part in target.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir if !has_name && depth > 0 => depth -= 1,
+            Component::Normal(_) => has_name = true,
+            _ => anyhow::bail!("disk image link target is outside its app or is ambiguous"),
+        }
+    }
+    ensure!(has_name, "disk image link must name an app entry");
+    Ok(())
+}
+
+pub(super) fn validate_link_destination(root: &Path, link: &Path) -> Result<()> {
+    let app = link
+        .strip_prefix(root)?
+        .components()
+        .next()
+        .context("missing app name")?;
+    let app_root = root.join(app.as_os_str()).canonicalize()?;
+    let resolved = link
+        .canonicalize()
+        .context("dangling or cyclic disk image link")?;
+    ensure!(
+        resolved.starts_with(&app_root),
+        "disk image link resolves outside its app"
+    );
+    let parent = link
+        .parent()
+        .context("missing link parent")?
+        .canonicalize()?;
+    ensure!(
+        !parent.starts_with(&resolved),
+        "disk image link points to its parent tree"
+    );
+    Ok(())
+}
+
 fn copy_apps(mount: &Path, destination: &Path) -> Result<ExtractedArtifact> {
     ensure!(!destination.exists(), "artifact destination already exists");
     fs::create_dir(destination)?;
@@ -124,8 +229,11 @@ fn copy_apps(mount: &Path, destination: &Path) -> Result<ExtractedArtifact> {
         !pending.is_empty(),
         "disk image contains no top-level app bundle"
     );
+    #[cfg(unix)]
+    let mut links = Vec::new();
     let mut count = 0_u64;
     let mut bytes = 0_u64;
+    let mut size_limit = DmgSizeLimit::default();
     while let Some(path) = pending.pop() {
         count += 1;
         ensure!(
@@ -134,8 +242,17 @@ fn copy_apps(mount: &Path, destination: &Path) -> Result<ExtractedArtifact> {
         );
         let metadata = fs::symlink_metadata(&path)?;
         let output = destination.join(path.strip_prefix(mount)?);
+        #[cfg(unix)]
+        if metadata.is_symlink() {
+            let target = fs::read_link(&path)?;
+            validate_link_name(mount, &path, &target)?;
+            // The walk enumerates only real directories on the read-only
+            // image. No copied link is used as a destination directory.
+            links.push((target, output));
+            continue;
+        }
         if metadata.is_dir() {
-            fs::create_dir_all(&output)?;
+            fs::create_dir(&output)?;
             for item in fs::read_dir(path)? {
                 pending.push(item?.path());
             }
@@ -148,12 +265,10 @@ fn copy_apps(mount: &Path, destination: &Path) -> Result<ExtractedArtifact> {
             bytes = bytes
                 .checked_add(metadata.len())
                 .context("disk image size overflow")?;
+            size_limit.check(mount, bytes)?;
+            let mut copied = fs::File::create_new(&output)?;
             ensure!(
-                bytes <= MAX_EXTRACTED_BYTES,
-                "disk image exceeds extraction size limit"
-            );
-            ensure!(
-                fs::copy(&path, &output)? == metadata.len(),
+                std::io::copy(&mut fs::File::open(&path)?, &mut copied)? == metadata.len(),
                 "disk image changed during copy"
             );
             #[cfg(unix)]
@@ -166,12 +281,27 @@ fn copy_apps(mount: &Path, destination: &Path) -> Result<ExtractedArtifact> {
             }
         }
     }
-    artifact::adopt_tree(destination)
+    #[cfg(unix)]
+    for (target, output) in links {
+        std::os::unix::fs::symlink(target, output)?;
+    }
+    artifact::inspect_archive_tree(
+        destination,
+        ato_formation::native_desktop::NativeArtifactFormat::Dmg,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn large_dmg_budget_requires_one_signed_app_and_keeps_an_absolute_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut limit = DmgSizeLimit::default();
+        assert!(limit.check(dir.path(), MAX_EXTRACTED_BYTES).is_ok());
+        assert!(limit.check(dir.path(), MAX_EXTRACTED_BYTES + 1).is_err());
+        assert!(limit.check(dir.path(), MAX_SIGNED_APP_BYTES + 1).is_err());
+    }
     #[test]
     fn a_stuck_helper_is_terminated_at_its_deadline() {
         let started = Instant::now();
@@ -200,11 +330,64 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
+    fn framework_links_survive_materialization_and_cache_validation() {
+        let root = tempfile::tempdir().unwrap();
+        let mount = root.path().join("mount");
+        let framework = mount.join("Example.app/Contents/Frameworks/Example.framework");
+        fs::create_dir_all(framework.join("Versions/A")).unwrap();
+        fs::write(framework.join("Versions/A/Example"), b"signed payload").unwrap();
+        std::os::unix::fs::symlink("A", framework.join("Versions/Current")).unwrap();
+        std::os::unix::fs::symlink("Versions/Current/Example", framework.join("Example")).unwrap();
+        let tree = copy_apps(&mount, &root.path().join("out")).unwrap();
+        let entry = tree
+            .root
+            .join("Example.app/Contents/Frameworks/Example.framework/Example");
+        assert_eq!(
+            fs::read_link(&entry).unwrap(),
+            Path::new("Versions/Current/Example")
+        );
+        assert_eq!(fs::read(&entry).unwrap(), b"signed payload");
+        let format = ato_formation::native_desktop::NativeArtifactFormat::Dmg;
+        assert_eq!(
+            artifact::inspect_archive_tree(&tree.root, format)
+                .unwrap()
+                .tree_digest,
+            tree.tree_digest
+        );
+        fs::remove_file(&entry).unwrap();
+        std::os::unix::fs::symlink("Versions/A/Example", &entry).unwrap();
+        assert_ne!(
+            artifact::inspect_archive_tree(&tree.root, format)
+                .unwrap()
+                .tree_digest,
+            tree.tree_digest
+        );
+        assert!(artifact::adopt_tree(&tree.root).is_err());
+    }
+    #[cfg(unix)]
+    #[test]
     fn refuses_links_inside_apps_without_following_them() {
         let root = tempfile::tempdir().unwrap();
         let mount = root.path().join("mount");
         fs::create_dir_all(mount.join("Bad.app")).unwrap();
         std::os::unix::fs::symlink("/etc/passwd", mount.join("Bad.app/data")).unwrap();
         assert!(copy_apps(&mount, &root.path().join("out")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_dangling_cyclic_and_cross_app_links() {
+        for target in ["missing", "data", "../Other.app/real"] {
+            let root = tempfile::tempdir().unwrap();
+            let mount = root.path().join("mount");
+            fs::create_dir_all(mount.join("Bad.app")).unwrap();
+            fs::create_dir_all(mount.join("Other.app")).unwrap();
+            fs::write(mount.join("Other.app/real"), b"other app").unwrap();
+            std::os::unix::fs::symlink(target, mount.join("Bad.app/data")).unwrap();
+            assert!(
+                copy_apps(&mount, &root.path().join("out")).is_err(),
+                "{target}"
+            );
+        }
     }
 }

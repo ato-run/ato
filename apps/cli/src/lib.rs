@@ -1552,7 +1552,6 @@ fn preflight_portable_route(
     runtime_root: &Path,
     args: &RunArgs,
     hub: Option<&hub_public::ResolvedHubCapsule>,
-    routes: usize,
     detailed: bool,
 ) -> Result<ato_host_facts::HostFacts> {
     if !detailed || !args.no_open {
@@ -1586,23 +1585,6 @@ fn preflight_portable_route(
         eprintln!(
             "capability required {}",
             required_environment(&requirements)
-        );
-    }
-    if let Some(refusal) = status
-        .reasons
-        .iter()
-        .find(|reason| reason.code == ato_host_facts::ReasonCode::OciContainerRelayUnsupported)
-    {
-        let command = route_listing_command(&args.capsule, &args.api_url);
-        let next = if routes > 1 {
-            format!("Check for another route declared by the publisher: {command}")
-        } else {
-            format!("Check this bundle on the Linux machine before starting it: {command}")
-        };
-        bail!(
-            "{code}: {} did not start. {} No containers were started by this command.\n{next}",
-            validated.application.title,
-            refusal.message
         );
     }
     if detailed {
@@ -4104,14 +4086,7 @@ fn run_portable_application(
         .then(run_data::planned_runtime_root)
         .transpose()?;
     let preflight_root = managed_root.as_deref().unwrap_or(runtime.path());
-    let host = preflight_portable_route(
-        &validated,
-        preflight_root,
-        &args,
-        hub,
-        bundle.index.derivations.len(),
-        detailed,
-    )?;
+    let host = preflight_portable_route(&validated, preflight_root, &args, hub, detailed)?;
     if let Some(candidate) = candidate {
         if detailed {
             for line in derivation_selection::render_permissions(candidate) {
