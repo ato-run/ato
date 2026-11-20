@@ -20,20 +20,31 @@ for required in package.json Cargo.toml Cargo.lock src templates; do
   }
 done
 
-# The Dockerfile applies the patches itself, so the checkout must be the
-# unpatched pinned commit. A dry run catches an already-patched tree (the
-# Dockerfile would otherwise fail with a reversed patch).
-for patch in missive-nondefault-port.patch missive-identity-submission-capability.patch; do
-  if ! ( cd "${missive_src}" && patch -p1 --dry-run --forward < "${here}/${patch}" >/dev/null 2>&1 ); then
-    echo "error: ${patch} does not apply cleanly to ${missive_src}." >&2
+# The Dockerfile applies the patches itself, in this order, so the checkout must
+# be the unpatched pinned commit. Check the whole stack on a scratch copy of the
+# source: each patch is applied on top of the previous ones, and the copy is
+# discarded, so a stale or already-patched checkout is caught without touching
+# it. (All three patches only touch src/.)
+patch_check="${missive_src}/.ato-patch-check.$$"
+trap 'rm -rf "${patch_check}"' EXIT
+rm -rf "${patch_check}"
+mkdir -p "${patch_check}"
+cp -R "${missive_src}/src" "${patch_check}/src"
+for patch in missive-nondefault-port.patch \
+             missive-identity-submission-capability.patch \
+             missive-ato-identity.patch; do
+  if ! ( cd "${patch_check}" && patch -p1 --forward < "${here}/${patch}" >/dev/null 2>&1 ); then
+    echo "error: ${patch} does not apply cleanly on top of the earlier patches in ${missive_src}." >&2
     echo "       Use a clean checkout at 7716106b6c4638426169dac264657437914bbe7f." >&2
     exit 1
   fi
 done
+rm -rf "${patch_check}"
 
 mkdir -p "${missive_src}/ato-patches"
 cp "${here}/missive-nondefault-port.patch" \
    "${here}/missive-identity-submission-capability.patch" \
+   "${here}/missive-ato-identity.patch" \
    "${missive_src}/ato-patches/"
 
 build_image() {

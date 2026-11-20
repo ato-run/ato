@@ -9,7 +9,7 @@ records why each image differs from its upstream.
 | Sample pin (capsule.toml) | Built from |
 |---|---|
 | `ghcr.io/koh0920/stalwart-staging@sha256:25723c49…629b` | `Dockerfile.stalwart` ← `docker.io/stalwartlabs/stalwart@sha256:d898e81b…cdfe` (v0.16.22, linux/amd64) |
-| `ghcr.io/koh0920/govcraft-missive@sha256:3dc89054…bc7c` | `Dockerfile.missive` ← Govcraft/missive commit `7716106b6c4638426169dac264657437914bbe7f` + the two patches here |
+| `ghcr.io/koh0920/govcraft-missive@sha256:3dc89054…bc7c` | `Dockerfile.missive` ← Govcraft/missive commit `7716106b6c4638426169dac264657437914bbe7f` + the patches here |
 
 ## Why the Stalwart image is a thin layer
 
@@ -28,8 +28,8 @@ at the same path, and upstream declares `/etc/stalwart` and `/var/lib/stalwart`.
 
 ## Why the Missive image is patched
 
-Both patches are compatibility fixes for the pinned upstream commit, not
-product changes:
+The first two patches are compatibility fixes for the pinned upstream commit,
+not product changes:
 
 - `missive-nondefault-port.patch` — strips the port from the host used in the
   JMAP redirect allowlist. Without it, `jmap_url = "http://stalwart:8080"`
@@ -41,6 +41,47 @@ product changes:
 The image defines `ENTRYPOINT ["/usr/local/bin/missive"]`; the OCI Adapter uses
 the step's `argv` as the container command, so an image with only CMD would
 make `argv = ["serve", ...]` the executable itself.
+
+## Ato identity header (`missive-ato-identity.patch`)
+
+Ato's app gateway removes client-sent identity headers and adds
+`X-Ato-Account: <the signed-in person's app account>` to every request it
+forwards to an app that opted into identity forwarding (only Ato's gateway can
+reach the app). This third patch, applied after the two compatibility patches,
+lets Missive accept that header: a person signed in to Ato opens their mailbox
+without Missive's login form and without Missive ever holding the person's
+mail password.
+
+It adds an optional `[ato_identity]` section to Missive's config. Without the
+section Missive behaves exactly as before — password login works and the header
+is ignored:
+
+```toml
+[ato_identity]
+account_header = "x-ato-account"
+impersonator = "ato-webmail-broker@example.test"
+impersonator_password_env = "MISSIVE_ATO_IMPERSONATOR_PASSWORD"
+```
+
+With the section present and the environment variable set, a request carrying
+the header is opened through a Stalwart master-user: the JMAP Basic-auth user
+name is `<account>%<impersonator>` and the password is the impersonator's. The
+header value must be 1–255 printable ASCII characters with exactly one `@` and
+no `%` (anything else answers 400), a JMAP connection failure answers 502, and
+the login form is never shown on the header path. If the environment variable is
+unset or empty, the section is ignored with one startup warning.
+
+The impersonator is a dedicated Stalwart principal that holds only the
+`authenticate` and `impersonate` permissions, created for example with enabled
+permissions
+`{"@type":"Replace","enabledPermissions":{"authenticate":true,"impersonate":true}}`.
+The broker password is delivered per Run through the environment variable and is
+never stored in Missive's session.
+
+The image digests in `images.lock` (and the pins in `capsule.toml`) are **not
+yet rebuilt** for this patch: they still name the image built from the two
+compatibility patches, which does not accept the header. Rebuild with
+`build-images.sh`, verify, and update both pins before the sample relies on it.
 
 ## Building
 

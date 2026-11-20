@@ -18,8 +18,10 @@ COPY src ./src
 COPY templates ./templates
 COPY ato-patches/missive-nondefault-port.patch /tmp/missive-nondefault-port.patch
 COPY ato-patches/missive-identity-submission-capability.patch /tmp/missive-identity-submission-capability.patch
+COPY ato-patches/missive-ato-identity.patch /tmp/missive-ato-identity.patch
 RUN patch -p1 < /tmp/missive-nondefault-port.patch \
-    && patch -p1 < /tmp/missive-identity-submission-capability.patch
+    && patch -p1 < /tmp/missive-identity-submission-capability.patch \
+    && patch -p1 < /tmp/missive-ato-identity.patch
 COPY --from=assets /src/static ./static
 RUN cargo build --locked --release
 
@@ -35,4 +37,4 @@ ENTRYPOINT ["/usr/local/bin/missive"]
 CMD ["serve"]
 LABEL org.opencontainers.image.source="https://github.com/Govcraft/missive" \
       org.opencontainers.image.revision="7716106b6c4638426169dac264657437914bbe7f" \
-      run.ato.dev.patch="strip-nondefault-port-from-jmap-redirect-host,identity-get-submission-capability"
+      run.ato.dev.patch="strip-nondefault-port-from-jmap-redirect-host,identity-get-submission-capability,ato-identity-header-impersonation"

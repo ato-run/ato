@@ -1,0 +1,1034 @@
+diff --git a/src/ato_identity.rs b/src/ato_identity.rs
+new file mode 100644
+index 0000000..b189376
+--- /dev/null
++++ b/src/ato_identity.rs
+@@ -0,0 +1,367 @@
++//! Ato identity header support.
++//!
++//! Ato's app gateway removes client-sent identity headers and adds
++//! `X-Ato-Account: <the signed-in person's app account>` to every request it
++//! forwards to an app that opted into identity forwarding (only Ato's gateway
++//! can reach the app). Missive accepts that header so a person who is signed in
++//! to Ato opens their mailbox without Missive's login form.
++//!
++//! The person's mail password is never available on that path. Instead Missive
++//! signs in to the mail server as the target account through a Stalwart
++//! master-user (impersonator) principal that holds only the `authenticate` and
++//! `impersonate` permissions: the JMAP user name is
++//! `<account>%<impersonator>` and the password is the impersonator's own. The
++//! broker password lives only in a process environment variable; it is never
++//! written to the session or to a log.
++//!
++//! This module is opt-in. Without `[ato_identity]` in the config, or when the
++//! impersonator password environment variable is unset or empty, the header is
++//! ignored and Missive behaves exactly as before.
++
++use std::sync::Arc;
++
++use acton_service::prelude::*;
++use axum::http::HeaderName;
++use jmap_client::client::Client;
++use secrecy::{ExposeSecret, SecretString};
++
++use crate::config::AtoIdentityConfig;
++use crate::error::MissiveError;
++use crate::jmap::{self, JmapClientCache, JmapUrl};
++use crate::session::MissiveSession;
++
++/// Longest account value the header may carry.
++const MAX_ACCOUNT_LEN: usize = 255;
++
++/// The resolved `[ato_identity]` section.
++#[derive(Debug, Clone)]
++pub struct AtoIdentity {
++    header: HeaderName,
++    impersonator: String,
++    password: SecretString,
++}
++
++/// Request extension carrying the resolved identity, or none when the feature
++/// is not enabled.
++#[derive(Debug, Clone, Default)]
++pub struct AtoIdentityState(pub Option<Arc<AtoIdentity>>);
++
++/// What the Ato account header means for the current session.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum AccountDecision {
++    /// No header: keep the existing password-session path.
++    Unchanged,
++    /// Same account with a cached client: reuse it.
++    Reuse,
++    /// Connect through the impersonator and replace the session.
++    Connect,
++}
++
++impl AtoIdentity {
++    /// Resolve the configured section against its password environment variable.
++    ///
++    /// Returns `None` when the section is absent or the environment variable is
++    /// unset or empty. In the latter case one warning is logged at startup and
++    /// the service behaves as if the section were absent; no other password is
++    /// ever tried.
++    pub fn from_config(config: Option<&AtoIdentityConfig>) -> Option<Self> {
++        let config = config?;
++        let password = match std::env::var(&config.impersonator_password_env) {
++            Ok(password) if !password.is_empty() => SecretString::from(password),
++            _ => {
++                warn!(
++                    "[ato_identity] the section is configured but {} is unset or empty; the Ato identity header is ignored",
++                    config.impersonator_password_env
++                );
++                return None;
++            }
++        };
++        let header = match HeaderName::from_bytes(config.account_header.as_bytes()) {
++            Ok(header) => header,
++            Err(_) => {
++                warn!(
++                    "[ato_identity] account_header {:?} is not a valid HTTP header name; the Ato identity header is ignored",
++                    config.account_header
++                );
++                return None;
++            }
++        };
++        info!(
++            "[ato_identity] enabled for header {} with impersonator {}",
++            header, config.impersonator
++        );
++        Some(Self {
++            header,
++            impersonator: config.impersonator.clone(),
++            password,
++        })
++    }
++
++    /// The HTTP header carrying the account.
++    pub fn header(&self) -> &HeaderName {
++        &self.header
++    }
++
++    /// The JMAP Basic-auth user name for a Stalwart master-user sign-in.
++    pub fn impersonation_username(&self, account: &str) -> String {
++        format!("{account}%{}", self.impersonator)
++    }
++
++    /// The impersonator's password. Never store or log it.
++    fn password(&self) -> &str {
++        self.password.expose_secret()
++    }
++}
++
++impl AtoIdentityState {
++    /// The account named by `headers`, or `None` when the header is absent or
++    /// identity forwarding is disabled.
++    pub fn account<'a>(
++        &'a self,
++        headers: &HeaderMap,
++    ) -> std::result::Result<Option<(&'a AtoIdentity, String)>, MissiveError> {
++        let Some(identity) = self.0.as_deref() else {
++            return Ok(None);
++        };
++        let Some(value) = headers.get(identity.header()) else {
++            return Ok(None);
++        };
++        let value = value
++            .to_str()
++            .map_err(|_| MissiveError::AtoIdentityHeaderInvalid)?;
++        validate_account(value)?;
++        Ok(Some((identity, value.to_owned())))
++    }
++
++    /// The resolved identity, or `None` when the feature is not enabled.
++    pub fn identity(&self) -> Option<&AtoIdentity> {
++        self.0.as_deref()
++    }
++}
++
++/// Validate the account value carried by the header.
++///
++/// The value must be 1–255 printable ASCII characters (0x21–0x7E), contain
++/// exactly one `@`, and must not contain `%` (which Stalwart uses to encode
++/// master-user impersonation).
++pub fn validate_account(account: &str) -> std::result::Result<(), MissiveError> {
++    let bytes = account.as_bytes();
++    let valid = !bytes.is_empty()
++        && bytes.len() <= MAX_ACCOUNT_LEN
++        && bytes.iter().all(|byte| (0x21..=0x7e).contains(byte))
++        && bytes.iter().filter(|byte| **byte == b'@').count() == 1
++        && !bytes.contains(&b'%');
++    if valid {
++        Ok(())
++    } else {
++        Err(MissiveError::AtoIdentityHeaderInvalid)
++    }
++}
++
++/// Decide what a header value means for a session.
++///
++/// `cached` says whether the client cache already holds a client for the
++/// header's account.
++pub fn decide_account(
++    account: Option<&str>,
++    session_username: Option<&str>,
++    cached: bool,
++) -> AccountDecision {
++    match account {
++        None => AccountDecision::Unchanged,
++        Some(account) if session_username == Some(account) && cached => AccountDecision::Reuse,
++        Some(_) => AccountDecision::Connect,
++    }
++}
++
++/// Make `session` the impersonated session for `account` and return its JMAP
++/// client, connecting through the impersonator when the cache is cold.
++///
++/// The session keeps only the account name: no password (the broker's or the
++/// person's) is stored for a session opened this way.
++pub async fn open_account(
++    identity: &AtoIdentity,
++    cache: &JmapClientCache,
++    jmap_url: &JmapUrl,
++    account: &str,
++    session: &mut TypedSession<MissiveSession>,
++) -> std::result::Result<Arc<Client>, MissiveError> {
++    let previous = session.data().username.clone();
++    let cached = cache.get(account).map(|client| Arc::clone(client.value()));
++    let decision = decide_account(Some(account), previous.as_deref(), cached.is_some());
++    if decision == AccountDecision::Reuse
++        && let Some(client) = cached
++    {
++        return Ok(client);
++    }
++
++    if let Some(previous) = previous.as_deref()
++        && previous != account
++    {
++        cache.remove(previous);
++        let _ = session.clear().await;
++    }
++
++    let username = identity.impersonation_username(account);
++    let client = jmap::create_client(jmap_url, &username, identity.password())
++        .await
++        .map_err(|error| {
++            warn!("[ato_identity] could not open a JMAP session for {account}: {error}");
++            MissiveError::AtoIdentityServerUnavailable
++        })?;
++    let client = Arc::new(client);
++    cache.insert(account.to_owned(), Arc::clone(&client));
++
++    let data = session.data_mut();
++    data.username = Some(account.to_owned());
++    data.password = None;
++    let _ = session.save().await;
++
++    Ok(client)
++}
++
++/// Resolve the account for a server-rendered page.
++///
++/// Returns `Ok(None)` when the request carries no Ato identity header; the
++/// page then keeps using the password session exactly as before.
++pub async fn page_account(
++    identity: &AtoIdentityState,
++    cache: &JmapClientCache,
++    jmap_url: &JmapUrl,
++    headers: &HeaderMap,
++    session: &mut TypedSession<MissiveSession>,
++) -> std::result::Result<Option<String>, MissiveError> {
++    let Some((identity, account)) = identity.account(headers)? else {
++        return Ok(None);
++    };
++    open_account(identity, cache, jmap_url, &account, session).await?;
++    Ok(Some(account))
++}
++
++#[cfg(test)]
++mod tests {
++    #![allow(clippy::unwrap_used)]
++
++    use super::*;
++
++    fn identity(account_header: &str) -> AtoIdentity {
++        AtoIdentity {
++            header: HeaderName::from_bytes(account_header.as_bytes()).unwrap(),
++            impersonator: "ato-webmail-broker@example.test".to_string(),
++            password: SecretString::from("broker-password"),
++        }
++    }
++
++    fn state(account_header: &str) -> AtoIdentityState {
++        AtoIdentityState(Some(Arc::new(identity(account_header))))
++    }
++
++    #[test]
++    fn account_header_accepts_a_normal_address() {
++        assert!(validate_account("alice@example.test").is_ok());
++    }
++
++    #[test]
++    fn account_header_requires_exactly_one_at() {
++        assert!(validate_account("alice.example.test").is_err());
++        assert!(validate_account("alice@@example.test").is_err());
++    }
++
++    #[test]
++    fn account_header_rejects_a_percent() {
++        assert!(validate_account("alice%example.test").is_err());
++        assert!(validate_account("alice@example.test%broker@example.test").is_err());
++    }
++
++    #[test]
++    fn account_header_rejects_non_ascii() {
++        assert!(validate_account("alice@exämple.test").is_err());
++        assert!(validate_account("alïce@example.test").is_err());
++    }
++
++    #[test]
++    fn account_header_rejects_empty_space_and_too_long_values() {
++        assert!(validate_account("").is_err());
++        assert!(validate_account("alice @example.test").is_err());
++        let long = format!(
++            "{}@example.test",
++            "a".repeat(MAX_ACCOUNT_LEN - "@example.test".len())
++        );
++        assert_eq!(long.len(), MAX_ACCOUNT_LEN);
++        assert!(validate_account(&long).is_ok());
++        let too_long = format!("{long}a");
++        assert!(validate_account(&too_long).is_err());
++    }
++
++    #[test]
++    fn absent_header_keeps_the_password_path() {
++        let identity = state("x-ato-account");
++        let headers = HeaderMap::new();
++        assert!(matches!(identity.account(&headers), Ok(None)));
++        assert_eq!(
++            decide_account(None, Some("alice@example.test"), true),
++            AccountDecision::Unchanged
++        );
++    }
++
++    #[test]
++    fn same_account_with_a_cached_client_is_reused() {
++        assert_eq!(
++            decide_account(Some("alice@example.test"), Some("alice@example.test"), true),
++            AccountDecision::Reuse
++        );
++    }
++
++    #[test]
++    fn different_account_replaces_the_session() {
++        assert_eq!(
++            decide_account(Some("bob@example.test"), Some("alice@example.test"), true),
++            AccountDecision::Connect
++        );
++        assert_eq!(
++            decide_account(Some("alice@example.test"), None, false),
++            AccountDecision::Connect
++        );
++        // Same account but a cold cache must connect again: an impersonated
++        // session has no password to rebuild the client from.
++        assert_eq!(
++            decide_account(
++                Some("alice@example.test"),
++                Some("alice@example.test"),
++                false
++            ),
++            AccountDecision::Connect
++        );
++    }
++
++    #[test]
++    fn impersonation_username_is_account_percent_impersonator() {
++        assert_eq!(
++            identity("x-ato-account").impersonation_username("alice@example.test"),
++            "alice@example.test%ato-webmail-broker@example.test"
++        );
++    }
++
++    #[test]
++    fn header_lookup_is_case_insensitive_and_ignores_disabled_state() {
++        let identity = state("x-ato-account");
++        let mut headers = HeaderMap::new();
++        headers.insert("X-Ato-Account", "alice@example.test".parse().unwrap());
++        assert_eq!(
++            identity.account(&headers).unwrap().unwrap().1,
++            "alice@example.test"
++        );
++        assert!(AtoIdentityState(None).account(&headers).unwrap().is_none());
++    }
++
++    #[test]
++    fn invalid_header_value_is_rejected() {
++        let identity = state("x-ato-account");
++        let mut headers = HeaderMap::new();
++        headers.insert("x-ato-account", "not-an-address".parse().unwrap());
++        assert!(matches!(
++            identity.account(&headers),
++            Err(MissiveError::AtoIdentityHeaderInvalid)
++        ));
++    }
++}
+diff --git a/src/config.rs b/src/config.rs
+index bdb4f5c..ceb7a23 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -10,6 +10,10 @@ fn default_ping_interval() -> u32 {
+     60
+ }
+ 
++fn default_account_header() -> String {
++    "x-ato-account".to_string()
++}
++
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct MissiveConfig {
+     pub jmap_url: JmapUrl,
+@@ -17,6 +21,8 @@ pub struct MissiveConfig {
+     pub page_size: usize,
+     #[serde(default)]
+     pub webhook: Option<WebhookConfig>,
++    #[serde(default)]
++    pub ato_identity: Option<AtoIdentityConfig>,
+ }
+ 
+ impl Default for MissiveConfig {
+@@ -25,10 +31,39 @@ impl Default for MissiveConfig {
+             jmap_url: JmapUrl::default(),
+             page_size: default_page_size(),
+             webhook: None,
++            ato_identity: None,
+         }
+     }
+ }
+ 
++/// Optional `[ato_identity]` section.
++///
++/// When it is present (and its password environment variable is set), Missive
++/// accepts Ato's account header and opens the named mailbox through a Stalwart
++/// master-user (impersonator) instead of Missive's own login. When it is
++/// absent, Missive behaves exactly as before.
++#[derive(Debug, Clone, Serialize, Deserialize)]
++pub struct AtoIdentityConfig {
++    /// Request header carrying the signed-in person's app account.
++    #[serde(default = "default_account_header")]
++    pub account_header: String,
++    /// Master-user principal holding only `authenticate` and `impersonate`.
++    pub impersonator: String,
++    /// Environment variable holding the impersonator's password.
++    pub impersonator_password_env: String,
++}
++
++impl AtoIdentityConfig {
++    /// Read `[ato_identity]` straight from a config file.
++    ///
++    /// `main.rs` needs this because figment does not deserialize flattened
++    /// custom fields reliably (the same reason `jmap_url` has a fallback).
++    pub fn from_toml(raw: &str) -> Option<Self> {
++        let table = raw.parse::<toml::Table>().ok()?;
++        table.get("ato_identity")?.clone().try_into().ok()
++    }
++}
++
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct WebhookConfig {
+     pub url: String,
+@@ -96,4 +131,49 @@ mod tests {
+         assert_eq!(url.as_str(), "https://mail.example.com");
+         assert!(!url.is_empty());
+     }
++
++    #[test]
++    fn ato_identity_section_is_optional() {
++        let raw = "jmap_url = \"http://stalwart:8080\"\n";
++        assert!(AtoIdentityConfig::from_toml(raw).is_none());
++    }
++
++    #[test]
++    fn ato_identity_section_is_read_from_the_config_file() {
++        let raw = r#"
++jmap_url = "http://stalwart:8080"
++
++[ato_identity]
++account_header = "x-ato-account"
++impersonator = "ato-webmail-broker@example.test"
++impersonator_password_env = "MISSIVE_ATO_IMPERSONATOR_PASSWORD"
++"#;
++        let config = AtoIdentityConfig::from_toml(raw).unwrap();
++        assert_eq!(config.account_header, "x-ato-account");
++        assert_eq!(
++            config.impersonator,
++            "ato-webmail-broker@example.test"
++        );
++        assert_eq!(
++            config.impersonator_password_env,
++            "MISSIVE_ATO_IMPERSONATOR_PASSWORD"
++        );
++    }
++
++    #[test]
++    fn ato_identity_account_header_defaults_to_x_ato_account() {
++        let raw = r#"
++[ato_identity]
++impersonator = "ato-webmail-broker@example.test"
++impersonator_password_env = "MISSIVE_ATO_IMPERSONATOR_PASSWORD"
++"#;
++        let config = AtoIdentityConfig::from_toml(raw).unwrap();
++        assert_eq!(config.account_header, "x-ato-account");
++    }
++
++    #[test]
++    fn config_without_ato_identity_keeps_the_default() {
++        let config = MissiveConfig::default();
++        assert!(config.ato_identity.is_none());
++    }
+ }
+diff --git a/src/error.rs b/src/error.rs
+index 81b31be..4af4f56 100644
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -56,6 +56,11 @@ pub enum MissiveError {
+     Jmap(JmapErrorKind),
+     AuthFailed,
+     SessionRequired,
++    /// The Ato account header did not carry a usable account.
++    AtoIdentityHeaderInvalid,
++    /// The mail server could not be reached for the account the Ato header
++    /// named. The password form must not be shown in this case.
++    AtoIdentityServerUnavailable,
+     HttpResponse(String),
+ }
+ 
+@@ -65,6 +70,10 @@ impl std::fmt::Display for MissiveError {
+             Self::Jmap(kind) => write!(f, "JMAP error: {kind}"),
+             Self::AuthFailed => write!(f, "Authentication failed: invalid credentials"),
+             Self::SessionRequired => write!(f, "Session required: please log in"),
++            Self::AtoIdentityHeaderInvalid => write!(f, "The Ato account header is invalid"),
++            Self::AtoIdentityServerUnavailable => {
++                write!(f, "The mail server could not be reached for this account")
++            }
+             Self::HttpResponse(msg) => write!(f, "HTTP response error: {msg}"),
+         }
+     }
+@@ -81,24 +90,46 @@ impl From<axum::http::Error> for MissiveError {
+ impl IntoResponse for MissiveError {
+     fn into_response(self) -> Response {
+         error!("MissiveError: {self}");
+-        let (status, message) = match &self {
+-            MissiveError::Jmap(kind) => (StatusCode::BAD_GATEWAY, kind.to_string()),
+-            MissiveError::AuthFailed => {
+-                (StatusCode::UNAUTHORIZED, "Invalid credentials".to_string())
+-            }
+-            MissiveError::SessionRequired => {
+-                return Redirect::to("/login").into_response();
+-            }
+-            MissiveError::HttpResponse(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
+-        };
+-        (
+-            status,
+-            Html(format!("<div class=\"error\">{message}</div>")),
+-        )
+-            .into_response()
++        match &self {
++            // The header path must never fall back to Missive's login form: a
++            // request that names an account answers with a short plain page.
++            MissiveError::AtoIdentityHeaderInvalid => plain_page(
++                StatusCode::BAD_REQUEST,
++                "This request did not carry a valid Ato account.",
++            ),
++            MissiveError::AtoIdentityServerUnavailable => plain_page(
++                StatusCode::BAD_GATEWAY,
++                "The mail server could not be reached for this account.",
++            ),
++            MissiveError::SessionRequired => Redirect::to("/login").into_response(),
++            MissiveError::Jmap(kind) => html_error(StatusCode::BAD_GATEWAY, &kind.to_string()),
++            MissiveError::AuthFailed => html_error(StatusCode::UNAUTHORIZED, "Invalid credentials"),
++            MissiveError::HttpResponse(msg) => html_error(StatusCode::INTERNAL_SERVER_ERROR, msg),
++        }
+     }
+ }
+ 
++fn html_error(status: StatusCode, message: &str) -> Response {
++    (
++        status,
++        Html(format!("<div class=\"error\">{message}</div>")),
++    )
++        .into_response()
++}
++
++/// A minimal page for the Ato identity header failures: no app chrome and no
++/// login form.
++fn plain_page(status: StatusCode, message: &str) -> Response {
++    let title = status.canonical_reason().unwrap_or("Error");
++    (
++        status,
++        Html(format!(
++            "<!doctype html>\n<html lang=\"en\">\n<head><meta charset=\"utf-8\"><title>{title}</title></head>\n<body>\n<p>{message}</p>\n</body>\n</html>\n"
++        )),
++    )
++        .into_response()
++}
++
+ #[cfg(test)]
+ mod tests {
+     #![allow(clippy::unwrap_used)]
+@@ -244,6 +275,12 @@ mod tests {
+         let session = MissiveError::SessionRequired;
+         assert!(session.source().is_none());
+ 
++        let invalid = MissiveError::AtoIdentityHeaderInvalid;
++        assert!(invalid.source().is_none());
++
++        let unavailable = MissiveError::AtoIdentityServerUnavailable;
++        assert!(unavailable.source().is_none());
++
+         let http = MissiveError::HttpResponse("err".to_string());
+         assert!(http.source().is_none());
+     }
+@@ -304,4 +341,24 @@ mod tests {
+         let cloned = err.clone();
+         assert_eq!(err, cloned);
+     }
++
++    #[test]
++    fn into_response_ato_identity_invalid_returns_bad_request() {
++        let response = MissiveError::AtoIdentityHeaderInvalid.into_response();
++        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
++    }
++
++    #[test]
++    fn into_response_ato_identity_unavailable_returns_bad_gateway() {
++        let response = MissiveError::AtoIdentityServerUnavailable.into_response();
++        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
++    }
++
++    #[test]
++    fn display_ato_identity_unavailable_mentions_the_account() {
++        assert_eq!(
++            MissiveError::AtoIdentityServerUnavailable.to_string(),
++            "The mail server could not be reached for this account"
++        );
++    }
+ }
+diff --git a/src/main.rs b/src/main.rs
+index 9706835..0edc480 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -13,6 +13,7 @@ use clap::Parser;
+ use crate::jmap::{JmapUrl, new_client_cache};
+ 
+ mod assets;
++mod ato_identity;
+ mod calendar;
+ pub mod cli;
+ mod config;
+@@ -65,28 +66,43 @@ pub async fn serve(
+         config.service.name, config.custom.jmap_url
+     );
+ 
+-    if config.custom.jmap_url.is_empty() {
++    if config.custom.jmap_url.is_empty() || config.custom.ato_identity.is_none() {
+         // Fallback: figment doesn't properly deserialize #[serde(flatten)] fields.
+-        // Also check inside [service] table in case jmap_url was placed there.
+-        if let Ok(raw) = std::fs::read_to_string("config.toml")
+-            && let Ok(table) = raw.parse::<toml::Table>()
+-        {
+-            let url = table
+-                .get("jmap_url")
+-                .or_else(|| {
+-                    table
+-                        .get("service")
+-                        .and_then(|v| v.as_table())
+-                        .and_then(|t| t.get("jmap_url"))
+-                })
+-                .and_then(|v| v.as_str());
+-            if let Some(url) = url {
+-                config.custom.jmap_url = JmapUrl::from(url);
+-                info!("Loaded jmap_url from config.toml: {url}");
++        // Read the same file again: jmap_url may also sit under [service], and
++        // [ato_identity] may not have reached the custom config.
++        let config_file = config_path
++            .as_ref()
++            .map(|path| path.to_string_lossy().into_owned())
++            .unwrap_or_else(|| "config.toml".to_string());
++        if let Ok(raw) = std::fs::read_to_string(&config_file) {
++            if config.custom.jmap_url.is_empty()
++                && let Ok(table) = raw.parse::<toml::Table>()
++            {
++                let url = table
++                    .get("jmap_url")
++                    .or_else(|| {
++                        table
++                            .get("service")
++                            .and_then(|v| v.as_table())
++                            .and_then(|t| t.get("jmap_url"))
++                    })
++                    .and_then(|v| v.as_str());
++                if let Some(url) = url {
++                    config.custom.jmap_url = JmapUrl::from(url);
++                    info!("Loaded jmap_url from {config_file}: {url}");
++                }
++            }
++            if config.custom.ato_identity.is_none() {
++                config.custom.ato_identity = config::AtoIdentityConfig::from_toml(&raw);
+             }
+         }
+     }
+ 
++    let identity = ato_identity::AtoIdentityState(
++        ato_identity::AtoIdentity::from_config(config.custom.ato_identity.as_ref())
++            .map(Arc::new),
++    );
++
+     if let Err(e) = config.custom.jmap_url.validate() {
+         error!("Invalid JMAP URL in config: {e}");
+         return Err(CliError::ConfigInvalid {
+@@ -112,12 +128,12 @@ pub async fn serve(
+                 .map_err(|e| CliError::ServeFailed {
+                     message: format!("failed to create Redis session layer: {e}"),
+                 })?;
+-            build_routes(client_cache, broadcaster, layer)
++            build_routes(client_cache, broadcaster, layer, identity)
+         }
+         SessionStorage::Memory => {
+             info!("Using in-memory session backend");
+             let layer = create_memory_session_layer(&session_config);
+-            build_routes(client_cache, broadcaster, layer)
++            build_routes(client_cache, broadcaster, layer, identity)
+         }
+     };
+ 
+@@ -165,11 +181,13 @@ fn build_routes<S>(
+     client_cache: jmap::JmapClientCache,
+     broadcaster: Arc<SseBroadcaster>,
+     session_layer: SessionManagerLayer<S>,
++    identity: ato_identity::AtoIdentityState,
+ ) -> VersionedRoutes<MissiveConfig>
+ where
+     SessionManagerLayer<S>: Clone + Send + Sync + 'static,
+     S: tower_sessions_core::session_store::SessionStore + Clone + Send + Sync + 'static,
+ {
++    let api_identity = identity.clone();
+     VersionedApiBuilder::<MissiveConfig>::with_config()
+         .with_base_path("/api")
+         .add_version(ApiVersion::V1, |router| {
+@@ -253,6 +271,7 @@ where
+                 .route("/events", get(routes::events::event_stream))
+                 .layer(Extension(broadcaster))
+                 .layer(Extension(client_cache.clone()))
++                .layer(Extension(api_identity))
+                 .layer(session_layer.clone())
+         })
+         .with_frontend_routes(|router| {
+@@ -268,6 +287,7 @@ where
+                 .route("/contacts", get(routes::pages::contacts))
+                 .route("/static/{*path}", get(assets::serve_embedded))
+                 .layer(Extension(client_cache))
++                .layer(Extension(identity))
+                 .layer(session_layer)
+         })
+         .build_routes()
+diff --git a/src/routes/auth.rs b/src/routes/auth.rs
+index 8d7a3dd..aae6a89 100644
+--- a/src/routes/auth.rs
++++ b/src/routes/auth.rs
+@@ -1,8 +1,9 @@
+ use acton_service::prelude::*;
+-use axum::Extension;
++use axum::extract::{FromRequest, Request};
+ use axum::response::Redirect;
+ use secrecy::SecretString;
+ 
++use crate::ato_identity::AtoIdentityState;
+ use crate::config::MissiveConfig;
+ use crate::jmap::{JmapClientCache, create_client};
+ use crate::session::MissiveSession;
+@@ -22,9 +23,23 @@ struct LoginTemplate {
+ pub async fn login(
+     State(state): State<AppState<MissiveConfig>>,
+     Extension(cache): Extension<JmapClientCache>,
++    Extension(identity): Extension<AtoIdentityState>,
+     mut session: TypedSession<MissiveSession>,
+-    Form(form): Form<LoginForm>,
+-) -> impl IntoResponse {
++    headers: HeaderMap,
++    request: Request,
++) -> Response {
++    match identity.account(&headers) {
++        // Ato is the sign-in: never process the form on that path.
++        Ok(Some(_)) => return Redirect::to("/").into_response(),
++        Ok(None) => {}
++        Err(error) => return error.into_response(),
++    }
++
++    let form = match Form::<LoginForm>::from_request(request, &state).await {
++        Ok(Form(form)) => form,
++        Err(rejection) => return rejection.into_response(),
++    };
++
+     let jmap_url = &state.config().custom.jmap_url;
+     info!(
+         "Login attempt: user={}, jmap_url={}",
+@@ -48,11 +63,24 @@ pub async fn login(
+ 
+ pub async fn logout(
+     Extension(cache): Extension<JmapClientCache>,
+-    session: TypedSession<MissiveSession>,
++    Extension(identity): Extension<AtoIdentityState>,
++    headers: HeaderMap,
++    mut session: TypedSession<MissiveSession>,
+ ) -> impl IntoResponse {
++    let impersonated = match identity.account(&headers) {
++        Ok(account) => account.is_some(),
++        Err(error) => return error.into_response(),
++    };
+     if let Some(username) = &session.data().username {
+         cache.remove(username);
+     }
++    // Ato's sign-out is the real sign-out: clear this browser's Missive session
++    // and send it back to the app root.
++    let _ = session.clear().await;
+     let _ = session.session().flush().await;
+-    Redirect::to("/login")
++    if impersonated {
++        Redirect::to("/").into_response()
++    } else {
++        Redirect::to("/login").into_response()
++    }
+ }
+diff --git a/src/routes/pages.rs b/src/routes/pages.rs
+index 24c3d58..7af39b8 100644
+--- a/src/routes/pages.rs
++++ b/src/routes/pages.rs
+@@ -1,6 +1,10 @@
+ use acton_service::prelude::*;
+ use axum::response::Redirect;
+ 
++use crate::ato_identity::{self, AtoIdentityState};
++use crate::config::MissiveConfig;
++use crate::error::MissiveError;
++use crate::jmap::JmapClientCache;
+ use crate::session::MissiveSession;
+ 
+ #[derive(Template)]
+@@ -33,22 +37,72 @@ struct ContactsTemplate {
+     version: &'static str,
+ }
+ 
+-pub async fn index(session: TypedSession<MissiveSession>) -> impl IntoResponse {
+-    if session.data().username.is_some() {
+-        Redirect::to("/inbox").into_response()
+-    } else {
+-        Redirect::to("/login").into_response()
++/// The account a rendered page belongs to.
++///
++/// When Ato's gateway forwarded the request with the account header, the
++/// mailbox is opened through the impersonator; otherwise the password session
++/// is used exactly as before.
++async fn page_username(
++    state: &AppState<MissiveConfig>,
++    cache: &JmapClientCache,
++    identity: &AtoIdentityState,
++    headers: &HeaderMap,
++    session: &mut TypedSession<MissiveSession>,
++) -> std::result::Result<Option<String>, MissiveError> {
++    if let Some(account) = ato_identity::page_account(
++        identity,
++        cache,
++        &state.config().custom.jmap_url,
++        headers,
++        session,
++    )
++    .await?
++    {
++        return Ok(Some(account));
+     }
++    Ok(session.data().username.clone())
+ }
+ 
+-pub async fn login_page() -> impl IntoResponse {
+-    HtmlTemplate::page(LoginPageTemplate { error: None })
++pub async fn index(
++    State(state): State<AppState<MissiveConfig>>,
++    Extension(cache): Extension<JmapClientCache>,
++    Extension(identity): Extension<AtoIdentityState>,
++    headers: HeaderMap,
++    mut session: TypedSession<MissiveSession>,
++) -> impl IntoResponse {
++    match page_username(&state, &cache, &identity, &headers, &mut session).await {
++        Ok(Some(_)) => Redirect::to("/inbox").into_response(),
++        Ok(None) => Redirect::to("/login").into_response(),
++        Err(error) => error.into_response(),
++    }
++}
++
++pub async fn login_page(
++    Extension(identity): Extension<AtoIdentityState>,
++    headers: HeaderMap,
++) -> impl IntoResponse {
++    match identity.account(&headers) {
++        // Ato already signed the person in: there is no form to fill in.
++        Ok(Some(_)) => Redirect::to("/").into_response(),
++        Ok(None) => HtmlTemplate::page(LoginPageTemplate { error: None }).into_response(),
++        Err(error) => error.into_response(),
++    }
+ }
+ 
+-pub async fn inbox(session: TypedSession<MissiveSession>) -> impl IntoResponse {
+-    match &session.data().username {
++pub async fn inbox(
++    State(state): State<AppState<MissiveConfig>>,
++    Extension(cache): Extension<JmapClientCache>,
++    Extension(identity): Extension<AtoIdentityState>,
++    headers: HeaderMap,
++    mut session: TypedSession<MissiveSession>,
++) -> impl IntoResponse {
++    let username = match page_username(&state, &cache, &identity, &headers, &mut session).await {
++        Ok(username) => username,
++        Err(error) => return error.into_response(),
++    };
++    match username {
+         Some(username) => HtmlTemplate::page(InboxTemplate {
+-            username: username.clone(),
++            username,
+             active_app: "mail".to_string(),
+             version: env!("CARGO_PKG_VERSION"),
+         })
+@@ -57,10 +111,20 @@ pub async fn inbox(session: TypedSession<MissiveSession>) -> impl IntoResponse {
+     }
+ }
+ 
+-pub async fn calendar(session: TypedSession<MissiveSession>) -> impl IntoResponse {
+-    match &session.data().username {
++pub async fn calendar(
++    State(state): State<AppState<MissiveConfig>>,
++    Extension(cache): Extension<JmapClientCache>,
++    Extension(identity): Extension<AtoIdentityState>,
++    headers: HeaderMap,
++    mut session: TypedSession<MissiveSession>,
++) -> impl IntoResponse {
++    let username = match page_username(&state, &cache, &identity, &headers, &mut session).await {
++        Ok(username) => username,
++        Err(error) => return error.into_response(),
++    };
++    match username {
+         Some(username) => HtmlTemplate::page(CalendarTemplate {
+-            username: username.clone(),
++            username,
+             active_app: "calendar".to_string(),
+             version: env!("CARGO_PKG_VERSION"),
+         })
+@@ -69,10 +133,20 @@ pub async fn calendar(session: TypedSession<MissiveSession>) -> impl IntoRespons
+     }
+ }
+ 
+-pub async fn contacts(session: TypedSession<MissiveSession>) -> impl IntoResponse {
+-    match &session.data().username {
++pub async fn contacts(
++    State(state): State<AppState<MissiveConfig>>,
++    Extension(cache): Extension<JmapClientCache>,
++    Extension(identity): Extension<AtoIdentityState>,
++    headers: HeaderMap,
++    mut session: TypedSession<MissiveSession>,
++) -> impl IntoResponse {
++    let username = match page_username(&state, &cache, &identity, &headers, &mut session).await {
++        Ok(username) => username,
++        Err(error) => return error.into_response(),
++    };
++    match username {
+         Some(username) => HtmlTemplate::page(ContactsTemplate {
+-            username: username.clone(),
++            username,
+             active_app: "contacts".to_string(),
+             version: env!("CARGO_PKG_VERSION"),
+         })
+diff --git a/src/session.rs b/src/session.rs
+index 62ccf38..aef753f 100644
+--- a/src/session.rs
++++ b/src/session.rs
+@@ -7,6 +7,7 @@ use axum::extract::FromRequestParts;
+ use jmap_client::client::Client;
+ use secrecy::{ExposeSecret, SecretString};
+ 
++use crate::ato_identity::{self, AtoIdentityState};
+ use crate::config::MissiveConfig;
+ use crate::error::{JmapErrorKind, MissiveError};
+ use crate::jmap::{self, JmapClientCache};
+@@ -56,7 +57,7 @@ impl FromRequestParts<AppState<MissiveConfig>> for AuthenticatedClient {
+         parts: &mut axum::http::request::Parts,
+         state: &AppState<MissiveConfig>,
+     ) -> std::result::Result<Self, Self::Rejection> {
+-        let session = TypedSession::<MissiveSession>::from_request_parts(parts, state)
++        let mut session = TypedSession::<MissiveSession>::from_request_parts(parts, state)
+             .await
+             .map_err(|_| MissiveError::SessionRequired)?;
+ 
+@@ -67,19 +68,54 @@ impl FromRequestParts<AppState<MissiveConfig>> for AuthenticatedClient {
+                     message: "Client cache not available".to_string(),
+                 })
+             })?;
++        let Extension(identity) =
++            Extension::<AtoIdentityState>::from_request_parts(parts, state)
++                .await
++                .map_err(|_| {
++                    MissiveError::Jmap(JmapErrorKind::Unknown {
++                        message: "Ato identity state not available".to_string(),
++                    })
++                })?;
++        let jmap_url = &state.config().custom.jmap_url;
+ 
+-        let (username, password) =
+-            get_credentials(&session).ok_or(MissiveError::SessionRequired)?;
+-        let client = jmap::get_or_create_client(
+-            &cache,
+-            &state.config().custom.jmap_url,
+-            &username,
+-            password.expose_secret(),
+-        )
+-        .await?;
++        // A request forwarded by Ato's gateway names the account (and only that
++        // header can name it). Open the mailbox through the impersonator and
++        // never read a stored password for this path.
++        if let Some((identity, account)) = identity.account(&parts.headers)? {
++            let client =
++                ato_identity::open_account(identity, &cache, jmap_url, &account, &mut session)
++                    .await?;
++            let raw_session = session.session().clone();
++            return Ok(AuthenticatedClient(client, account, raw_session));
++        }
+ 
+-        let raw_session = session.session().clone();
+-
+-        Ok(AuthenticatedClient(client, username, raw_session))
++        // No Ato header: the existing password-session path, unchanged.
++        let credentials = get_credentials(&session);
++        let stored_username = session.data().username.clone();
++        match credentials {
++            Some((username, password)) => {
++                let client = jmap::get_or_create_client(
++                    &cache,
++                    jmap_url,
++                    &username,
++                    password.expose_secret(),
++                )
++                .await?;
++                let raw_session = session.session().clone();
++                Ok(AuthenticatedClient(client, username, raw_session))
++            }
++            // A session opened by the Ato header carries no password. Rebuild
++            // its client through the impersonator when the cache misses; never
++            // try to read a stored password for it.
++            None => {
++                let username = stored_username.ok_or(MissiveError::SessionRequired)?;
++                let identity = identity.identity().ok_or(MissiveError::SessionRequired)?;
++                let client =
++                    ato_identity::open_account(identity, &cache, jmap_url, &username, &mut session)
++                        .await?;
++                let raw_session = session.session().clone();
++                Ok(AuthenticatedClient(client, username, raw_session))
++            }
++        }
+     }
+ }
