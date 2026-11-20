@@ -450,6 +450,7 @@ fn inspect_tree(root: &Path, app_links: bool) -> Result<ExtractedArtifact> {
     let mut links = Vec::new();
     let mut entries = 0_u64;
     let mut total_bytes = 0_u64;
+    let mut dmg_limit = super::dmg::DmgSizeLimit::default();
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
         for entry in fs::read_dir(&directory)
@@ -493,10 +494,14 @@ fn inspect_tree(root: &Path, app_links: bool) -> Result<ExtractedArtifact> {
             let mode = built_mode(&metadata);
             let size = metadata.len();
             total_bytes = total_bytes.saturating_add(size);
-            ensure!(
-                total_bytes <= MAX_EXTRACTED_BYTES,
-                "the built tree is larger than {MAX_EXTRACTED_BYTES} bytes"
-            );
+            if app_links {
+                dmg_limit.check(root, total_bytes)?;
+            } else {
+                ensure!(
+                    total_bytes <= MAX_EXTRACTED_BYTES,
+                    "the built tree is larger than {MAX_EXTRACTED_BYTES} bytes"
+                );
+            }
             let relative = path.strip_prefix(root).with_context(|| {
                 format!("the built file {} is outside its root", path.display())
             })?;

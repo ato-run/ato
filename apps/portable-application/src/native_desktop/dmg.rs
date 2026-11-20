@@ -7,6 +7,56 @@ use std::time::{Duration, Instant};
 use super::artifact::{self, ExtractedArtifact, MAX_EXTRACTED_BYTES, MAX_EXTRACTED_ENTRIES};
 use anyhow::{Context, Result, ensure};
 
+const MAX_SIGNED_APP_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Above the ordinary archive bound only one Apple Developer ID-signed app
+/// can be materialized. Check the physical tree independently on cache reads.
+#[derive(Default)]
+pub(super) struct DmgSizeLimit {
+    verified_large_app: bool,
+}
+
+impl DmgSizeLimit {
+    pub(super) fn check(&mut self, root: &Path, bytes: u64) -> Result<()> {
+        ensure!(
+            bytes <= MAX_SIGNED_APP_BYTES,
+            "disk image exceeds the signed app extraction limit of {MAX_SIGNED_APP_BYTES} bytes"
+        );
+        if bytes <= MAX_EXTRACTED_BYTES || self.verified_large_app {
+            return Ok(());
+        }
+        let mut apps = Vec::new();
+        for item in fs::read_dir(root)? {
+            let item = item?;
+            if item.path().extension().is_some_and(|ext| ext == "app") {
+                ensure!(
+                    item.file_type()?.is_dir(),
+                    "disk image app must be a real directory"
+                );
+                apps.push(item.path());
+            }
+        }
+        let [app] = apps.as_slice() else {
+            anyhow::bail!(
+                "a disk image above {MAX_EXTRACTED_BYTES} bytes must contain one signed app"
+            );
+        };
+        let (status, detail) = bounded_command(
+            Command::new("/usr/bin/codesign")
+                .args(["--verify", "--deep", "--strict", "--all-architectures", "-R",
+                    "=anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"])
+                .arg(app),
+            Duration::from_secs(180),
+        )?;
+        ensure!(
+            status.success(),
+            "large app requires a valid Developer ID signature: {detail}"
+        );
+        self.verified_large_app = true;
+        Ok(())
+    }
+}
+
 pub fn extract_file(image: &Path, destination: &Path) -> Result<ExtractedArtifact> {
     #[cfg(not(target_os = "macos"))]
     {
@@ -183,6 +233,7 @@ fn copy_apps(mount: &Path, destination: &Path) -> Result<ExtractedArtifact> {
     let mut links = Vec::new();
     let mut count = 0_u64;
     let mut bytes = 0_u64;
+    let mut size_limit = DmgSizeLimit::default();
     while let Some(path) = pending.pop() {
         count += 1;
         ensure!(
@@ -214,10 +265,7 @@ fn copy_apps(mount: &Path, destination: &Path) -> Result<ExtractedArtifact> {
             bytes = bytes
                 .checked_add(metadata.len())
                 .context("disk image size overflow")?;
-            ensure!(
-                bytes <= MAX_EXTRACTED_BYTES,
-                "disk image exceeds extraction size limit"
-            );
+            size_limit.check(mount, bytes)?;
             let mut copied = fs::File::create_new(&output)?;
             ensure!(
                 std::io::copy(&mut fs::File::open(&path)?, &mut copied)? == metadata.len(),
@@ -246,6 +294,14 @@ fn copy_apps(mount: &Path, destination: &Path) -> Result<ExtractedArtifact> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn large_dmg_budget_requires_one_signed_app_and_keeps_an_absolute_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut limit = DmgSizeLimit::default();
+        assert!(limit.check(dir.path(), MAX_EXTRACTED_BYTES).is_ok());
+        assert!(limit.check(dir.path(), MAX_EXTRACTED_BYTES + 1).is_err());
+        assert!(limit.check(dir.path(), MAX_SIGNED_APP_BYTES + 1).is_err());
+    }
     #[test]
     fn a_stuck_helper_is_terminated_at_its_deadline() {
         let started = Instant::now();
