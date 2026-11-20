@@ -18,6 +18,8 @@ services:
       - api-data:/var/lib/ato-api
       - ./.tmp/trust:/run/ato-ca:ro
     secrets: [validator_token]
+    tmpfs:
+      - /tmp:mode=1777,size=128m
     networks: [control]
     restart: unless-stopped
     read_only: true
@@ -38,6 +40,9 @@ services:
       CAPSULE_VALIDATOR_API_URL: http://localhost:8788
       CAPSULE_VALIDATOR_AGENT_ID: selfhost-validator
       CAPSULE_VALIDATOR_WORK_ROOT: /tmp/validator
+      ATO_TLS_ROOT_DIR: /run/ato-mail-ca
+    volumes:
+      - ./.tmp/mail-ca:/run/ato-mail-ca:ro
     secrets: [validator_token]
     tmpfs:
       - /tmp:mode=1777,size=128m
