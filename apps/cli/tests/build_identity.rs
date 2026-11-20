@@ -109,3 +109,18 @@ fn build_identity_of_this_binary() -> Value {
         .expect("ato version --json runs");
     serde_json::from_slice(&output.stdout).expect("valid JSON")
 }
+
+#[test]
+fn unknown_command_does_not_suggest_internal_reentry() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ato"))
+        .arg("status")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let usage = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        usage.contains("unrecognized subcommand 'status'"),
+        "{usage}"
+    );
+    assert!(!usage.contains("__static-bundle"), "{usage}");
+}

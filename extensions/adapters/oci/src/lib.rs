@@ -73,6 +73,26 @@ impl std::fmt::Display for SpawnCleanupUnconfirmed {
 
 impl std::error::Error for SpawnCleanupUnconfirmed {}
 
+/// A network operation may have completed in Docker after its client stopped,
+/// or removal failed. Keep the owned identity for later reconciliation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkCleanupUnconfirmed {
+    pub network: String,
+    pub cause: String,
+}
+
+impl std::fmt::Display for NetworkCleanupUnconfirmed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}; OCI network {} is not confirmed removed",
+            self.cause, self.network
+        )
+    }
+}
+
+impl std::error::Error for NetworkCleanupUnconfirmed {}
+
 /// Stable code of [`OciVolumeUnauthorized`].
 pub const OCI_VOLUME_UNAUTHORIZED: &str = "oci_volume_unauthorized";
 
@@ -610,7 +630,17 @@ impl DockerOciAdapter {
                     network.forget();
                     Err(anyhow::Error::new(unconfirmed))
                 }
-                Err(error) => Err(error),
+                Err(error) => {
+                    let name = network.name().to_owned();
+                    if let Err(cleanup) = network.remove() {
+                        return Err(NetworkCleanupUnconfirmed {
+                            network: name,
+                            cause: format!("{error:#}; {cleanup:#}"),
+                        }
+                        .into());
+                    }
+                    Err(error)
+                }
             },
         }
     }
@@ -627,13 +657,15 @@ impl DockerOciAdapter {
         {
             let path = runtime_root.join("verified-oci-image.tar");
             fs::write(&path, offline.archive.as_slice()).context("write verified OCI archive")?;
+            // This archive contains exactly one checked manifest, platform,
+            // config and layer closure. Docker reads manifest.json and the
+            // loaded config ID and platform are rechecked before launch.
+            // Older Engines can load this closure without --platform.
             run_checked(
                 &self.docker,
                 [
                     "image",
                     "load",
-                    "--platform",
-                    self.spec.platform.as_str(),
                     "--input",
                     path.to_str().context("OCI archive path is not UTF-8")?,
                 ],
@@ -765,6 +797,9 @@ impl DockerOciAdapter {
                 docker.env(name, value);
             }
         }
+        if let Some(control) = &self.docker.control {
+            control.remaining()?;
+        }
         let launched = docker.args(&argv).output();
         // Docker has consumed the file once `docker run` returns. It may hold
         // runtime Binding values, so it must not become part of a durable Run
@@ -772,6 +807,23 @@ impl DockerOciAdapter {
         let removed_environment = fs::remove_file(&env_file);
         let launched = match launched {
             Ok(launched) => launched,
+            Err(error)
+                if self.docker.control.is_some()
+                    && error.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                // A request can still be in flight in Docker when its client
+                // is killed. An immediate negative lookup is not final.
+                let removal = discard_failed_launch(&self.docker.for_cleanup(), &container_name);
+                return Err(SpawnCleanupUnconfirmed {
+                    launch_error: format!("start OCI container: {error}"),
+                    container: container_name,
+                    networks: Vec::new(),
+                    reason: removal.err().unwrap_or_else(|| {
+                        "Docker may still be processing the timed-out start".into()
+                    }),
+                }
+                .into());
+            }
             Err(error) => {
                 return Err(failed_launch(
                     &self.docker,
@@ -1204,11 +1256,27 @@ impl OciNetwork {
             arguments.extend(["--label".to_owned(), format!("{key}={value}")]);
         }
         arguments.push(name.clone());
-        run_checked(
+        if let Some(control) = &docker.control {
+            control.remaining()?;
+        }
+        let created = run_checked(
             docker,
             arguments.iter().map(String::as_str),
             "create isolated OCI network",
-        )?;
+        );
+        if let Err(error) = created {
+            if docker.control.is_some() && error.downcast_ref::<std::io::Error>().is_some() {
+                // Stopping the client does not cancel a request already
+                // running inside dockerd. An immediate not-found response
+                // would not prove this unique network can never appear.
+                return Err(NetworkCleanupUnconfirmed {
+                    network: name,
+                    cause: format!("{error:#}"),
+                }
+                .into());
+            }
+            return Err(error);
+        }
         Ok(Self {
             docker: docker.clone(),
             name,
@@ -3116,6 +3184,26 @@ mod tests {
         std::fs::write(&fake, script).unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         (dir, DockerClient::ambient(fake))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_timed_out_network_create_preserves_the_uncertain_network_identity() {
+        let (directory, mut docker) = fake_docker(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/call\"\nsleep 10\n",
+        );
+        docker.control = Some(command_control::CommandControl::cleanup(
+            Duration::from_millis(750),
+        ));
+        let error = OciNetwork::create_with(&docker, "attempt", &BTreeMap::new(), "ator", true)
+            .err()
+            .expect("the owner command is bounded");
+        let uncertain = error
+            .downcast_ref::<NetworkCleanupUnconfirmed>()
+            .expect("the Docker-side create may still be in progress");
+        let call = std::fs::read_to_string(directory.path().join("call")).unwrap();
+        assert_eq!(call.lines().last(), Some(uncertain.network.as_str()));
+        assert!(call.lines().any(|arg| arg == "--internal"));
     }
 
     #[cfg(unix)]

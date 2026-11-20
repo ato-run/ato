@@ -593,6 +593,34 @@ fn step_network_token(network: StepNetwork) -> &'static str {
     }
 }
 
+/// A short interactive listing. Keep full, copyable identifiers in every row.
+pub fn render_route_list(candidates: &DerivationCandidates) -> Vec<String> {
+    let mut lines = vec![format!("{:<30} {:<34} DERIVATION", "ROUTE", "HOST STATUS")];
+    for candidate in &candidates.derivations {
+        let route = candidate.route.unwrap_or("Unknown");
+        lines.push(format!(
+            "{route:<30} {:<34} {}",
+            host_verdict(candidate),
+            candidate.derivation_ref
+        ));
+        if let Some(name) = &candidate.display_name {
+            lines.push(format!("  App: {name}"));
+        }
+        if let Some(invalid) = &candidate.invalid {
+            lines.push(format!("  {invalid}"));
+        }
+        if let Some(admission) = &candidate.admission {
+            lines.extend(
+                admission
+                    .reasons
+                    .iter()
+                    .map(|reason| format!("  {}", reason.message)),
+            );
+        }
+    }
+    lines
+}
+
 /// The numbered selection screen, without a prompt.
 ///
 /// Every fact a choice depends on is here: the name the bundle carries, how the
@@ -600,7 +628,7 @@ fn step_network_token(network: StepNetwork) -> &'static str {
 /// would still fetch, and this host's measured verdict with its reasons.
 pub fn render_candidates(candidates: &DerivationCandidates) -> Vec<String> {
     let mut lines = vec![format!(
-        "Capsule {} declares {} derivations. Select one to run:",
+        "Capsule {} declares {} derivations:",
         candidates.bundle_sha256,
         candidates.derivations.len()
     )];
@@ -801,7 +829,7 @@ pub fn selection_required(candidates: &DerivationCandidates) -> anyhow::Error {
         code: ERR_SELECTION_REQUIRED,
         exit_code: EXIT_NEEDS_EXPLICIT_DECISION,
         message: format!(
-            "this portable Capsule declares {} derivations; select one with --derivation <sha256:...>; ato run never selects one implicitly:\n{}\nato run <capsule> --list-derivations prints the same candidates as JSON",
+            "this portable Capsule declares {} derivations; select one with --derivation <sha256:...>; ato run never selects one implicitly:\n{}\nUse `ato run <CAPSULE> --list-derivations` to review the same candidates or add `--json` for machine-readable output",
             candidates.derivations.len(),
             listed.join("\n")
         ),
@@ -885,14 +913,13 @@ mod tests {
         assert_eq!(resolve_choice(&[], None), DerivationChoice::NeedsSelection);
     }
 
-    /// Every declared route appears once, in the bundle's canonical order, and
-    /// two projections of the same bytes are the same document.
+    /// Every declared route appears once, in the bundle's canonical order.
+    /// Admission is a live host observation: another probe may legitimately
+    /// see a changed daemon or connector, without changing bundle identity.
     #[test]
-    fn the_list_document_is_stable_and_in_bundle_order() {
+    fn the_list_document_keeps_bundle_order_and_current_host_admission() {
         let bundle = native_multi();
         let first = candidates(&bundle, "sha256:fixture", Path::new("run")).expect("projected");
-        let second = candidates(&bundle, "sha256:fixture", Path::new("run")).expect("projected");
-        assert_eq!(first, second);
         assert_eq!(first.schema, LIST_SCHEMA);
         assert_eq!(first.bundle_sha256, "sha256:fixture");
         assert_eq!(first.contract_ref, bundle.index.root_contract_ref);
@@ -999,13 +1026,18 @@ mod tests {
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(
             lines[0].starts_with(&format!(
-                "capability derivation_ref={} route=Native Desktop platform=windows/x86_64 connector=none runnable=no state=Unavailable",
-                windows.derivation_ref
+                "capability derivation_ref={} route=Native Desktop platform=windows/x86_64 connector={} runnable=no state=Unavailable",
+                windows.derivation_ref, windows.admission.as_ref().expect("host verdict").connector
             )),
             "{lines:?}"
         );
+        let reason = if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+            "native_windows_containment_unavailable"
+        } else {
+            "native_platform_mismatch"
+        };
         assert!(
-            lines[1].starts_with("capability reason=native_platform_mismatch message="),
+            lines[1].starts_with(&format!("capability reason={reason} message=")),
             "{lines:?}"
         );
         let refusal = capability_unavailable(windows, "fixture.capsule");

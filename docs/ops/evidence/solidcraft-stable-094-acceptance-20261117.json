@@ -1,0 +1,2206 @@
+{
+  "schema": "ato.ops.solidcraft-stable-cli-acceptance/1",
+  "recorded_at": "2026-11-17T12:09:25.921461+00:00",
+  "summary": {
+    "status": "passed",
+    "cli": {
+      "version": "0.9.4",
+      "git_commit": "6b252a89f7d5abaed8b075fb6d6409f60c5ea3df",
+      "git_dirty": "false",
+      "profile": "release"
+    },
+    "binary_sha256": "sha256:b54a49fe9aa1d1685358b365a2604ac44aa920e66c7434bc8feeac1eb601bdc4",
+    "archive_sha256": "sha256:bfe02a08242d6f06b47b8072a6fe7f47fd7c933b53fb1f500699c2ac8c7783b2",
+    "installer_sha256": "sha256:c98b76bd3a1a61b743cc5d07992a771c6ededd27ba1138c4bb8cd8e38e9dc1d6",
+    "installer_url": "https://stg-app.ato.run/install.sh",
+    "cargo_dist_installer_sha256": "sha256:fd37cdf10afb5e041a4845e4884c5d822d583501567a2d670e249b2493ecb0a7",
+    "cargo_dist_installer_also_passed": true,
+    "bundle_sha256": "sha256:35f940038bc66cec78eb53485738bf029d4ce68d619993a024f8a3a10c10c7e3",
+    "contract_ref": "sha256:34d52388678111292fa890603110c23b47ce51220f452a28c233a2259e174c98",
+    "d1": "sha256:f58cdca4697158f519a9a24d7bc36a7deb00a531b913fce3859deccbb46551e9",
+    "d2": "sha256:382f1474eb77e0c18820f65a4d96edebfeddda6cc6b2b1cb5f4834bb9462406d",
+    "receipt_sha256s": [
+      "sha256:28685636c6d9c14c96872724dbdc9a9f1c9d708882afcd4ddb67d130a4e18033",
+      "sha256:b5522f6b3e464ed172d3a470c06ba70f6fc333362bb4cf265927384eecc9a004",
+      "sha256:6c8253e9ca71c70addd312114e503cedde041a1e459a6d0e383f5506e0ef06ad"
+    ],
+    "cache": {
+      "schema": "ato.solidcraft-cache-acceptance/1",
+      "receipt_sha256": "sha256:6c8253e9ca71c70addd312114e503cedde041a1e459a6d0e383f5506e0ef06ad",
+      "attempt_id": "run-32208-1794917191765740000",
+      "contract_ref": "sha256:34d52388678111292fa890603110c23b47ce51220f452a28c233a2259e174c98",
+      "derivation_ref": "sha256:382f1474eb77e0c18820f65a4d96edebfeddda6cc6b2b1cb5f4834bb9462406d",
+      "build_cache": "hit",
+      "cache_key": "sha256:b728ed78e125495d60c85b56e938cf9933a506bf5b2e02ae52002dcc3cce1212",
+      "artifact_sha256": "sha256:ea5318773913c0521dc21e1fc64aa183d9d3387ad2a771ca11be52714add6f9f",
+      "toolchain": "rust:1.95.0",
+      "build_argv": "cargo build --locked --release -p solidcraft-cli",
+      "cache_manifest": "<isolated-root>/ato-home/cache/native-build/b728ed78e125495d60c85b56e938cf9933a506bf5b2e02ae52002dcc3cce1212/manifest.txt",
+      "staged_entry": "<isolated-root>/ato-home/cache/ato-portable-run-wgbwlL/native-build/staging/.ato-build/target/release/solidcraft-cli",
+      "source_tree_created": false,
+      "build_profile_created": false
+    },
+    "worker_versions": {
+      "api": "63c3f0b9-142c-4496-b5c1-76bb9f46f434",
+      "pwa": "b092255a-1615-47f9-8b55-a2ce77f2aeb5"
+    },
+    "source_build_first_run": true,
+    "process_groups_reaped": true,
+    "run_count_before": 10,
+    "run_count_after": 13,
+    "stable_latest": "v0.9.4",
+    "published_cli_guidance_read": true,
+    "production_installer_unchanged": true,
+    "environment_fresh": true,
+    "work_root": "<isolated-root>"
+  },
+  "release": {
+    "id": 448542442,
+    "tag_name": "v0.9.4",
+    "html_url": "https://github.com/ato-run/ato/releases/tag/v0.9.4",
+    "prerelease": false,
+    "published_at": "2026-11-17T11:34:20Z"
+  },
+  "release_workflow": {
+    "conclusion": "success",
+    "databaseId": 44071971282,
+    "headSha": "6b252a89f7d5abaed8b075fb6d6409f60c5ea3df",
+    "jobs": [
+      {
+        "completedAt": "2026-11-17T11:14:16Z",
+        "conclusion": "success",
+        "databaseId": 134000183495,
+        "name": "plan",
+        "startedAt": "2026-11-17T11:13:52Z",
+        "status": "completed",
+        "steps": [
+          {
+            "completedAt": "2026-11-17T11:13:54Z",
+            "conclusion": "success",
+            "name": "Set up job",
+            "number": 1,
+            "startedAt": "2026-11-17T11:13:53Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:13:57Z",
+            "conclusion": "success",
+            "name": "Run actions/checkout@v6",
+            "number": 2,
+            "startedAt": "2026-11-17T11:13:54Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:13:58Z",
+            "conclusion": "success",
+            "name": "Install dist",
+            "number": 3,
+            "startedAt": "2026-11-17T11:13:57Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:14:00Z",
+            "conclusion": "success",
+            "name": "Cache dist",
+            "number": 4,
+            "startedAt": "2026-11-17T11:13:58Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:14:12Z",
+            "conclusion": "success",
+            "name": "Run dist host --steps=create --tag=v0.9.4 --output-format=json > plan-dist-manifest.json",
+            "number": 5,
+            "startedAt": "2026-11-17T11:14:00Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:14:14Z",
+            "conclusion": "success",
+            "name": "Upload dist-manifest.json",
+            "number": 6,
+            "startedAt": "2026-11-17T11:14:12Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:14:14Z",
+            "conclusion": "success",
+            "name": "Post Run actions/checkout@v6",
+            "number": 12,
+            "startedAt": "2026-11-17T11:14:14Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:14:14Z",
+            "conclusion": "success",
+            "name": "Complete job",
+            "number": 13,
+            "startedAt": "2026-11-17T11:14:14Z",
+            "status": "completed"
+          }
+        ],
+        "url": "https://github.com/ato-run/ato/actions/runs/44071971282/job/134000183495"
+      },
+      {
+        "completedAt": "2026-11-17T11:23:18Z",
+        "conclusion": "success",
+        "databaseId": 134000894030,
+        "name": "build-local-artifacts (aarch64-apple-darwin)",
+        "startedAt": "2026-11-17T11:17:38Z",
+        "status": "completed",
+        "steps": [
+          {
+            "completedAt": "2026-11-17T11:17:39Z",
+            "conclusion": "success",
+            "name": "Set up job",
+            "number": 1,
+            "startedAt": "2026-11-17T11:17:37Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:17:39Z",
+            "conclusion": "success",
+            "name": "enable windows longpaths",
+            "number": 2,
+            "startedAt": "2026-11-17T11:17:39Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:17:43Z",
+            "conclusion": "success",
+            "name": "Run actions/checkout@v6",
+            "number": 3,
+            "startedAt": "2026-11-17T11:17:39Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:17:43Z",
+            "conclusion": "skipped",
+            "name": "Install Rust non-interactively if not already installed",
+            "number": 4,
+            "startedAt": "2026-11-17T11:17:43Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:17:45Z",
+            "conclusion": "success",
+            "name": "Install dist",
+            "number": 5,
+            "startedAt": "2026-11-17T11:17:43Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:17:45Z",
+            "conclusion": "success",
+            "name": "Fetch local artifacts",
+            "number": 6,
+            "startedAt": "2026-11-17T11:17:45Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:17:45Z",
+            "conclusion": "success",
+            "name": "Install dependencies",
+            "number": 7,
+            "startedAt": "2026-11-17T11:17:45Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:23:12Z",
+            "conclusion": "success",
+            "name": "Build artifacts",
+            "number": 8,
+            "startedAt": "2026-11-17T11:17:45Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:23:12Z",
+            "conclusion": "success",
+            "name": "Post-build",
+            "number": 9,
+            "startedAt": "2026-11-17T11:23:12Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:23:13Z",
+            "conclusion": "success",
+            "name": "Upload artifacts",
+            "number": 10,
+            "startedAt": "2026-11-17T11:23:12Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:23:14Z",
+            "conclusion": "success",
+            "name": "Post Run actions/checkout@v6",
+            "number": 20,
+            "startedAt": "2026-11-17T11:23:13Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:23:15Z",
+            "conclusion": "success",
+            "name": "Complete job",
+            "number": 21,
+            "startedAt": "2026-11-17T11:23:14Z",
+            "status": "completed"
+          }
+        ],
+        "url": "https://github.com/ato-run/ato/actions/runs/44071971282/job/134000894030"
+      },
+      {
+        "completedAt": "2026-11-17T11:30:18Z",
+        "conclusion": "success",
+        "databaseId": 134000894089,
+        "name": "build-local-artifacts (x86_64-apple-darwin)",
+        "startedAt": "2026-11-17T11:17:16Z",
+        "status": "completed",
+        "steps": [
+          {
+            "completedAt": "2026-11-17T11:17:19Z",
+            "conclusion": "success",
+            "name": "Set up job",
+            "number": 1,
+            "startedAt": "2026-11-17T11:17:17Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:17:19Z",
+            "conclusion": "success",
+            "name": "enable windows longpaths",
+            "number": 2,
+            "startedAt": "2026-11-17T11:17:19Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:17:27Z",
+            "conclusion": "success",
+            "name": "Run actions/checkout@v6",
+            "number": 3,
+            "startedAt": "2026-11-17T11:17:19Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:17:27Z",
+            "conclusion": "skipped",
+            "name": "Install Rust non-interactively if not already installed",
+            "number": 4,
+            "startedAt": "2026-11-17T11:17:27Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:17:29Z",
+            "conclusion": "success",
+            "name": "Install dist",
+            "number": 5,
+            "startedAt": "2026-11-17T11:17:27Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:17:30Z",
+            "conclusion": "success",
+            "name": "Fetch local artifacts",
+            "number": 6,
+            "startedAt": "2026-11-17T11:17:29Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:17:30Z",
+            "conclusion": "success",
+            "name": "Install dependencies",
+            "number": 7,
+            "startedAt": "2026-11-17T11:17:30Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:30:12Z",
+            "conclusion": "success",
+            "name": "Build artifacts",
+            "number": 8,
+            "startedAt": "2026-11-17T11:17:30Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:30:12Z",
+            "conclusion": "success",
+            "name": "Post-build",
+            "number": 9,
+            "startedAt": "2026-11-17T11:30:12Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:30:14Z",
+            "conclusion": "success",
+            "name": "Upload artifacts",
+            "number": 10,
+            "startedAt": "2026-11-17T11:30:12Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:30:15Z",
+            "conclusion": "success",
+            "name": "Post Run actions/checkout@v6",
+            "number": 20,
+            "startedAt": "2026-11-17T11:30:14Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:30:16Z",
+            "conclusion": "success",
+            "name": "Complete job",
+            "number": 21,
+            "startedAt": "2026-11-17T11:30:15Z",
+            "status": "completed"
+          }
+        ],
+        "url": "https://github.com/ato-run/ato/actions/runs/44071971282/job/134000894089"
+      },
+      {
+        "completedAt": "2026-11-17T11:23:27Z",
+        "conclusion": "success",
+        "databaseId": 134000894105,
+        "name": "build-local-artifacts (x86_64-pc-windows-msvc)",
+        "startedAt": "2026-11-17T11:14:19Z",
+        "status": "completed",
+        "steps": [
+          {
+            "completedAt": "2026-11-17T11:14:22Z",
+            "conclusion": "success",
+            "name": "Set up job",
+            "number": 1,
+            "startedAt": "2026-11-17T11:14:20Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:14:24Z",
+            "conclusion": "success",
+            "name": "enable windows longpaths",
+            "number": 2,
+            "startedAt": "2026-11-17T11:14:22Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:14:38Z",
+            "conclusion": "success",
+            "name": "Run actions/checkout@v6",
+            "number": 3,
+            "startedAt": "2026-11-17T11:14:24Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:14:38Z",
+            "conclusion": "skipped",
+            "name": "Install Rust non-interactively if not already installed",
+            "number": 4,
+            "startedAt": "2026-11-17T11:14:38Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:14:41Z",
+            "conclusion": "success",
+            "name": "Install dist",
+            "number": 5,
+            "startedAt": "2026-11-17T11:14:38Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:14:43Z",
+            "conclusion": "success",
+            "name": "Fetch local artifacts",
+            "number": 6,
+            "startedAt": "2026-11-17T11:14:41Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:14:43Z",
+            "conclusion": "success",
+            "name": "Install dependencies",
+            "number": 7,
+            "startedAt": "2026-11-17T11:14:43Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:23:19Z",
+            "conclusion": "success",
+            "name": "Build artifacts",
+            "number": 8,
+            "startedAt": "2026-11-17T11:14:43Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:23:20Z",
+            "conclusion": "success",
+            "name": "Post-build",
+            "number": 9,
+            "startedAt": "2026-11-17T11:23:19Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:23:23Z",
+            "conclusion": "success",
+            "name": "Upload artifacts",
+            "number": 10,
+            "startedAt": "2026-11-17T11:23:20Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:23:25Z",
+            "conclusion": "success",
+            "name": "Post Run actions/checkout@v6",
+            "number": 20,
+            "startedAt": "2026-11-17T11:23:23Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:23:25Z",
+            "conclusion": "success",
+            "name": "Complete job",
+            "number": 21,
+            "startedAt": "2026-11-17T11:23:25Z",
+            "status": "completed"
+          }
+        ],
+        "url": "https://github.com/ato-run/ato/actions/runs/44071971282/job/134000894105"
+      },
+      {
+        "completedAt": "2026-11-17T11:18:06Z",
+        "conclusion": "success",
+        "databaseId": 134000894234,
+        "name": "build-local-artifacts (x86_64-unknown-linux-gnu)",
+        "startedAt": "2026-11-17T11:14:21Z",
+        "status": "completed",
+        "steps": [
+          {
+            "completedAt": "2026-11-17T11:14:22Z",
+            "conclusion": "success",
+            "name": "Set up job",
+            "number": 1,
+            "startedAt": "2026-11-17T11:14:21Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:14:22Z",
+            "conclusion": "success",
+            "name": "enable windows longpaths",
+            "number": 2,
+            "startedAt": "2026-11-17T11:14:22Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:14:25Z",
+            "conclusion": "success",
+            "name": "Run actions/checkout@v6",
+            "number": 3,
+            "startedAt": "2026-11-17T11:14:22Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:14:25Z",
+            "conclusion": "skipped",
+            "name": "Install Rust non-interactively if not already installed",
+            "number": 4,
+            "startedAt": "2026-11-17T11:14:25Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:14:26Z",
+            "conclusion": "success",
+            "name": "Install dist",
+            "number": 5,
+            "startedAt": "2026-11-17T11:14:25Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:14:26Z",
+            "conclusion": "success",
+            "name": "Fetch local artifacts",
+            "number": 6,
+            "startedAt": "2026-11-17T11:14:26Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:14:26Z",
+            "conclusion": "success",
+            "name": "Install dependencies",
+            "number": 7,
+            "startedAt": "2026-11-17T11:14:26Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:17:58Z",
+            "conclusion": "success",
+            "name": "Build artifacts",
+            "number": 8,
+            "startedAt": "2026-11-17T11:14:26Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:17:58Z",
+            "conclusion": "success",
+            "name": "Post-build",
+            "number": 9,
+            "startedAt": "2026-11-17T11:17:58Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:18:04Z",
+            "conclusion": "success",
+            "name": "Upload artifacts",
+            "number": 10,
+            "startedAt": "2026-11-17T11:17:58Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:18:05Z",
+            "conclusion": "success",
+            "name": "Post Run actions/checkout@v6",
+            "number": 20,
+            "startedAt": "2026-11-17T11:18:04Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:18:05Z",
+            "conclusion": "success",
+            "name": "Complete job",
+            "number": 21,
+            "startedAt": "2026-11-17T11:18:05Z",
+            "status": "completed"
+          }
+        ],
+        "url": "https://github.com/ato-run/ato/actions/runs/44071971282/job/134000894234"
+      },
+      {
+        "completedAt": "2026-11-17T11:17:40Z",
+        "conclusion": "success",
+        "databaseId": 134000894312,
+        "name": "build-local-artifacts (aarch64-unknown-linux-gnu)",
+        "startedAt": "2026-11-17T11:14:21Z",
+        "status": "completed",
+        "steps": [
+          {
+            "completedAt": "2026-11-17T11:14:23Z",
+            "conclusion": "success",
+            "name": "Set up job",
+            "number": 1,
+            "startedAt": "2026-11-17T11:14:22Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:14:23Z",
+            "conclusion": "success",
+            "name": "enable windows longpaths",
+            "number": 2,
+            "startedAt": "2026-11-17T11:14:23Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:14:25Z",
+            "conclusion": "success",
+            "name": "Run actions/checkout@v6",
+            "number": 3,
+            "startedAt": "2026-11-17T11:14:23Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:14:25Z",
+            "conclusion": "skipped",
+            "name": "Install Rust non-interactively if not already installed",
+            "number": 4,
+            "startedAt": "2026-11-17T11:14:25Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:14:26Z",
+            "conclusion": "success",
+            "name": "Install dist",
+            "number": 5,
+            "startedAt": "2026-11-17T11:14:25Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:14:26Z",
+            "conclusion": "success",
+            "name": "Fetch local artifacts",
+            "number": 6,
+            "startedAt": "2026-11-17T11:14:26Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:14:26Z",
+            "conclusion": "success",
+            "name": "Install dependencies",
+            "number": 7,
+            "startedAt": "2026-11-17T11:14:26Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:17:37Z",
+            "conclusion": "success",
+            "name": "Build artifacts",
+            "number": 8,
+            "startedAt": "2026-11-17T11:14:26Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:17:37Z",
+            "conclusion": "success",
+            "name": "Post-build",
+            "number": 9,
+            "startedAt": "2026-11-17T11:17:37Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:17:38Z",
+            "conclusion": "success",
+            "name": "Upload artifacts",
+            "number": 10,
+            "startedAt": "2026-11-17T11:17:37Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:17:38Z",
+            "conclusion": "success",
+            "name": "Post Run actions/checkout@v6",
+            "number": 20,
+            "startedAt": "2026-11-17T11:17:38Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:17:38Z",
+            "conclusion": "success",
+            "name": "Complete job",
+            "number": 21,
+            "startedAt": "2026-11-17T11:17:38Z",
+            "status": "completed"
+          }
+        ],
+        "url": "https://github.com/ato-run/ato/actions/runs/44071971282/job/134000894312"
+      },
+      {
+        "completedAt": "2026-11-17T11:30:55Z",
+        "conclusion": "success",
+        "databaseId": 134009249893,
+        "name": "build-global-artifacts",
+        "startedAt": "2026-11-17T11:30:20Z",
+        "status": "completed",
+        "steps": [
+          {
+            "completedAt": "2026-11-17T11:30:22Z",
+            "conclusion": "success",
+            "name": "Set up job",
+            "number": 1,
+            "startedAt": "2026-11-17T11:30:21Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:30:25Z",
+            "conclusion": "success",
+            "name": "Run actions/checkout@v6",
+            "number": 2,
+            "startedAt": "2026-11-17T11:30:22Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:30:26Z",
+            "conclusion": "success",
+            "name": "Install cached dist",
+            "number": 3,
+            "startedAt": "2026-11-17T11:30:25Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:30:26Z",
+            "conclusion": "success",
+            "name": "Run chmod +x ~/.cargo/bin/dist",
+            "number": 4,
+            "startedAt": "2026-11-17T11:30:26Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:30:33Z",
+            "conclusion": "success",
+            "name": "Fetch local artifacts",
+            "number": 5,
+            "startedAt": "2026-11-17T11:30:26Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:30:50Z",
+            "conclusion": "success",
+            "name": "Run dist build --tag=v0.9.4 --output-format=json \"--artifacts=global\" > dist-manifest.json",
+            "number": 6,
+            "startedAt": "2026-11-17T11:30:33Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:30:52Z",
+            "conclusion": "success",
+            "name": "Upload artifacts",
+            "number": 7,
+            "startedAt": "2026-11-17T11:30:50Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:30:52Z",
+            "conclusion": "success",
+            "name": "Post Run actions/checkout@v6",
+            "number": 14,
+            "startedAt": "2026-11-17T11:30:52Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:30:52Z",
+            "conclusion": "success",
+            "name": "Complete job",
+            "number": 15,
+            "startedAt": "2026-11-17T11:30:52Z",
+            "status": "completed"
+          }
+        ],
+        "url": "https://github.com/ato-run/ato/actions/runs/44071971282/job/134009249893"
+      },
+      {
+        "completedAt": "2026-11-17T11:34:23Z",
+        "conclusion": "success",
+        "databaseId": 134009580278,
+        "name": "host",
+        "startedAt": "2026-11-17T11:30:57Z",
+        "status": "completed",
+        "steps": [
+          {
+            "completedAt": "2026-11-17T11:30:58Z",
+            "conclusion": "success",
+            "name": "Set up job",
+            "number": 1,
+            "startedAt": "2026-11-17T11:30:57Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:31:00Z",
+            "conclusion": "success",
+            "name": "Run actions/checkout@v6",
+            "number": 2,
+            "startedAt": "2026-11-17T11:30:58Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:31:01Z",
+            "conclusion": "success",
+            "name": "Install cached dist",
+            "number": 3,
+            "startedAt": "2026-11-17T11:31:00Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:31:01Z",
+            "conclusion": "success",
+            "name": "Run chmod +x ~/.cargo/bin/dist",
+            "number": 4,
+            "startedAt": "2026-11-17T11:31:01Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:34:02Z",
+            "conclusion": "success",
+            "name": "Fetch artifacts",
+            "number": 5,
+            "startedAt": "2026-11-17T11:31:01Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:34:11Z",
+            "conclusion": "success",
+            "name": "Run dist host --tag=v0.9.4 --steps=upload --steps=release --output-format=json > dist-manifest.json",
+            "number": 6,
+            "startedAt": "2026-11-17T11:34:02Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:34:12Z",
+            "conclusion": "success",
+            "name": "Upload dist-manifest.json",
+            "number": 7,
+            "startedAt": "2026-11-17T11:34:11Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:34:14Z",
+            "conclusion": "success",
+            "name": "Download GitHub Artifacts",
+            "number": 8,
+            "startedAt": "2026-11-17T11:34:12Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:34:14Z",
+            "conclusion": "success",
+            "name": "Cleanup",
+            "number": 9,
+            "startedAt": "2026-11-17T11:34:14Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:34:21Z",
+            "conclusion": "success",
+            "name": "Create GitHub Release",
+            "number": 10,
+            "startedAt": "2026-11-17T11:34:14Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:34:21Z",
+            "conclusion": "success",
+            "name": "Post Run actions/checkout@v6",
+            "number": 20,
+            "startedAt": "2026-11-17T11:34:21Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:34:21Z",
+            "conclusion": "success",
+            "name": "Complete job",
+            "number": 21,
+            "startedAt": "2026-11-17T11:34:21Z",
+            "status": "completed"
+          }
+        ],
+        "url": "https://github.com/ato-run/ato/actions/runs/44071971282/job/134009580278"
+      },
+      {
+        "completedAt": "2026-11-17T11:35:18Z",
+        "conclusion": "success",
+        "databaseId": 134011380333,
+        "name": "publish-homebrew-formula",
+        "startedAt": "2026-11-17T11:34:25Z",
+        "status": "completed",
+        "steps": [
+          {
+            "completedAt": "2026-11-17T11:34:26Z",
+            "conclusion": "success",
+            "name": "Set up job",
+            "number": 1,
+            "startedAt": "2026-11-17T11:34:25Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:34:27Z",
+            "conclusion": "success",
+            "name": "Run actions/checkout@v6",
+            "number": 2,
+            "startedAt": "2026-11-17T11:34:26Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:34:33Z",
+            "conclusion": "success",
+            "name": "Fetch homebrew formulae",
+            "number": 3,
+            "startedAt": "2026-11-17T11:34:27Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:35:17Z",
+            "conclusion": "success",
+            "name": "Commit formula files",
+            "number": 4,
+            "startedAt": "2026-11-17T11:34:33Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:35:17Z",
+            "conclusion": "success",
+            "name": "Post Run actions/checkout@v6",
+            "number": 8,
+            "startedAt": "2026-11-17T11:35:17Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:35:17Z",
+            "conclusion": "success",
+            "name": "Complete job",
+            "number": 9,
+            "startedAt": "2026-11-17T11:35:17Z",
+            "status": "completed"
+          }
+        ],
+        "url": "https://github.com/ato-run/ato/actions/runs/44071971282/job/134011380333"
+      },
+      {
+        "completedAt": "2026-11-17T11:35:26Z",
+        "conclusion": "success",
+        "databaseId": 134011872350,
+        "name": "announce",
+        "startedAt": "2026-11-17T11:35:20Z",
+        "status": "completed",
+        "steps": [
+          {
+            "completedAt": "2026-11-17T11:35:21Z",
+            "conclusion": "success",
+            "name": "Set up job",
+            "number": 1,
+            "startedAt": "2026-11-17T11:35:21Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:35:24Z",
+            "conclusion": "success",
+            "name": "Run actions/checkout@v6",
+            "number": 2,
+            "startedAt": "2026-11-17T11:35:21Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:35:24Z",
+            "conclusion": "success",
+            "name": "Post Run actions/checkout@v6",
+            "number": 4,
+            "startedAt": "2026-11-17T11:35:24Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-11-17T11:35:24Z",
+            "conclusion": "success",
+            "name": "Complete job",
+            "number": 5,
+            "startedAt": "2026-11-17T11:35:24Z",
+            "status": "completed"
+          }
+        ],
+        "url": "https://github.com/ato-run/ato/actions/runs/44071971282/job/134011872350"
+      }
+    ],
+    "status": "completed",
+    "url": "https://github.com/ato-run/ato/actions/runs/44071971282"
+  },
+  "ci_evidence": [
+    {
+      "conclusion": "success",
+      "databaseId": 44067568021,
+      "headSha": "34a7e6577c49d55b1c29798f65fd8b220ab8be8a",
+      "jobs": [
+        {
+          "name": "workspace (ubuntu-24.04)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "workspace (macos-latest)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "relay binaries (rebuilt from source)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "workspace (windows-latest)",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ],
+      "status": "completed",
+      "url": "https://github.com/ato-run/ato/actions/runs/44067568021",
+      "repo": "ato-run/ato",
+      "scope": "feature Rust CI"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 44067568217,
+      "headSha": "34a7e6577c49d55b1c29798f65fd8b220ab8be8a",
+      "jobs": [
+        {
+          "name": "cli (windows-latest)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "cli (ubuntu-latest)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "cli (macos-latest)",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ],
+      "status": "completed",
+      "url": "https://github.com/ato-run/ato/actions/runs/44067568217",
+      "repo": "ato-run/ato",
+      "scope": "feature CLI matrix"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 44070800303,
+      "headSha": "e9ac1284e71837217fdbaac3a1d10af6801cd6f7",
+      "jobs": [
+        {
+          "name": "workspace (windows-latest)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "relay binaries (rebuilt from source)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "workspace (macos-latest)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "workspace (ubuntu-24.04)",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ],
+      "status": "completed",
+      "url": "https://github.com/ato-run/ato/actions/runs/44070800303",
+      "repo": "ato-run/ato",
+      "scope": "stg release PR Rust CI"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 44070800138,
+      "headSha": "e9ac1284e71837217fdbaac3a1d10af6801cd6f7",
+      "jobs": [
+        {
+          "name": "cli (ubuntu-latest)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "cli (windows-latest)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "cli (macos-latest)",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ],
+      "status": "completed",
+      "url": "https://github.com/ato-run/ato/actions/runs/44070800138",
+      "repo": "ato-run/ato",
+      "scope": "stg release PR CLI matrix"
+    },
+    {
+      "conclusion": "",
+      "databaseId": 44069210076,
+      "headSha": "08bf47d7f6a9631299fdee304b1fb134767d4215",
+      "jobs": [
+        {
+          "name": "test",
+          "status": "queued",
+          "conclusion": ""
+        }
+      ],
+      "status": "queued",
+      "url": "https://github.com/ato-run/ato-pwa/actions/runs/44069210076",
+      "repo": "ato-run/ato-pwa",
+      "scope": "Hub UI CI"
+    },
+    {
+      "conclusion": "",
+      "databaseId": 44069209866,
+      "headSha": "08bf47d7f6a9631299fdee304b1fb134767d4215",
+      "jobs": [
+        {
+          "name": "home-seo-e2e",
+          "status": "queued",
+          "conclusion": ""
+        }
+      ],
+      "status": "queued",
+      "url": "https://github.com/ato-run/ato-pwa/actions/runs/44069209866",
+      "repo": "ato-run/ato-pwa",
+      "scope": "Hub UI Home SEO E2E"
+    }
+  ],
+  "prior_installer_harness_attempt": {
+    "root": "<workspace>/.tmp/sc-094r-5ttoh9xm",
+    "result": "harness path assertion failed before native execution",
+    "installers_exit_codes": [
+      0,
+      0
+    ],
+    "cause": "ATO_CLI_INSTALL_DIR is a prefix and appends /bin; harness passed a bin directory",
+    "correction": "pass cargo-dist-home/.local as prefix, then assert .local/bin/ato; restart with entirely new user directories",
+    "staging_lease_released": true
+  },
+  "homebrew_formula": {
+    "content": "class AtoCli < Formula\n  desc \"Ato command line interface for addressable computations\"\n  homepage \"https://ato.run\"\n  version \"0.9.4\"\n  if OS.mac?\n    if Hardware::CPU.arm?\n      url \"https://github.com/ato-run/ato/releases/download/v0.9.4/ato-cli-aarch64-apple-darwin.tar.xz\"\n      sha256 \"bfe02a08242d6f06b47b8072a6fe7f47fd7c933b53fb1f500699c2ac8c7783b2\"\n    end\n    if Hardware::CPU.intel?\n      url \"https://github.com/ato-run/ato/releases/download/v0.9.4/ato-cli-x86_64-apple-darwin.tar.xz\"\n      sha256 \"238ddee6ae574ea4c3dafa6c6ac0909b9f79dc3f6ab6526ad4cac7d5e59a21e9\"\n    end\n  end\n  if OS.linux?\n    if Hardware::CPU.arm?\n      url \"https://github.com/ato-run/ato/releases/download/v0.9.4/ato-cli-aarch64-unknown-linux-gnu.tar.xz\"\n      sha256 \"dec290f51277ce84102acfad13d353e0425b92cbcb18ab562d066231078743b1\"\n    end\n    if Hardware::CPU.intel?\n      url \"https://github.com/ato-run/ato/releases/download/v0.9.4/ato-cli-x86_64-unknown-linux-gnu.tar.xz\"\n      sha256 \"68edb43104e863528b8d56da8d2e74f953b72fb261fc378cd4d83686aa0241b5\"\n    end\n  end\n  license \"MPL-2.0\"\n\n  BINARY_ALIASES = {\n    \"aarch64-apple-darwin\":      {},\n    \"aarch64-unknown-linux-gnu\": {},\n    \"x86_64-apple-darwin\":       {},\n    \"x86_64-pc-windows-gnu\":     {},\n    \"x86_64-unknown-linux-gnu\":  {},\n  }.freeze\n\n  def target_triple\n    cpu = Hardware::CPU.arm? ? \"aarch64\" : \"x86_64\"\n    os = OS.mac? ? \"apple-darwin\" : \"unknown-linux-gnu\"\n\n    \"#{cpu}-#{os}\"\n  end\n\n  def install_binary_aliases!\n    BINARY_ALIASES[target_triple.to_sym].each do |source, dests|\n      dests.each do |dest|\n        bin.install_symlink bin/source.to_s => dest\n      end\n    end\n  end\n\n  def install\n    if OS.mac? && Hardware::CPU.arm?\n      bin.install \"ato\", \"ato-activity-mcp\", \"ato-formation-session-mcp\", \"ato-object-graph-upload\"\n    end\n    if OS.mac? && Hardware::CPU.intel?\n      bin.install \"ato\", \"ato-activity-mcp\", \"ato-formation-session-mcp\", \"ato-object-graph-upload\"\n    end\n    if OS.linux? && Hardware::CPU.arm?\n      bin.install \"ato\", \"ato-activity-mcp\", \"ato-formation-session-mcp\", \"ato-object-graph-upload\"\n    end\n    if OS.linux? && Hardware::CPU.intel?\n      bin.install \"ato\", \"ato-activity-mcp\", \"ato-formation-session-mcp\", \"ato-object-graph-upload\"\n    end\n\n    install_binary_aliases!\n\n    # Homebrew will automatically install these, so we don't need to do that\n    doc_files = Dir[\"README.*\", \"readme.*\", \"LICENSE\", \"LICENSE.*\", \"CHANGELOG.*\"]\n    leftover_contents = Dir[\"*\"] - doc_files\n\n    # Install any leftover files in pkgshare; these are probably config or\n    # sample files.\n    pkgshare.install(*leftover_contents) unless leftover_contents.empty?\n  end\nend\n",
+    "encoding": "utf-8",
+    "sha": "bcbe8d7304114ff13134c11050ea5692c47be166",
+    "display_url": "https://github.com/ato-run/homebrew-ato/blob/main/Formula/ato-cli.rb",
+    "display_title": "ato-cli.rb"
+  },
+  "distribution_assets": [
+    {
+      "name": "source.tar.gz",
+      "size": 31893570,
+      "digest": "sha256:a15756f15a22ed71d8ce671869712d3f15062ac407fd1e3e303aa8d7ff84bf39",
+      "browser_download_url": "https://github.com/ato-run/ato/releases/download/v0.9.4/source.tar.gz"
+    },
+    {
+      "name": "source.tar.gz.sha256",
+      "size": 81,
+      "digest": "sha256:72e04a6b6fe84292906a59eea9d168b8b2d0b15a0b8c09ec819270f3798e192a",
+      "browser_download_url": "https://github.com/ato-run/ato/releases/download/v0.9.4/source.tar.gz.sha256"
+    },
+    {
+      "name": "ato-cli-installer.sh",
+      "size": 54623,
+      "digest": "sha256:fd37cdf10afb5e041a4845e4884c5d822d583501567a2d670e249b2493ecb0a7",
+      "browser_download_url": "https://github.com/ato-run/ato/releases/download/v0.9.4/ato-cli-installer.sh"
+    },
+    {
+      "name": "ato-cli.rb",
+      "size": 2644,
+      "digest": "sha256:81b9dd6fd89a4f3219ba89daff9f33ff253197e4cef8c3328353c9840bb28349",
+      "browser_download_url": "https://github.com/ato-run/ato/releases/download/v0.9.4/ato-cli.rb"
+    },
+    {
+      "name": "sha256.sum",
+      "size": 699,
+      "digest": "sha256:f134825bdda9ce93d6d151453117f742def33a763876157933f2a267be470c4a",
+      "browser_download_url": "https://github.com/ato-run/ato/releases/download/v0.9.4/sha256.sum"
+    },
+    {
+      "name": "ato-cli-aarch64-apple-darwin.tar.xz",
+      "size": 6480476,
+      "digest": "sha256:bfe02a08242d6f06b47b8072a6fe7f47fd7c933b53fb1f500699c2ac8c7783b2",
+      "browser_download_url": "https://github.com/ato-run/ato/releases/download/v0.9.4/ato-cli-aarch64-apple-darwin.tar.xz"
+    },
+    {
+      "name": "ato-cli-aarch64-apple-darwin.tar.xz.sha256",
+      "size": 103,
+      "digest": "sha256:4f9626c250f941437d27f96b2e5f13ae096f4644c75bb1e662bfcb7f2fe24022",
+      "browser_download_url": "https://github.com/ato-run/ato/releases/download/v0.9.4/ato-cli-aarch64-apple-darwin.tar.xz.sha256"
+    },
+    {
+      "name": "ato-cli-aarch64-unknown-linux-gnu.tar.xz",
+      "size": 6261248,
+      "digest": "sha256:dec290f51277ce84102acfad13d353e0425b92cbcb18ab562d066231078743b1",
+      "browser_download_url": "https://github.com/ato-run/ato/releases/download/v0.9.4/ato-cli-aarch64-unknown-linux-gnu.tar.xz"
+    },
+    {
+      "name": "ato-cli-aarch64-unknown-linux-gnu.tar.xz.sha256",
+      "size": 108,
+      "digest": "sha256:e21ac7a83574b17797592f5f733570f08d06df0ffe896a46b8f1e5251e7bfd8f",
+      "browser_download_url": "https://github.com/ato-run/ato/releases/download/v0.9.4/ato-cli-aarch64-unknown-linux-gnu.tar.xz.sha256"
+    },
+    {
+      "name": "ato-cli-x86_64-apple-darwin.tar.xz",
+      "size": 7214232,
+      "digest": "sha256:238ddee6ae574ea4c3dafa6c6ac0909b9f79dc3f6ab6526ad4cac7d5e59a21e9",
+      "browser_download_url": "https://github.com/ato-run/ato/releases/download/v0.9.4/ato-cli-x86_64-apple-darwin.tar.xz"
+    },
+    {
+      "name": "ato-cli-x86_64-apple-darwin.tar.xz.sha256",
+      "size": 102,
+      "digest": "sha256:18ab7e3f6ed3c5c580a83b080b465475fe4673c206ba246356c87b921e032ecf",
+      "browser_download_url": "https://github.com/ato-run/ato/releases/download/v0.9.4/ato-cli-x86_64-apple-darwin.tar.xz.sha256"
+    },
+    {
+      "name": "ato-cli-x86_64-pc-windows-msvc.zip",
+      "size": 11864623,
+      "digest": "sha256:923283352fd7c4d0f9f602c9a878708e94cd33609915b99cf5bffb7d8bb52ead",
+      "browser_download_url": "https://github.com/ato-run/ato/releases/download/v0.9.4/ato-cli-x86_64-pc-windows-msvc.zip"
+    },
+    {
+      "name": "ato-cli-x86_64-pc-windows-msvc.zip.sha256",
+      "size": 102,
+      "digest": "sha256:8eb0153113893f20e42e661f0fa6a8c83fba1be655db400c8cabfae41a4987db",
+      "browser_download_url": "https://github.com/ato-run/ato/releases/download/v0.9.4/ato-cli-x86_64-pc-windows-msvc.zip.sha256"
+    },
+    {
+      "name": "ato-cli-x86_64-pc-windows-msvc.msi",
+      "size": 11833344,
+      "digest": "sha256:011e6943ccdf4d0b14395b9db6968f0c41d8918445feac619210623b4330cd20",
+      "browser_download_url": "https://github.com/ato-run/ato/releases/download/v0.9.4/ato-cli-x86_64-pc-windows-msvc.msi"
+    },
+    {
+      "name": "ato-cli-x86_64-pc-windows-msvc.msi.sha256",
+      "size": 102,
+      "digest": "sha256:d77342d671c38b61822c3838340f84c900422be28aaf0312871b2e947b80403d",
+      "browser_download_url": "https://github.com/ato-run/ato/releases/download/v0.9.4/ato-cli-x86_64-pc-windows-msvc.msi.sha256"
+    },
+    {
+      "name": "ato-cli-x86_64-unknown-linux-gnu.tar.xz",
+      "size": 7050828,
+      "digest": "sha256:68edb43104e863528b8d56da8d2e74f953b72fb261fc378cd4d83686aa0241b5",
+      "browser_download_url": "https://github.com/ato-run/ato/releases/download/v0.9.4/ato-cli-x86_64-unknown-linux-gnu.tar.xz"
+    },
+    {
+      "name": "ato-cli-x86_64-unknown-linux-gnu.tar.xz.sha256",
+      "size": 107,
+      "digest": "sha256:e3f2325a7b75fe48a236e1410bf0aaebb4920cc512c9eba4f4557b5f5460ee44",
+      "browser_download_url": "https://github.com/ato-run/ato/releases/download/v0.9.4/ato-cli-x86_64-unknown-linux-gnu.tar.xz.sha256"
+    }
+  ],
+  "release_manifest": {
+    "schema": "ato.ops.cli-094-release-manifest/1",
+    "status": "stable-release-and-clean-staging-acceptance-passed",
+    "release": {
+      "ato_candidate": "e9ac1284e71837217fdbaac3a1d10af6801cd6f7",
+      "ato_feature": "34a7e6577c49d55b1c29798f65fd8b220ab8be8a",
+      "ato-api": "b7c5caf512c521650bf57a0b5e8d51c883c3c0fe",
+      "ato-pwa": "176f1eeb1b54057e9e692532b2d7277a57e79813",
+      "ato_staging": "e9ac1284e71837217fdbaac3a1d10af6801cd6f7",
+      "ato": "6b252a89f7d5abaed8b075fb6d6409f60c5ea3df",
+      "tag": "v0.9.4"
+    },
+    "contracts": {
+      "capsule": "ato.portable-application/1 (wire v3)",
+      "runtime": "ato.contract-verification-receipt/5",
+      "api_schema": "docs/rfcs/draft/capsule-hub-derivation-info.md at b7c5caf512c521650bf57a0b5e8d51c883c3c0fe"
+    },
+    "migrations": {
+      "required": [
+        "0420_capsule_hub_derivation_info.sql"
+      ],
+      "staging_applied": true,
+      "production_applied": false,
+      "legacy_journal_only_count": 24
+    },
+    "worker_versions": {
+      "api": "63c3f0b9-142c-4496-b5c1-76bb9f46f434",
+      "pwa": "b092255a-1615-47f9-8b55-a2ce77f2aeb5"
+    },
+    "staging_e2e": {
+      "native_candidate": {
+        "status": "passed",
+        "cli": {
+          "version": "0.9.4",
+          "git_commit": "e9ac1284e71837217fdbaac3a1d10af6801cd6f7",
+          "git_dirty": "false",
+          "profile": "debug"
+        },
+        "worker_versions": {
+          "api": "63c3f0b9-142c-4496-b5c1-76bb9f46f434",
+          "pwa": "da61aef8-a6a6-4707-a451-d50fe1f53ee0"
+        },
+        "runs": [
+          {
+            "label": "d1",
+            "seconds": 103.142,
+            "receipt": "<workspace>/.tmp/sc-cand-5z4cc0a8/work/d1-receipt.json"
+          },
+          {
+            "label": "d2-cache",
+            "seconds": 96.162,
+            "receipt": "<workspace>/.tmp/sc-cand-5z4cc0a8/work/d2-cache-receipt.json"
+          }
+        ],
+        "contract_ref": "sha256:34d52388678111292fa890603110c23b47ce51220f452a28c233a2259e174c98",
+        "derivations": [
+          "sha256:f58cdca4697158f519a9a24d7bc36a7deb00a531b913fce3859deccbb46551e9",
+          "sha256:382f1474eb77e0c18820f65a4d96edebfeddda6cc6b2b1cb5f4834bb9462406d"
+        ],
+        "bundle": "sha256:35f940038bc66cec78eb53485738bf029d4ce68d619993a024f8a3a10c10c7e3",
+        "build_cache": "hit",
+        "cache_key": "sha256:b728ed78e125495d60c85b56e938cf9933a506bf5b2e02ae52002dcc3cce1212",
+        "artifact": "sha256:a5fd275fee70d8c62a0823d9cb18291090bc15f6f299c38b44cc724c353ab9be",
+        "environment": "fresh user directories; verified build cache and managed toolchain explicitly copied from prior cold acceptance; no credentials copied",
+        "cold_build": false
+      },
+      "guidance": "CLI owner read/write, stale revision 409, anonymous 401, immutable fields unchanged; public Japanese browser display",
+      "owner_ui": "DOM tests; signed-in browser editing not exercised",
+      "evidence_sha256": {
+        "final-candidate/candidate-acceptance.json": "01fb66de90d2e054d2bdf9cdbc3e02d6986321a5684a4f3ae655922c4d0aab7c",
+        "guidance-acceptance.json": "0bd72c9803c8a5d1df56d81955b8c1c9c0a39c1d1de0d0fbbc9a3395db9486b6",
+        "hub-ui/served-acceptance.json": "5064bc1e9fd89eb948de5dbd85b7dc472bea554dfabf0b302e1e5579f8b92f74",
+        "hub-ui/browser-acceptance.json": "eedfdbae15c84fce6508e40b583da7624be1a255628da86e314bcc2c128fc7df",
+        "migration-reconciliation.json": "7bdabb19c99977d185177dec646d485ebd2785e1e561c98315d84225fc772906",
+        "stable-staging/served-acceptance.json": "dc849524e14845a9ac7eab3411089f84a05d76c66b3ab421a9c9501d0043e93f",
+        "stable-staging/browser-acceptance.json": "58acb9ba8391360894116eb2ce423cf46b135bd96f862f4848b97f651ce0646d",
+        "published-stable-summary.json": "3ab167a0b4e79373c19c343b23dcdecca1e580d89571d009dde103ec0cfa65b3"
+      },
+      "cold_prior": "docs/ops/evidence/solidcraft-staging-094-acceptance-20261117.json",
+      "tested_tree_equals_feature": "34a7e6577c49d55b1c29798f65fd8b220ab8be8a",
+      "hub_panel_browser": {
+        "status": "passed",
+        "desktop": {
+          "detailBottom": 710,
+          "detailScroll": 766,
+          "listBottom": 710,
+          "listScroll": 0,
+          "pageHeight": 766,
+          "pageScroll": 0,
+          "viewport": [
+            1040,
+            766
+          ]
+        },
+        "mobile": {
+          "width": 390,
+          "height": 844,
+          "pageHeight": 844,
+          "detailBottom": 776,
+          "listHiddenOnDetail": true,
+          "listBottomAfterBack": 776,
+          "detailHiddenOnList": true
+        },
+        "selection": [
+          "solidcraft",
+          "hello",
+          "solidcraft"
+        ],
+        "scope": "public signed-out staging UI"
+      },
+      "release_tree_equals_staging": true,
+      "installer_update": "PWA #1037/#1038 pins staging to stable 0.9.4. Served installer, cargo-dist installer, clean D1/cold D2/repeated-D2 acceptance all passed.",
+      "stable_installer_deployment": {
+        "api": "b7c5caf512c521650bf57a0b5e8d51c883c3c0fe",
+        "pwa": "176f1eeb1b54057e9e692532b2d7277a57e79813"
+      },
+      "final_hub_browser": {
+        "status": "passed",
+        "desktop": {
+          "detailBottom": 710,
+          "detailScroll": 376,
+          "listBottom": 710,
+          "listScroll": 0,
+          "pageHeight": 766,
+          "pageScroll": 0,
+          "viewport": [
+            1040,
+            766
+          ]
+        },
+        "mobile": {
+          "detailBottom": 776,
+          "height": 844,
+          "listHiddenOnDetail": true,
+          "pageHeight": 844,
+          "width": 390,
+          "detailHiddenOnList": true,
+          "listBottomAfterBack": 776
+        },
+        "selection": [
+          "solidcraft",
+          "hello",
+          "solidcraft"
+        ],
+        "retainedTitleAndList": true,
+        "detailOnlyLoading": true,
+        "publishHelp": {
+          "detailBottom": 710,
+          "open": true,
+          "pageHeight": 766,
+          "tag": "SUMMARY"
+        },
+        "script": [
+          "https://stg-app.ato.run/assets/main-CcwDAe2k.js",
+          "https://static.cloudflareinsights.com/beacon.min.js/vce701823e78c4301a35b7e07294d87301792088814092"
+        ],
+        "scope": "public signed-out staging UI after stable installer deployment"
+      },
+      "published_stable": {
+        "status": "passed",
+        "cli": {
+          "version": "0.9.4",
+          "git_commit": "6b252a89f7d5abaed8b075fb6d6409f60c5ea3df",
+          "git_dirty": "false",
+          "profile": "release"
+        },
+        "binary_sha256": "sha256:b54a49fe9aa1d1685358b365a2604ac44aa920e66c7434bc8feeac1eb601bdc4",
+        "archive_sha256": "sha256:bfe02a08242d6f06b47b8072a6fe7f47fd7c933b53fb1f500699c2ac8c7783b2",
+        "installer_sha256": "sha256:c98b76bd3a1a61b743cc5d07992a771c6ededd27ba1138c4bb8cd8e38e9dc1d6",
+        "installer_url": "https://stg-app.ato.run/install.sh",
+        "cargo_dist_installer_sha256": "sha256:fd37cdf10afb5e041a4845e4884c5d822d583501567a2d670e249b2493ecb0a7",
+        "cargo_dist_installer_also_passed": true,
+        "bundle_sha256": "sha256:35f940038bc66cec78eb53485738bf029d4ce68d619993a024f8a3a10c10c7e3",
+        "contract_ref": "sha256:34d52388678111292fa890603110c23b47ce51220f452a28c233a2259e174c98",
+        "d1": "sha256:f58cdca4697158f519a9a24d7bc36a7deb00a531b913fce3859deccbb46551e9",
+        "d2": "sha256:382f1474eb77e0c18820f65a4d96edebfeddda6cc6b2b1cb5f4834bb9462406d",
+        "receipt_sha256s": [
+          "sha256:28685636c6d9c14c96872724dbdc9a9f1c9d708882afcd4ddb67d130a4e18033",
+          "sha256:b5522f6b3e464ed172d3a470c06ba70f6fc333362bb4cf265927384eecc9a004",
+          "sha256:6c8253e9ca71c70addd312114e503cedde041a1e459a6d0e383f5506e0ef06ad"
+        ],
+        "cache": {
+          "schema": "ato.solidcraft-cache-acceptance/1",
+          "receipt_sha256": "sha256:6c8253e9ca71c70addd312114e503cedde041a1e459a6d0e383f5506e0ef06ad",
+          "attempt_id": "run-32208-1794917191765740000",
+          "contract_ref": "sha256:34d52388678111292fa890603110c23b47ce51220f452a28c233a2259e174c98",
+          "derivation_ref": "sha256:382f1474eb77e0c18820f65a4d96edebfeddda6cc6b2b1cb5f4834bb9462406d",
+          "build_cache": "hit",
+          "cache_key": "sha256:b728ed78e125495d60c85b56e938cf9933a506bf5b2e02ae52002dcc3cce1212",
+          "artifact_sha256": "sha256:ea5318773913c0521dc21e1fc64aa183d9d3387ad2a771ca11be52714add6f9f",
+          "toolchain": "rust:1.95.0",
+          "build_argv": "cargo build --locked --release -p solidcraft-cli",
+          "cache_manifest": "<isolated-root>/ato-home/cache/native-build/b728ed78e125495d60c85b56e938cf9933a506bf5b2e02ae52002dcc3cce1212/manifest.txt",
+          "staged_entry": "<isolated-root>/ato-home/cache/ato-portable-run-wgbwlL/native-build/staging/.ato-build/target/release/solidcraft-cli",
+          "source_tree_created": false,
+          "build_profile_created": false
+        },
+        "worker_versions": {
+          "api": "63c3f0b9-142c-4496-b5c1-76bb9f46f434",
+          "pwa": "b092255a-1615-47f9-8b55-a2ce77f2aeb5"
+        },
+        "source_build_first_run": true,
+        "process_groups_reaped": true,
+        "run_count_before": 10,
+        "run_count_after": 13,
+        "stable_latest": "v0.9.4",
+        "published_cli_guidance_read": true,
+        "production_installer_unchanged": true,
+        "environment_fresh": true,
+        "work_root": "<isolated-root>"
+      }
+    },
+    "scope": {
+      "stable_cli_publication_authorized": true,
+      "web_api_production_deploy": false,
+      "production_migrations": false
+    },
+    "release_workflow": "https://github.com/ato-run/ato/actions/runs/44071971282"
+  },
+  "fresh_environment": {
+    "environment": {
+      "HOME": "<isolated-root>/home",
+      "ATO_HOME": "<isolated-root>/ato-home",
+      "XDG_CONFIG_HOME": "<isolated-root>/config",
+      "XDG_CACHE_HOME": "<isolated-root>/cache",
+      "CARGO_HOME": "<isolated-root>/cargo",
+      "RUSTUP_HOME": "<isolated-root>/rustup",
+      "TMPDIR": "<isolated-root>/tmp",
+      "PATH": "<isolated-root>/home/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+      "SHELL": "/bin/zsh",
+      "LANG": "en_US.UTF-8",
+      "TERM": "dumb",
+      "ATO_API_URL": "https://staging.api.ato.run"
+    },
+    "empty_directories": {
+      "home": true,
+      "ato-home": true,
+      "config": true,
+      "cache": true,
+      "cargo": true,
+      "rustup": true
+    },
+    "scope": "Fresh user directories on existing M1 host; no credentials or host Rust reused"
+  },
+  "host": {
+    "os_version": "15.8.1",
+    "cpu": "Apple M1",
+    "architecture": "arm64",
+    "developer_tools": "/Applications/Xcode.app/Contents/Developer",
+    "clang": "Apple clang version 17.0.0 (clang-1700.6.4.2)\nTarget: arm64-apple-darwin24.6.0\nThread model: posix\nInstalledDir: /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin"
+  },
+  "installation": {
+    "argv": [
+      "/bin/sh",
+      "<isolated-root>/install.sh",
+      "--cli-only",
+      "--no-modify-path"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 6.471
+  },
+  "cargo_dist_installation": {
+    "argv": [
+      "/bin/sh",
+      "<isolated-root>/cargo-dist-install.sh"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 4.13
+  },
+  "runs": [
+    {
+      "label": "d1",
+      "receipt_sha256": "sha256:28685636c6d9c14c96872724dbdc9a9f1c9d708882afcd4ddb67d130a4e18033",
+      "receipt_path_projection": {
+        "bundle_sha256": "sha256:35f940038bc66cec78eb53485738bf029d4ce68d619993a024f8a3a10c10c7e3",
+        "contract_ref": "sha256:34d52388678111292fa890603110c23b47ce51220f452a28c233a2259e174c98",
+        "derivation_ref": "sha256:f58cdca4697158f519a9a24d7bc36a7deb00a531b913fce3859deccbb46551e9",
+        "execution": {
+          "attempt_id": "run-28120-1794915773072607000",
+          "native": {
+            "artifact_ref": "sha256:0633d662f3b410da90616d6c7e412f6d799693164541abea82c8d53802ad1d0a",
+            "codesign_verify": "valid",
+            "enforced_inbound_ports": [],
+            "enforced_read_only": [
+              "<isolated-root>/ato-home/cache/ato-portable-run-Fhr4Lp/native/artifact",
+              "<isolated-root>/ato-home/cache/ato-portable-run-Fhr4Lp/workspace",
+              "/usr",
+              "/System",
+              "/Library",
+              "/bin",
+              "/sbin",
+              "/opt",
+              "/usr/local",
+              "/private/etc",
+              "/private/var/db",
+              "/dev"
+            ],
+            "enforced_read_write": [
+              "<isolated-root>/ato-home/cache/ato-portable-run-Fhr4Lp/native/runtime"
+            ],
+            "entry": "solidcraft-cli-0.43.0-macos-universal/solidcraft-cli",
+            "gatekeeper": "rejected",
+            "gatekeeper_detail": "<isolated-root>/ato-home/cache/ato-portable-run-Fhr4Lp/native/artifact/solidcraft-cli-0.43.0-macos-universal/solidcraft-cli: rejected (the code is valid but does not seem to be an app)",
+            "local_override": false,
+            "materialized_tree_digest": "sha256:e23b14b8de74be788443a50523235477daae985e53b9927de41bc1a51176f142",
+            "process_group": 28277,
+            "sandbox": "seatbelt",
+            "signature_kind": "developer_id",
+            "signature_policy": "require-valid",
+            "signature_target": "executable",
+            "verified_target": "solidcraft-cli-0.43.0-macos-universal/solidcraft-cli",
+            "window_containment": "not enforced in this increment"
+          },
+          "pid": 28277,
+          "realization": "native_desktop",
+          "request_id": "run-28120-1794915773072607000",
+          "runtime_executable": "<isolated-root>/ato-home/cache/ato-portable-run-Fhr4Lp/native/artifact/solidcraft-cli-0.43.0-macos-universal/solidcraft-cli"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:f4ddb42f81f94c627c79e3434ab55b4f02dd46608f5bbc07883646d1c799523c",
+              "captured_bytes": 3845,
+              "path": "/initialize"
+            },
+            "id": "cli-initialize",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/5",
+        "target": {
+          "kind": "cli-local"
+        }
+      },
+      "result": {
+        "argv": [
+          "<isolated-root>/home/.local/bin/ato",
+          "run",
+          "capsules/ato/solidcraft@sha256:35f940038bc66cec78eb53485738bf029d4ce68d619993a024f8a3a10c10c7e3",
+          "--derivation",
+          "sha256:f58cdca4697158f519a9a24d7bc36a7deb00a531b913fce3859deccbb46551e9",
+          "--accept-permissions",
+          "--no-open",
+          "--verification-receipt",
+          "<isolated-root>/work/d1-receipt.json"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 71.818
+      }
+    },
+    {
+      "label": "d2",
+      "receipt_sha256": "sha256:b5522f6b3e464ed172d3a470c06ba70f6fc333362bb4cf265927384eecc9a004",
+      "receipt_path_projection": {
+        "bundle_sha256": "sha256:35f940038bc66cec78eb53485738bf029d4ce68d619993a024f8a3a10c10c7e3",
+        "contract_ref": "sha256:34d52388678111292fa890603110c23b47ce51220f452a28c233a2259e174c98",
+        "derivation_ref": "sha256:382f1474eb77e0c18820f65a4d96edebfeddda6cc6b2b1cb5f4834bb9462406d",
+        "execution": {
+          "attempt_id": "run-28290-1794915844302930000",
+          "native": {
+            "artifact_ref": "sha256:ea5318773913c0521dc21e1fc64aa183d9d3387ad2a771ca11be52714add6f9f",
+            "codesign_verify": "valid",
+            "enforced_inbound_ports": [],
+            "enforced_read_only": [
+              "<isolated-root>/ato-home/cache/ato-portable-run-pCkJjn/native-build/staging",
+              "<isolated-root>/ato-home/cache/ato-portable-run-pCkJjn/workspace",
+              "/usr",
+              "/System",
+              "/Library",
+              "/bin",
+              "/sbin",
+              "/opt",
+              "/usr/local",
+              "/private/etc",
+              "/private/var/db",
+              "/dev"
+            ],
+            "enforced_read_write": [
+              "<isolated-root>/ato-home/cache/ato-portable-run-pCkJjn/native/runtime"
+            ],
+            "entry": ".ato-build/target/release/solidcraft-cli",
+            "gatekeeper": "rejected",
+            "gatekeeper_detail": "<isolated-root>/ato-home/cache/ato-portable-run-pCkJjn/native-build/staging/.ato-build/target/release/solidcraft-cli: rejected",
+            "local_override": true,
+            "materialized_tree_digest": "sha256:71e5c7dc1df1046a7ca8803d02aa6e8cac1c7616e760344a14b6d38d1c3679b3",
+            "process_group": 32205,
+            "sandbox": "seatbelt",
+            "signature_kind": "adhoc",
+            "signature_policy": "require-valid-or-local-override",
+            "signature_target": "executable",
+            "verified_target": ".ato-build/target/release/solidcraft-cli",
+            "window_containment": "not enforced in this increment"
+          },
+          "pid": 32205,
+          "realization": "native_desktop",
+          "request_id": "run-28290-1794915844302930000",
+          "runtime_executable": "<isolated-root>/ato-home/cache/ato-portable-run-pCkJjn/native-build/staging/.ato-build/target/release/solidcraft-cli"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:92b0a3bbe4bc44e05047c76dd8de9a7aeaac78bd0a8585deeacbee7a8ed43f1a",
+              "captured_bytes": 3845,
+              "path": "/initialize"
+            },
+            "id": "cli-initialize",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/5",
+        "target": {
+          "kind": "cli-local"
+        }
+      },
+      "result": {
+        "argv": [
+          "<isolated-root>/home/.local/bin/ato",
+          "run",
+          "capsules/ato/solidcraft@sha256:35f940038bc66cec78eb53485738bf029d4ce68d619993a024f8a3a10c10c7e3",
+          "--derivation",
+          "sha256:382f1474eb77e0c18820f65a4d96edebfeddda6cc6b2b1cb5f4834bb9462406d",
+          "--accept-permissions",
+          "--no-open",
+          "--allow-native-source-build",
+          "--allow-unsigned-native",
+          "--verification-receipt",
+          "<isolated-root>/work/d2-receipt.json"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 1345.616
+      }
+    },
+    {
+      "label": "d2-second",
+      "receipt_sha256": "sha256:6c8253e9ca71c70addd312114e503cedde041a1e459a6d0e383f5506e0ef06ad",
+      "receipt_path_projection": {
+        "bundle_sha256": "sha256:35f940038bc66cec78eb53485738bf029d4ce68d619993a024f8a3a10c10c7e3",
+        "contract_ref": "sha256:34d52388678111292fa890603110c23b47ce51220f452a28c233a2259e174c98",
+        "derivation_ref": "sha256:382f1474eb77e0c18820f65a4d96edebfeddda6cc6b2b1cb5f4834bb9462406d",
+        "execution": {
+          "attempt_id": "run-32208-1794917191765740000",
+          "native": {
+            "artifact_ref": "sha256:ea5318773913c0521dc21e1fc64aa183d9d3387ad2a771ca11be52714add6f9f",
+            "codesign_verify": "valid",
+            "enforced_inbound_ports": [],
+            "enforced_read_only": [
+              "<isolated-root>/ato-home/cache/ato-portable-run-wgbwlL/native-build/staging",
+              "<isolated-root>/ato-home/cache/ato-portable-run-wgbwlL/workspace",
+              "/usr",
+              "/System",
+              "/Library",
+              "/bin",
+              "/sbin",
+              "/opt",
+              "/usr/local",
+              "/private/etc",
+              "/private/var/db",
+              "/dev"
+            ],
+            "enforced_read_write": [
+              "<isolated-root>/ato-home/cache/ato-portable-run-wgbwlL/native/runtime"
+            ],
+            "entry": ".ato-build/target/release/solidcraft-cli",
+            "gatekeeper": "rejected",
+            "gatekeeper_detail": "<isolated-root>/ato-home/cache/ato-portable-run-wgbwlL/native-build/staging/.ato-build/target/release/solidcraft-cli: rejected",
+            "local_override": true,
+            "materialized_tree_digest": "sha256:71e5c7dc1df1046a7ca8803d02aa6e8cac1c7616e760344a14b6d38d1c3679b3",
+            "process_group": 32371,
+            "sandbox": "seatbelt",
+            "signature_kind": "adhoc",
+            "signature_policy": "require-valid-or-local-override",
+            "signature_target": "executable",
+            "verified_target": ".ato-build/target/release/solidcraft-cli",
+            "window_containment": "not enforced in this increment"
+          },
+          "pid": 32371,
+          "realization": "native_desktop",
+          "request_id": "run-32208-1794917191765740000",
+          "runtime_executable": "<isolated-root>/ato-home/cache/ato-portable-run-wgbwlL/native-build/staging/.ato-build/target/release/solidcraft-cli"
+        },
+        "fully_satisfied": true,
+        "observations": [
+          {
+            "evidence": {
+              "body_sha256": "sha256:7ac0bb1e1557403453767f03480698d0a8fb1b6a85d7cd3afdda919f648474e7",
+              "captured_bytes": 3843,
+              "path": "/initialize"
+            },
+            "id": "cli-initialize",
+            "outcome": "satisfied"
+          }
+        ],
+        "schema": "ato.contract-verification-receipt/5",
+        "target": {
+          "kind": "cli-local"
+        }
+      },
+      "result": {
+        "argv": [
+          "<isolated-root>/home/.local/bin/ato",
+          "run",
+          "capsules/ato/solidcraft@sha256:35f940038bc66cec78eb53485738bf029d4ce68d619993a024f8a3a10c10c7e3",
+          "--derivation",
+          "sha256:382f1474eb77e0c18820f65a4d96edebfeddda6cc6b2b1cb5f4834bb9462406d",
+          "--accept-permissions",
+          "--no-open",
+          "--allow-native-source-build",
+          "--allow-unsigned-native",
+          "--verification-receipt",
+          "<isolated-root>/work/d2-second-receipt.json"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 83.448
+      }
+    }
+  ],
+  "served_pwa": {
+    "source": {
+      "api": "b7c5caf512c521650bf57a0b5e8d51c883c3c0fe",
+      "pwa": "176f1eeb1b54057e9e692532b2d7277a57e79813"
+    },
+    "worker_versions": {
+      "api": "63c3f0b9-142c-4496-b5c1-76bb9f46f434",
+      "pwa": "b092255a-1615-47f9-8b55-a2ce77f2aeb5"
+    },
+    "api_origin": "https://staging.api.ato.run",
+    "assets": {
+      "/assets/main-BOtYRxC8.css": "05156ed88b6c94a4067ec17faca98c13d934601474aa089121ec87033a65c12f",
+      "/assets/main-CcwDAe2k.js": "f15003b50884cb1b9361524a140f7d9bc9be4cdb0be4b88a244977cc0489e89a",
+      "/assets/SignedOutLanding-C9saYPiQ.js": "d2eb201593188ccfae87ae4ebe3ef2c13b9c555e869959a297766f8f9ddf2706",
+      "/assets/bot-CVbnTvSc.js": "aea0639e90f620606a1de82d885723343d79647bbf7d5c53cc05afb661af3b3b",
+      "/assets/iframeSandbox-bx2qbUzV.js": "18c64d6bf3b5d3fb90590aa822157516f3b9012a21555c95f1c5db9c0bc4d745",
+      "/assets/AppDetailsModal-DrlahmN5.js": "8bf0ea8c93dfc6591e8bd0ba398244b6acc9c0202557df136fbea17a82470513",
+      "/assets/IconCropDialog-CDGST3a7.js": "e0001119da83a70dc3a59a3d415cb29481d0ed89f80aeab95a51898f79b5c951",
+      "/assets/iconPipeline-BxVvy_9W.js": "48de3d47431db6dbe499b6a98a61712cb522f8b5500197ca8b36aab8e6166797",
+      "/assets/McpPermissionEditor-655D6lGq.js": "d13cac78a31c149d6b99f72c8a4b5db77550e342d038f2db463209dcf7ef94ef",
+      "/assets/check-CuBNuBWk.js": "04bfb67ad76c506c8692ae3964c96ba2c413e5aa455a1b84c171880c8b192ba0",
+      "/assets/managementOAuthClient-BFFOZl3-.js": "708353602d210aa342d1e1631116e93b9f3724520ddff7a19d8c1f13939cfd12",
+      "/assets/mcpPermissionsClient-C0iRPhTg.js": "9c8173d0e5cd973e5090648df0e761c93553ee3d6b2122a916e36c7d8aad773b",
+      "/assets/cloudCheckout-BSpHCCOl.js": "80f7c09584bab60ec2e5df3fdce8def4bf7c77de7b107d5ec762d150cd15a418",
+      "/assets/SessionConsole-DybAobG4.js": "b25db7a8bfe8a57b6d24915544309a32b511184c9c9a48850191b594252ddc4e",
+      "/assets/pencil-DIHh8IcO.js": "a1e2f024fc0f23c6f716eac86839294070c25efea09302e9bb62ef7205e393ca",
+      "/assets/storageClient-xrjxiJ7y.js": "bc9f45b40f186c89e3cd9207669c55803206ae9a30921a5ee15141be2ea472ac",
+      "/assets/McpPermissionsPage-g351J1ff.js": "37ab61fe2dba6256c84bdad1633e6cb3e65e291c5d2a9e1f1e90313cd5196333",
+      "/assets/useUnsavedSettings-igG_Oxfu.js": "d5acb8a1ced9ba40d29a9e3a6f39a50bf16cfb50cec92a7133034161a6210f34",
+      "/assets/upload-Cd0RZj1l.js": "685d44ed8ce1fd8e5deff2f0bb8efc8ebb6a390f7de90bafa575f7b9b4363d64",
+      "/assets/jsxArtifactUpload-B3JZGJfP.js": "6e9ec6d57942ffda8113cca86b4c07525ae69048668d933fcefe6f8e3bee9393",
+      "/assets/personalAppUpload-Bw34uZWA.js": "dd51baa9d9ad5e02422f259f39971d92de0540478f95731974523bd8154e17b6",
+      "/assets/copy-VePUIaFO.js": "5b3085e5664000232695469b03def8dfa30ce95d66b72345d79066816796223e",
+      "/assets/ShareFlow-Cc0VrcdR.js": "9399a9437c504970e4eb5149f79dfb449afd26d4c1508d37735297e6a492d30a",
+      "/assets/shareClient-CK-Jdkvw.js": "0c74c80848d547287f7ab0a14d232d222c9e17aa7e72bf74581fdbdc55f141f4",
+      "/assets/download-B3kPEaFr.js": "091d2a562563ce33566dbb1a86d1f15df9cc9214463771dc1a4bcadd5b09cd88",
+      "/assets/dataResourcesClient-BZcN3V0C.js": "e127373d9acfad928befa3e108ae862ff090e6186cb7ade6232c297fc69c488f",
+      "/assets/CapsuleHubPage-BDr22I8u.js": "61d1665cab90d731eebf693971bd80b7547767e992aa536e00058233e6d8e281",
+      "/assets/internalLink-Pcw3_1--.js": "4b502651614a80576a2c7841fa13e2747df50d4ef11bbd36a1352f32a97dec0e",
+      "/assets/InviteLandingPage-CEOTtNHa.js": "dac074caf5ec43d8b470c305f04b937dfb1c98f7712d47a58bb796d8da8ed8eb",
+      "/assets/AppReadyRoute--07R7cx9.js": "fff64ad46da74c31b6d5338fab55c9fc316891c91fb665727ccfa0f0b066a53f",
+      "/assets/CreateAppPage-Dej7AlaN.js": "6d9a89d9a524017ce0a66e4e1da47452cfce0ec3b13f7ba6d808f06382c44473",
+      "/assets/SourceArchiveAdmission-C9s2dyCX.js": "8d10046207d822659fcda6e6c1abc02d0e3ce8da83e8e7d19ae0f8c40ff8682d",
+      "/assets/CreatorPage-BOwNji3q.js": "45c803bbb821a27743b8b8dfec78e74ce6c8147ed9aba35f8a4d5e7326b83db4",
+      "/assets/HomeSplitView-C4t3UO0S.js": "f87bda5d15e7c4c9f6a4b33f0520b68fb612c0d391f197e2ee42a0a2cd3587e0",
+      "/assets/RunnersList-mwLZu03f.js": "3bbdd45f0a759556c54ba84019e6c083e32cf536db017932d438e36014abf0e1",
+      "/assets/SettingsSectionPage-D3b87m-g.js": "73653d089fb1857c49baeedcb2daa85101746464a8d975b196781321c2a98dcb",
+      "/assets/usePasskeyRegistration-QLQXWjTf.js": "f8cb7572c663b5c99291890aefbff74407c137076d9f72dbf65a176924389778",
+      "/assets/passkey-DjF1aW6y.js": "570e0f2b99d132542283f16d7113ff6719c046c7e5a19b628579f927aacfeed0",
+      "/assets/accountAuthClient-RrP0b3RL.js": "235b38cef67345ad950a56af22eec4be2c45351bbf9214db13f2183b3ac5666e",
+      "/assets/storage-ClAjpTCj.js": "e18374f3f62356c8fafbbab80c8fdb484d6f30a87a06a8c3154359e90d63ae0b",
+      "/assets/SettingsIndex-DfEpVDJl.js": "cbb008b5dc25d64e0f8513c2a43e8cd5398805dbf6d98e472a8341d20052dd27",
+      "/assets/usePasskeySignIn-BGMQQI2h.js": "0dd4c8ebc9e143fcb950a3b06c64be45483b824f4ce7fb5a1599d17b7e2a8653",
+      "/assets/DesktopLanding-BFBbRbFM.js": "942e4e2c486ecce46ecbc44bf004028199778aa01a99a6b92a96f8dab9072d71",
+      "/assets/SettingsBillingReturn-DDLiZ9Rj.js": "19868db96eb3f940c48de7cef51f6cd5390c8bbb8b912dee4bdd74e1cefe3c27",
+      "/assets/billingNavigation-KbRi3z3-.js": "caf7aaf82675b7845b94fe09ec14077805924c01c8531c3ade2547f7c9da6ad8",
+      "/assets/FormationInputPage-YfD3Qrlx.js": "d33888940174e4ec2b236d7c8497be71a8b9fe0257a61e756f2b3adb9cf1cf64",
+      "/assets/CreditsPage-C4zm-AJY.js": "21f9fd7e5af2eb973f7f6bb7545223043d8cdaf4a5bba329e6aaccd23023e292",
+      "/assets/monetization-B_OYB0iR.js": "a2b5d6872928d807c59d672801259b974a927fe70933f14262cf75890910fed3",
+      "/assets/PricingPage-Pxme3s_w.js": "75ae1c3d81044bd12c698b2184670849815a44500bb6a13f534d0a2db146573e",
+      "/assets/SettingsPlans-IQum4uG_.js": "c9d8ec26d0e9360712b6b0744fc83fbb9ea5ea89f48ac616d4eebf89c7e5a35f",
+      "/assets/LaunchReturnRoute-CDIQv_Pv.js": "d11b8884dcf45b17d45c31ae852d5e8c5e46652d033a5452777549199ac97989",
+      "/assets/DeveloperProfilePage-CwhDWUVm.js": "59a2601f0f85834964de2f19da7dd6fa41bc522c9d65a976a75595f876ba9100",
+      "/assets/PreviewPlayer-06CZY0cx.js": "70e2fb1b9a8bed3280035bc6c67430331487addf6a5b487fca3c88074cbd5f23",
+      "/assets/SessionSurfaceRenderer-C2qKrtPU.js": "22a51ece47dacf7ae1a3dcc16ad996680cd0e8b0de3f3b4c743405da0ccf28f2",
+      "/assets/addon-fit-YJmn1quW.js": "97ce1c93066e91f0f0a8c6e206f21b1c4acf81e19136ca7c8369d504000b05df",
+      "/assets/xterm-BqvuqXEL.js": "9d65c0bf794a9ee57f9bd17a3afb1f45d3de1f6925f962d3130586ba96179620",
+      "/assets/rfb-BQNh04iy.js": "caf70c58f50d77327bed52e3a79b5036b5b163dad126b2c207264a747a8f00ef",
+      "/assets/CapsuleStage-C7gLJUAn.js": "b83c795bb9bd45b5c7000f57e8bc5653acd9c93500bc7d55787dc9e913ffd510",
+      "/assets/RetainedAppFrames-CjfeVhgg.js": "65b546c9ec3ae8ae3f6f7710cb521886667a58db95ff039bbc1e902144e87624",
+      "/assets/ReportCapsuleModal-B5dTlFS1.js": "132777f12d67bc4a407e812ece92cab76d67e9faa0946fa6f725b120292023ea",
+      "/assets/NativeInstanceSurface-BD1MCvZX.js": "7ffa3ca7530f22b37e0a68d8df09b778bf2f12d88dbed61b329be31964f3c664",
+      "/assets/AccountSignIn-B30kC8te.js": "7bc1980eef54bcd39c7af4c3fcaa5cc96a38ae6546f6fe2ff1bb671a6b44b958",
+      "/assets/ManagementOAuthConsent-DzLNQkXn.js": "f9001cb24b35877bf6b52495df2582697bd8ada91351e63cfd3b96b4106db69e",
+      "/assets/InstanceOperationConsent-Blo5hFg9.js": "bd07e2ad819925ae15317fe2341cab9e8ac74412e7bbf8cdada5d3681fcf5f5e",
+      "/assets/InstanceAccessConsent-ruLV7LkM.js": "d27484e0e28d80a7a01c7ae29e7aab393038bcf5aa7638ebf59640911e1c80d6",
+      "/assets/pt-BR-CrBE0sOh.js": "af31233db6eb5c28563c20191566ad079905b4d2e13e360eb94511cd0312375d",
+      "/assets/de-DBRSk4kX.js": "b4c59161fabf2ee0bde41b180a3a392de714cd5e8ce54ec55d7837ec0fbe1cec",
+      "/assets/fr-BIZDrnsR.js": "1ae5b59507add6ae66c623ad091d1995fb0e206263ff046ba018c5a9d822882a",
+      "/assets/es-DuOVnAy1.js": "176daf984193f28f7a4029cfbb085282f1309e8daca3ba10cd13091e62b5e852",
+      "/assets/ko-I1KxV7U7.js": "647851cb7a66d51b02d627db9bbe85403585cd269abf6e08792d8dd768aab98e",
+      "/assets/zh-TW-DGszsDES.js": "e5aa186f0baa882aad3f662ff6deba141d94214f0d3482267bc3f5390a047cd1",
+      "/assets/zh-CN-7Ka4O5V2.js": "bcb78bc46d948cb1ff5a1c56de9f72fa44b99d2be1843ace7d991e9fad3cdc68",
+      "/assets/ja-DvYRb6If.js": "d8cab34329d12c999d6f1af2e93438d4cb687f5c332c3949e2cca1cc0f04e881"
+    },
+    "guidance_assets": [
+      "/assets/CapsuleHubPage-BDr22I8u.js"
+    ],
+    "public_browser_display": "passed: selection retains title/list, detail-only loading, independent scroll, informational help; desktop 1040x766 and mobile 390x844",
+    "browser_evidence": "browser-acceptance.json",
+    "installer_version": "0.9.4",
+    "installers": {
+      "install.sh": "sha256:c98b76bd3a1a61b743cc5d07992a771c6ededd27ba1138c4bb8cd8e38e9dc1d6",
+      "install.ps1": "sha256:291d605667269c007b5feecba04c3acd858a44c14033bf6063e07967bb41867c"
+    }
+  },
+  "hub_browser": {
+    "status": "passed",
+    "desktop": {
+      "detailBottom": 710,
+      "detailScroll": 376,
+      "listBottom": 710,
+      "listScroll": 0,
+      "pageHeight": 766,
+      "pageScroll": 0,
+      "viewport": [
+        1040,
+        766
+      ]
+    },
+    "mobile": {
+      "detailBottom": 776,
+      "height": 844,
+      "listHiddenOnDetail": true,
+      "pageHeight": 844,
+      "width": 390,
+      "detailHiddenOnList": true,
+      "listBottomAfterBack": 776
+    },
+    "selection": [
+      "solidcraft",
+      "hello",
+      "solidcraft"
+    ],
+    "retainedTitleAndList": true,
+    "detailOnlyLoading": true,
+    "publishHelp": {
+      "detailBottom": 710,
+      "open": true,
+      "pageHeight": 766,
+      "tag": "SUMMARY"
+    },
+    "script": [
+      "https://stg-app.ato.run/assets/main-CcwDAe2k.js",
+      "https://static.cloudflareinsights.com/beacon.min.js/vce701823e78c4301a35b7e07294d87301792088814092"
+    ],
+    "scope": "public signed-out staging UI after stable installer deployment"
+  },
+  "prior_hub_browser": {
+    "status": "passed",
+    "desktop": {
+      "detailBottom": 710,
+      "detailScroll": 766,
+      "listBottom": 710,
+      "listScroll": 0,
+      "pageHeight": 766,
+      "pageScroll": 0,
+      "viewport": [
+        1040,
+        766
+      ]
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "pageHeight": 844,
+      "detailBottom": 776,
+      "listHiddenOnDetail": true,
+      "listBottomAfterBack": 776,
+      "detailHiddenOnList": true
+    },
+    "selection": [
+      "solidcraft",
+      "hello",
+      "solidcraft"
+    ],
+    "scope": "public signed-out staging UI"
+  },
+  "guidance_acceptance": {
+    "status": "passed",
+    "api": "https://staging.api.ato.run",
+    "bundle": "sha256:35f940038bc66cec78eb53485738bf029d4ce68d619993a024f8a3a10c10c7e3",
+    "results": [
+      {
+        "label": "d1",
+        "entry": {
+          "derivation_ref": "sha256:f58cdca4697158f519a9a24d7bc36a7deb00a531b913fce3859deccbb46551e9",
+          "digest": "sha256:35f940038bc66cec78eb53485738bf029d4ce68d619993a024f8a3a10c10c7e3",
+          "info": {
+            "dependencies": [
+              {
+                "name": "macOS（Apple Silicon）",
+                "provisioning": "host",
+                "purpose": "run",
+                "version": null
+              },
+              {
+                "name": "SolidCraftの公開済み成果物",
+                "provisioning": "download",
+                "purpose": "run",
+                "version": null
+              }
+            ],
+            "estimate_environment": "Apple M1 / macOS 15.8.1。CLI 0.9.4-stgのクリーン環境で初回142秒を計測。",
+            "estimated_cached_run_seconds": null,
+            "estimated_first_run_seconds": 150,
+            "label": "公開済みバイナリを取得",
+            "notes": "初回は成果物をダウンロードします。ネットワーク速度で所要時間が変わります。D1のキャッシュ利用時の時間は未計測です。"
+          },
+          "revision": 1,
+          "source": "publisher",
+          "updated_at": "2026-11-17 10:15:07"
+        },
+        "stale_rejected": true,
+        "anonymous_write_rejected": true
+      },
+      {
+        "label": "d2",
+        "entry": {
+          "derivation_ref": "sha256:382f1474eb77e0c18820f65a4d96edebfeddda6cc6b2b1cb5f4834bb9462406d",
+          "digest": "sha256:35f940038bc66cec78eb53485738bf029d4ce68d619993a024f8a3a10c10c7e3",
+          "info": {
+            "dependencies": [
+              {
+                "name": "macOS（Apple Silicon）",
+                "provisioning": "host",
+                "purpose": "both",
+                "version": null
+              },
+              {
+                "name": "Apple Command Line Tools",
+                "provisioning": "host",
+                "purpose": "build",
+                "version": null
+              },
+              {
+                "name": "Rust toolchain",
+                "provisioning": "managed",
+                "purpose": "build",
+                "version": "1.95.0"
+              },
+              {
+                "name": "Cargo.lockで固定されたcrate",
+                "provisioning": "download",
+                "purpose": "build",
+                "version": null
+              },
+              {
+                "name": "SolidCraftソース",
+                "provisioning": "download",
+                "purpose": "build",
+                "version": "8ba46e9e2181396a9b5903b98031399aef61cf26"
+              }
+            ],
+            "estimate_environment": "Apple M1 / macOS 15.8.1。Rust・Cargo・ビルドキャッシュが空の初回は2625秒、2回目は260秒。CLI 0.9.4-stgで計測。",
+            "estimated_cached_run_seconds": 300,
+            "estimated_first_run_seconds": 2700,
+            "label": "ソースからビルド",
+            "notes": "--allow-native-source-build と --allow-unsigned-native を明示します。キャッシュヒット時もソース取得・整合性確認・実行検証が発生します。"
+          },
+          "revision": 1,
+          "source": "publisher",
+          "updated_at": "2026-11-17 10:15:20"
+        },
+        "stale_rejected": true,
+        "anonymous_write_rejected": true
+      }
+    ],
+    "immutable_fields_unchanged": true
+  },
+  "guidance_authoring_cli": {
+    "version": "0.9.4",
+    "git_commit": "17a39818724507f7bc45b7da6316feaead9ece68",
+    "git_dirty": "true",
+    "profile": "debug"
+  },
+  "published_cli_guidance_reads": {
+    "d1": {
+      "derivation_ref": "sha256:f58cdca4697158f519a9a24d7bc36a7deb00a531b913fce3859deccbb46551e9",
+      "digest": "sha256:35f940038bc66cec78eb53485738bf029d4ce68d619993a024f8a3a10c10c7e3",
+      "info": {
+        "dependencies": [
+          {
+            "name": "macOS（Apple Silicon）",
+            "provisioning": "host",
+            "purpose": "run",
+            "version": null
+          },
+          {
+            "name": "SolidCraftの公開済み成果物",
+            "provisioning": "download",
+            "purpose": "run",
+            "version": null
+          }
+        ],
+        "estimate_environment": "Apple M1 / macOS 15.8.1。CLI 0.9.4-stgのクリーン環境で初回142秒を計測。",
+        "estimated_cached_run_seconds": null,
+        "estimated_first_run_seconds": 150,
+        "label": "公開済みバイナリを取得",
+        "notes": "初回は成果物をダウンロードします。ネットワーク速度で所要時間が変わります。D1のキャッシュ利用時の時間は未計測です。"
+      },
+      "revision": 1,
+      "source": "publisher",
+      "updated_at": "2026-11-17 10:15:07"
+    },
+    "d2": {
+      "derivation_ref": "sha256:382f1474eb77e0c18820f65a4d96edebfeddda6cc6b2b1cb5f4834bb9462406d",
+      "digest": "sha256:35f940038bc66cec78eb53485738bf029d4ce68d619993a024f8a3a10c10c7e3",
+      "info": {
+        "dependencies": [
+          {
+            "name": "macOS（Apple Silicon）",
+            "provisioning": "host",
+            "purpose": "both",
+            "version": null
+          },
+          {
+            "name": "Apple Command Line Tools",
+            "provisioning": "host",
+            "purpose": "build",
+            "version": null
+          },
+          {
+            "name": "Rust toolchain",
+            "provisioning": "managed",
+            "purpose": "build",
+            "version": "1.95.0"
+          },
+          {
+            "name": "Cargo.lockで固定されたcrate",
+            "provisioning": "download",
+            "purpose": "build",
+            "version": null
+          },
+          {
+            "name": "SolidCraftソース",
+            "provisioning": "download",
+            "purpose": "build",
+            "version": "8ba46e9e2181396a9b5903b98031399aef61cf26"
+          }
+        ],
+        "estimate_environment": "Apple M1 / macOS 15.8.1。Rust・Cargo・ビルドキャッシュが空の初回は2625秒、2回目は260秒。CLI 0.9.4-stgで計測。",
+        "estimated_cached_run_seconds": 300,
+        "estimated_first_run_seconds": 2700,
+        "label": "ソースからビルド",
+        "notes": "--allow-native-source-build と --allow-unsigned-native を明示します。キャッシュヒット時もソース取得・整合性確認・実行検証が発生します。"
+      },
+      "revision": 1,
+      "source": "publisher",
+      "updated_at": "2026-11-17 10:15:20"
+    }
+  },
+  "duplicate_ci_cancellations": [
+    {
+      "id": 44070445471,
+      "headSha": "78fd7826fbf9e77885e9711d21bc2a3daa0dc2b5",
+      "status": "in_progress",
+      "url": "https://github.com/ato-run/ato/actions/runs/44070445471",
+      "workflowName": "Rust CI",
+      "action": "cancelled duplicate run; passed feature and dev PR matrices retained"
+    },
+    {
+      "id": 44070527144,
+      "headSha": "e9ac1284e71837217fdbaac3a1d10af6801cd6f7",
+      "status": "in_progress",
+      "url": "https://github.com/ato-run/ato/actions/runs/44070527144",
+      "workflowName": "Rust CI",
+      "action": "cancelled duplicate run; passed feature and dev PR matrices retained"
+    },
+    {
+      "id": 44071877465,
+      "headSha": "6b252a89f7d5abaed8b075fb6d6409f60c5ea3df",
+      "status": "queued",
+      "url": "https://github.com/ato-run/ato/actions/runs/44071877465",
+      "workflowName": "Rust CI",
+      "action": "cancelled duplicate run; passed feature and dev PR matrices retained"
+    },
+    {
+      "id": 44071877424,
+      "headSha": "6b252a89f7d5abaed8b075fb6d6409f60c5ea3df",
+      "status": "in_progress",
+      "url": "https://github.com/ato-run/ato/actions/runs/44071877424",
+      "workflowName": "computation CLI",
+      "action": "cancelled duplicate run; passed feature and dev PR matrices retained"
+    }
+  ],
+  "migration_reconciliation": {
+    "files": 415,
+    "journal": 438,
+    "pending": [
+      "0420_capsule_hub_derivation_info.sql"
+    ],
+    "journal_only": [
+      "0038_community_capsule_tomls.sql",
+      "0043_publishers_avatar.sql",
+      "0072_runner_device_id.sql",
+      "0096_github_release_provenance.sql",
+      "0109_deployments.sql",
+      "0110_launch_subject.sql",
+      "0111_binding_deployment.sql",
+      "0112_deployment_data_volumes.sql",
+      "0113_runner_org_assignments.sql",
+      "0114_deployment_audits.sql",
+      "0115_deployment_exports.sql",
+      "0131_first_seen_is_first_activity.sql",
+      "0155_program_intent_detector_provenance.sql",
+      "0164_publication_lane.sql",
+      "0172_capsule_post_previews.sql",
+      "0214_instance_shared_storage.sql",
+      "0215_instance_shared_storage.sql",
+      "0255_process_execution_approvals_and_placements.sql",
+      "0256_process_application_approvals.sql",
+      "0286_portable_binding_config.sql",
+      "0328_community_curation.sql",
+      "0335_curation_it_tools_fourth_attempt.sql",
+      "0339_application_review_tenths.sql",
+      "0344_publish_request_email.sql"
+    ]
+  },
+  "local_pwa_validation_logs": {
+    "hub-panel-final-check.log": "c92672509e4479a2d1def64d13a721dd793241144586a26a1f80f5c47c35a049",
+    "hub-panel-final-tests.log": "ba9c1137c8ee29604e2458b33eb8919232d69734b01c2afbaae2ebd41ae3a07f",
+    "hub-format.log": "4ec00351ec1ec22ea51e74d1bbcc627cb80e80417790024e53a2569f65a4743e",
+    "hub-panel-build.log": "c85663fe72a8a54407574e8165e07f7323883af6a5622c6a5b4235a4b97aeecd",
+    "hub-preview.log": "a87c2357510bf2ec81f341d857d0b36b4e1b8b2579b5e92fa9b059e89d11fe53",
+    "hub-panel-tests.log": "73c3da8609f4ed9ed6e3d566095492e93c9147b7ed6c53f3afff62328f4f8d74",
+    "hub-panel-typecheck.log": "c92672509e4479a2d1def64d13a721dd793241144586a26a1f80f5c47c35a049",
+    "derivation-info/typecheck-final.log": "c92672509e4479a2d1def64d13a721dd793241144586a26a1f80f5c47c35a049",
+    "derivation-info/format.log": "93d9cf41c8ba021fcb63371a33552c1cedfd52d688f0bc9a32dc0ee44f623e87",
+    "derivation-info/typecheck.log": "c92672509e4479a2d1def64d13a721dd793241144586a26a1f80f5c47c35a049",
+    "derivation-info/i18n.log": "8c669d4e6a12dccbaf2f8e12718c78d830cce0b89721b3dc7864c75593af4912",
+    "derivation-info/tests.log": "d6f60c4719a1e87256f1de792dee3709da11f5c5b99ccad6b91ece99e907e457",
+    "derivation-info/form-tests.log": "c44faf4c0e75ecd66ce1470c4726c22ff59b85baa5be16a21b01953bd02789a4",
+    "derivation-info/install.log": "96df5c3826384d2303e608b8549c24055c6e262bbece33807a2222d3b51d1840",
+    "derivation-info/build.log": "b019b201f05f31a6373f412706a79bdeed4a678c6474f69685d060f9bff7c2ff",
+    "cli-094-stable-build.log": "ceea1a5a3e0f55090c33b7d2bae5f8a3b4d941496415f675b325d0b02f9d83a9"
+  },
+  "staging_hub_after": {
+    "run_count": 13,
+    "verification": {
+      "state": "verified",
+      "successful_runs": 13,
+      "last_run_at": "2026-11-17 12:07:50"
+    }
+  },
+  "production_installer_before": "sha256:267d41659d68b867fca2df52913589faaf6904412a45c4ad423b5ebf2f162923",
+  "production_installer_after": "sha256:267d41659d68b867fca2df52913589faaf6904412a45c4ad423b5ebf2f162923",
+  "staging_lease": {
+    "owner": "cli094-stable-20261117",
+    "released": true
+  },
+  "raw_workspace_relative": ".tmp/sc-094r-v06csta_",
+  "scope": "Stable CLI release is public; API/PWA changes and migration are staging only. Fresh user directories on existing M1/macOS with host Apple command-line tools. No credentials, Rust toolchain or build cache reused. Owner editor covered by DOM tests; live owner writes via CLI/API, public display via browser."
+}

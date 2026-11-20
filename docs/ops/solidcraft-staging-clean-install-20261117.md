@@ -1,7 +1,11 @@
 # SolidCraft — staging 配布 CLI のクリーンインストール検証（2026-11-17）
 
-Status: Current — **不合格**。公開インストーラーから D1/D2 完了までの経路は成立しない。
+Status: Archived — v0.9.3 検証時点では **不合格**。以下は修正前の履歴として保持する。
 検証時刻: 2026-11-17 16:27 JST。
+
+後続の [0.9.4-stg 受け入れ](solidcraft-staging-094-acceptance-20261117.md) では配布経路を修正し、
+公開 installer から新規環境で D1・D2・D2 再実行の cache hit まで成功した。
+この結果は以下の v0.9.3 の失敗を取り消すものではない。
 
 ## 条件
 

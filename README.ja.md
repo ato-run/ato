@@ -42,13 +42,13 @@ brew install ato-run/ato/ato
 **Linux / macOS（Homebrewなし）**
 
 ```sh
-curl -fsSL https://github.com/ato-run/ato/releases/download/v0.9.1/ato-cli-installer.sh | sh
+curl -fsSL https://github.com/ato-run/ato/releases/download/v0.9.4/ato-cli-installer.sh | sh
 ```
 
-**Windows x86_64:** [v0.9.1のMSI](https://github.com/ato-run/ato/releases/download/v0.9.1/ato-cli-x86_64-pc-windows-msvc.msi)をインストールします。
+**Windows x86_64:** [v0.9.1のMSI](https://github.com/ato-run/ato/releases/download/v0.9.4/ato-cli-x86_64-pc-windows-msvc.msi)をインストールします。
 
 ```sh
-ato --version # 0.9.1
+ato --version # 0.9.4
 ```
 
 ### 2. 誰かが作ったWorkspaceを取ってくる

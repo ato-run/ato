@@ -6,6 +6,7 @@ use std::{io::Read, path::PathBuf};
 
 #[derive(Debug, Args)]
 pub(super) struct SessionArgs {
+    /// Scoped file supplied by the Formation owner from --session-bridge.
     #[arg(long)]
     connection: PathBuf,
     #[command(subcommand)]
@@ -19,8 +20,10 @@ enum SessionCommand {
     Next,
     /// Atomically submit exactly one typed output read from stdin.
     Submit {
+        /// Exchange ID returned by `ato form-session ... next`.
         #[arg(long)]
         exchange_id: String,
+        /// Input SHA-256 returned with that same exchange.
         #[arg(long)]
         input_sha256: String,
     },

@@ -50,6 +50,9 @@ use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 
+mod info;
+pub use info::{DescribeArgs, describe};
+
 /// Reserved first-argument prefix for a Hub reference.
 pub const HUB_REF_PREFIX: &str = "capsules/";
 /// The tag a reference without a selector resolves.
@@ -701,6 +704,15 @@ pub fn resolve_for_run(
     api_url: &str,
     ato_home: &Path,
 ) -> Result<Option<ResolvedHubCapsule>> {
+    resolve_for_run_with_progress(path, api_url, ato_home, false)
+}
+
+pub(super) fn resolve_for_run_with_progress(
+    path: &Path,
+    api_url: &str,
+    ato_home: &Path,
+    progress: bool,
+) -> Result<Option<ResolvedHubCapsule>> {
     let Some(value) = path.to_str() else {
         return Ok(None);
     };
@@ -740,6 +752,14 @@ pub fn resolve_for_run(
             ),
         )
     })?;
+    if let HubSelector::Digest(requested) = &reference.selector
+        && requested != &digest
+    {
+        bail!(hub_error(
+            ERR_DIGEST_MISMATCH,
+            format!("the Hub did not return requested revision {requested}")
+        ));
+    }
     if resolved.size_bytes > MAX_OFFICIAL_BUNDLE_BYTES {
         bail!(hub_error(
             ERR_BUNDLE_TOO_LARGE,
@@ -749,6 +769,29 @@ pub fn resolve_for_run(
                 resolved.size_bytes
             )
         ));
+    }
+    if let Some(bundle_path) =
+        hub_transfer::verified_cache_path(ato_home, &digest, resolved.size_bytes)?
+    {
+        if progress {
+            eprintln!("Using verified cached bundle {digest}.");
+        }
+        return Ok(Some(ResolvedHubCapsule {
+            reference,
+            digest,
+            api_url: base,
+            bundle_path,
+        }));
+    }
+    if progress {
+        let path = hub_transfer::bundle_cache_path(ato_home, &digest)
+            .expect("the response digest was validated");
+        let reason = if path.try_exists()? {
+            "The cached bundle did not pass verification."
+        } else {
+            "This revision is absent from the bundle cache."
+        };
+        eprintln!("{reason} Downloading {digest}…");
     }
     if resolved.size_bytes > MAX_BUNDLE_BYTES {
         // A bundle above the Base64 JSON bound is streamed to the cache from a
@@ -1078,7 +1121,7 @@ pub fn store_bundle(ato_home: &Path, digest: &str, bytes: &[u8]) -> Result<PathB
     fs::create_dir_all(&directory)
         .with_context(|| format!("create the Hub cache directory {}", directory.display()))?;
     let path = directory.join(format!("{hex}.capsule"));
-    if path.is_file() {
+    if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
         let existing = fs::read(&path)
             .with_context(|| format!("read the cached Hub capsule {}", path.display()))?;
         if bundle_sha256(&existing) == digest {
@@ -1127,7 +1170,7 @@ fn unix_now_nanos() -> u128 {
 }
 
 /// The API origin, validated the same way `ato login` validates its URL.
-fn api_base(api_url: &str) -> Result<String> {
+pub(super) fn api_base(api_url: &str) -> Result<String> {
     let url = reqwest::Url::parse(api_url).context("invalid Ato API URL")?;
     ensure!(
         url.scheme() == "https"
@@ -1300,6 +1343,26 @@ fn finish_publish(
     size: u64,
     response: PublishResponse,
 ) -> Result<()> {
+    let reference = confirmed_reference(prepared, digest, size, &response)?;
+    println!("{reference}");
+    if let Some(url) = response.url.as_deref() {
+        println!("{url}");
+    }
+    if response.created == Some(false) {
+        eprintln!(
+            "the same bytes were already published; the `{}` tag now points at {digest}",
+            prepared.tag
+        );
+    }
+    Ok(())
+}
+
+fn confirmed_reference(
+    prepared: &PreparedPublish,
+    digest: &str,
+    size: u64,
+    response: &PublishResponse,
+) -> Result<String> {
     let expected_reference = format!("{HUB_REF_PREFIX}{}/{}", prepared.owner, prepared.name);
     if response.reference != expected_reference {
         bail!(hub_error(
@@ -1342,23 +1405,56 @@ fn finish_publish(
             )
         ));
     }
-    println!("{expected_reference}@{published}");
-    if let Some(url) = response.url.as_deref() {
-        println!("{url}");
-    }
-    if response.created == Some(false) {
-        eprintln!(
-            "the same bytes were already published; the `{}` tag now points at {published}",
-            prepared.tag
-        );
-    }
-    Ok(())
+    Ok(format!("{expected_reference}@{published}"))
 }
 
 /// The unchanged Base64 JSON lane: PUT /v1/hub/capsules/<owner>/<name>.
 fn publish_base64(args: PublishArgs, prepared: Option<PreparedPublish>) -> Result<()> {
     let bytes = fs::read(&args.capsule)
         .with_context(|| format!("cannot read {}", args.capsule.display()))?;
+    let (prepared, digest, response) = send_base64_bytes(&args, &bytes, prepared)?;
+    finish_publish(&prepared, &digest, bytes.len() as u64, response)
+}
+
+/// Upload the bytes already authenticated by an approved publication report.
+/// Only the credential stored for this API origin is used.
+pub(super) fn publish_pinned_bytes(
+    bytes: &[u8],
+    api_url: &str,
+    name: &str,
+    tag: &str,
+    license: &str,
+) -> Result<(String, Option<String>)> {
+    let args = PublishArgs {
+        capsule: PathBuf::from("approved artifact"),
+        name: name.into(),
+        tag: tag.into(),
+        license: Some(license.into()),
+        api_url: api_url.into(),
+        token: None,
+        readme: None,
+        repository: None,
+        homepage: None,
+        surfaces: Vec::new(),
+        environments: Vec::new(),
+        summary: None,
+        display_name: None,
+        porter: None,
+    };
+    let (prepared, digest, response) = send_base64_bytes(&args, bytes, None)?;
+    ensure!(
+        response.tag.as_deref() == Some(tag),
+        "The Hub did not confirm the approved publication tag"
+    );
+    let reference = confirmed_reference(&prepared, &digest, bytes.len() as u64, &response)?;
+    Ok((reference, response.url))
+}
+
+fn send_base64_bytes(
+    args: &PublishArgs,
+    bytes: &[u8],
+    prepared: Option<PreparedPublish>,
+) -> Result<(PreparedPublish, String, PublishResponse)> {
     if bytes.len() as u64 > MAX_BUNDLE_BYTES {
         bail!(hub_error(
             ERR_BUNDLE_TOO_LARGE,
@@ -1372,7 +1468,7 @@ fn publish_base64(args: PublishArgs, prepared: Option<PreparedPublish>) -> Resul
     // Only a bundle the local Run path would accept is ever published, and
     // the Hub capability metadata is derived from exactly those validated
     // routes rather than from any publisher-declared value.
-    let formed = crate::hub::validate_formed_bundle_document(&bytes)
+    let formed = crate::hub::validate_formed_bundle_document(bytes)
         .with_context(|| format!("{} must not be published", args.capsule.display()))?;
     let capabilities =
         derive_capabilities(&formed.bundle, &formed.derivations).with_context(|| {
@@ -1383,14 +1479,14 @@ fn publish_base64(args: PublishArgs, prepared: Option<PreparedPublish>) -> Resul
         })?;
     let prepared = match prepared {
         Some(prepared) => prepared,
-        None => prepare_publish(&args)?,
+        None => prepare_publish(args)?,
     };
-    let metadata = publish_metadata(&args, prepared.readme.as_deref(), capabilities);
-    let digest = bundle_sha256(&bytes);
+    let metadata = publish_metadata(args, prepared.readme.as_deref(), capabilities);
+    let digest = bundle_sha256(bytes);
     let request = PublishRequest {
         tag: prepared.tag.clone(),
         digest: digest.clone(),
-        bundle_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        bundle_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
         metadata,
     };
     let client = api_client()?;
@@ -1402,7 +1498,7 @@ fn publish_base64(args: PublishArgs, prepared: Option<PreparedPublish>) -> Resul
         &prepared.name,
         &request,
     )?;
-    finish_publish(&prepared, &digest, bytes.len() as u64, response)
+    Ok((prepared, digest, response))
 }
 
 /// Why the large lane stopped before publishing anything.

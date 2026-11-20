@@ -5,9 +5,10 @@ Date: 2026-09-17
 
 ## Context
 
-`ato run file.capsule` is intentionally ephemeral: it validates one transport,
-creates a temporary realization, verifies K, and leaves no durable author or
-Instance state. A user also needs to import a portable Application once, stop
+`ato run file.capsule` validates one transport, creates a temporary realization,
+verifies K, and leaves author and Instance state unchanged. The foreground
+[Run data lifecycle](PORTABLE_RUN_DATA.md) can retain its supported data in a
+separate local store. A user can also import a portable Application once, stop
 its current Run, and start the same local Instance again without mutating or
 re-importing the source `.capsule`.
 
@@ -42,7 +43,7 @@ ato app stop <instance-id>
 ato app export <instance-id> [--output <file.capsule>]
 ```
 
-`ato run` keeps its existing ephemeral meaning. Import never starts a Run.
+The foreground Run remains temporary. Import never starts a Run.
 Starting always creates a new Run and verifies the original K before publishing
 the Run as active. Stopping removes only active Run state; it does not delete
 the Instance, its immutable bundle, or prior Run evidence.

@@ -1221,3 +1221,61 @@ fn v2_transport_failures_never_invent_observed_provenance() {
         json!({"revision": 7, "fallback": "provider_error"})
     );
 }
+
+/// A configured base URL must take the request instead of the official API, so a
+/// user's own gateway or a local model server is selectable without a code change.
+/// The child-process probe keeps the test binary's own environment untouched.
+#[test]
+fn a_configured_generation_base_url_is_used_instead_of_the_official_api() {
+    const PROBE: &str = "ATO_GENERATION_BASE_URL_TEST_PROBE";
+    if std::env::var(PROBE).is_ok() {
+        let provider =
+            JevGenerationProvider::from_env(Duration::from_secs(5)).expect("provider from env");
+        // The parent answers 422, so this is a fallback: the point is where it went.
+        assert!(matches!(
+            provider.generate(&point()),
+            GenerationAnswer::Fallback { .. }
+        ));
+        return;
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut length = 0usize;
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap() == 0 || line.trim().is_empty() {
+                break;
+            }
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                length = value.trim().parse().unwrap();
+            }
+        }
+        let mut body = vec![0u8; length];
+        reader.read_exact(&mut body).unwrap();
+        let _ = write!(
+            stream,
+            "HTTP/1.1 422 Unprocessable Entity\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        );
+        String::from_utf8_lossy(&body).into_owned()
+    });
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "a_configured_generation_base_url_is_used_instead_of_the_official_api",
+        ])
+        .env(PROBE, "1")
+        .env("ATO_GENERATION_JEV_API_KEY", KEY)
+        .env("ATO_GENERATION_JEV_BASE_URL", &url)
+        .env_remove("ATO_GENERATION_JEV_MODEL")
+        .status()
+        .unwrap();
+    assert!(status.success(), "the child probe failed");
+    let body = handle.join().unwrap();
+    assert!(
+        body.contains("\"questions\""),
+        "the configured endpoint must receive the generation request: {body}"
+    );
+}

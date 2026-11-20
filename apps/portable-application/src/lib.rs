@@ -633,10 +633,11 @@ pub fn application_binding_environment_name(binding: &ApplicationBindingV1) -> S
     }
 }
 
-pub fn resolve_application_bindings(
+/// Validate supplied Binding IDs and values before asking for any missing ones.
+pub fn validate_supplied_application_bindings(
     application: &ValidatedApplication,
     supplied: &BTreeMap<String, String>,
-) -> Result<BTreeMap<String, String>, PortableApplicationError> {
+) -> Result<(), PortableApplicationError> {
     let declared = application
         .bindings
         .iter()
@@ -647,6 +648,21 @@ pub fn resolve_application_bindings(
             "runtime supplied undeclared Binding `{unknown}`"
         )));
     }
+    for (id, value) in supplied {
+        if value.is_empty() || value.len() > 64 * 1024 || value.contains('\0') {
+            return Err(profile(format!(
+                "runtime Binding `{id}` has an invalid value"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub fn resolve_application_bindings(
+    application: &ValidatedApplication,
+    supplied: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, PortableApplicationError> {
+    validate_supplied_application_bindings(application, supplied)?;
     let missing = application
         .bindings
         .iter()
@@ -664,12 +680,6 @@ pub fn resolve_application_bindings(
         let Some(value) = supplied.get(&binding.id) else {
             continue;
         };
-        if value.is_empty() || value.len() > 64 * 1024 || value.contains('\0') {
-            return Err(profile(format!(
-                "runtime Binding `{}` has an invalid value",
-                binding.id
-            )));
-        }
         environment.insert(application_binding_environment_name(binding), value.clone());
     }
     Ok(environment)
@@ -2351,7 +2361,7 @@ fn bound_authored_derivation(
                         id: "app.http".to_owned(),
                         protocol: HTTP_PROTOCOL.to_owned(),
                         from: "serve".to_owned(),
-                        guest_port: Some(route.guest_port),
+                        guest_port: (!descriptor.local_window).then_some(route.guest_port),
                         client_address_transport: None,
                     }],
                 },
@@ -2859,11 +2869,18 @@ fn validate_native_desktop_route(
     let descriptor = NativeDescriptor::from_step(step)
         .map_err(|error| profile(format!("native descriptor: {}", error.0)))?;
     // An argument vector addresses a program over the PTY the Adapter owns:
-    // only a Terminal route may state one, so an HTTP route has no way to
-    // smuggle arguments into its executable.
-    if !descriptor.argv.is_empty() && terminal.is_none() {
+    // a Terminal or local-window route may state one. An app HTTP route has
+    // no way to smuggle arguments into its executable.
+    if !descriptor.argv.is_empty() && terminal.is_none() && !descriptor.local_window {
         return Err(profile(
-            "a native argument vector is declared only on a Terminal route",
+            "a native argument vector is declared only on a Terminal or local-window route",
+        ));
+    }
+    if descriptor.local_window
+        && (terminal.is_some() || derivation.ports.len() != 1 || derivation.state.len() != 1)
+    {
+        return Err(profile(
+            "a local-window route requires one observation Port, one filesystem home state slot and no terminal surface",
         ));
     }
     if derivation.requirements.host.is_some() {
@@ -2897,6 +2914,9 @@ fn validate_native_desktop_route(
                 port.protocol == ato_formation::native_surface::TERMINAL_PORT_PROTOCOL,
                 port.guest_port.is_none(),
             ),
+            None if descriptor.local_window => {
+                (port.protocol == HTTP_PROTOCOL, port.guest_port.is_none())
+            }
             None => (
                 port.protocol == HTTP_PROTOCOL,
                 port.guest_port.is_some_and(|guest_port| guest_port != 0),
@@ -2912,7 +2932,7 @@ fn validate_native_desktop_route(
                 "a native Port is one declared Port served by the native step",
             ));
         }
-        if let Some(guest_port) = port.guest_port {
+        if let Some(guest_port) = port.guest_port.or(descriptor.local_window.then_some(0)) {
             ports.push(ValidatedNativePort {
                 id: port.id.clone(),
                 guest_port,

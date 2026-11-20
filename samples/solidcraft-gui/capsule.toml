@@ -1,0 +1,50 @@
+# GUI realization; the earlier solidcraft sample is a headless CLI Contract.
+schema = "ato.capsule/2"
+[application]
+title = "SolidCraft v0.43.0 - GUI, Tangency Labs, Ato port"
+surface_path = "/ready"
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+[[state]]
+id = "home"
+use = "ato.state.filesystem@1"
+mount = "/state/home"
+access = "read-write"
+mount_required = false
+[state.save]
+format = "solidcraft.home"
+version = 1
+[contract]
+mode = "all"
+[[contract.observation]]
+id = "gui-window"
+use = "ato.contract.http@1"
+port = "app.http"
+method = "GET"
+path = "/ready"
+status = 200
+body_digest = "sha256:f770ef86d1833460dbf0a2f1d327f94c1f4d83246ebc4ea52fcd89b9dbe10a30"
+
+[[derivation]]
+id = "prebuilt"
+use = "ato.native@1"
+os = "macos"
+arch = "aarch64"
+entry = "SolidCraft.app/Contents/MacOS/SolidCraft"
+runtimes = { "ato.native.remote_url" = "https://github.com/tangency-labs/solidcraft/releases/download/v0.43.0/solidcraft-0.43.0-macos-universal.dmg", "ato.native.remote_sha256" = "sha256:0e9870f868c7b73c2b610d9ddbbcca91a63163d86743bcafe7c4cda75ea4bad2", "ato.native.remote_bytes" = "399645711", "ato.native.format" = "dmg", "ato.native.presentation" = "local-window" }
+format = "dmg"
+signature_target = "bundle"
+
+[[derivation]]
+id = "from-source"
+use = "ato.native@1"
+os = "macos"
+arch = "aarch64"
+entry = ".ato-build/target/release/solidcraft"
+runtimes = { "ato.native.source_url" = "https://codeload.github.com/tangency-labs/solidcraft/tar.gz/8ba46e9e2181396a9b5903b98031399aef61cf26", "ato.native.source_commit" = "8ba46e9e2181396a9b5903b98031399aef61cf26", "ato.native.source_sha256" = "sha256:1d0e68cd22e86e225123fa55825e8b91f5efcac379d98e38669ee709353cb8e3", "ato.native.cargo_lock" = "sha256:b35566c1e58ca752da5669fdcca6951df3c2e0b514d4019a7b02426414804743", "ato.native.toolchain" = "rust:1.95.0", "ato.native.build_argv" = "cargo build --locked --release -p solidcraft", "ato.native.build_cache" = "content-hash", "ato.native.presentation" = "local-window" }
+signature = "require-valid-or-local-override"
+
+[effects]
+default = "pure"

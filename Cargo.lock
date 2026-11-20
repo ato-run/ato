@@ -295,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "ato-cli"
-version = "0.9.4-stg"
+version = "0.9.6-stg"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -333,13 +333,16 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "capsulehub",
+ "cc",
  "clap",
  "dirs",
+ "fs2",
  "getrandom 0.3.4",
  "hmac",
  "libc",
  "predicates",
  "reqwest",
+ "rpassword",
  "serde",
  "serde_jcs",
  "serde_json",
@@ -347,6 +350,7 @@ dependencies = [
  "sha2",
  "signal-hook",
  "socket2 0.6.4",
+ "strsim",
  "tempfile",
  "tokio",
  "toml",
@@ -555,6 +559,7 @@ dependencies = [
 name = "ato-host-facts"
 version = "0.1.0"
 dependencies = [
+ "core-foundation-sys",
  "serde",
  "serde_json",
  "tempfile",
@@ -2883,6 +2888,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpassword"
+version = "7.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2da316a15f47e3d053de9cb2c439650bd8fa4aaeb9365f2e5f27f492ff73c196"
+dependencies = [
+ "libc",
+ "rtoolbox",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "rquickjs"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2907,6 +2923,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7fed0097b0b4fbb2a87f6dd3b995a7c64ca56de30007eb7e867dfdfc78324ba5"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "rtoolbox"
+version = "0.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50a0e551c1e27e1731aba276dbeaeac73f53c7cd34d1bda485d02bd1e0f36844"
+dependencies = [
+ "libc",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4289,6 +4315,15 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
+dependencies = [
+ "windows-targets 0.52.6",
+]
+
+[[package]]
+name = "windows-sys"
+version = "0.59.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets 0.52.6",
 ]

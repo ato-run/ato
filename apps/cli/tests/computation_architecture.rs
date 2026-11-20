@@ -21,6 +21,47 @@ fn ato(ato_home: &Path) -> Command {
     command
 }
 
+#[test]
+fn init_with_missing_or_invalid_config_leaves_the_project_untouched() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("ato-home");
+    let project = root.path().join("new-project");
+
+    ato(&home)
+        .args(["init", "--initial-only"])
+        .arg(&project)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("capsule.toml"));
+    assert!(!project.exists());
+
+    fs::create_dir(&project).unwrap();
+    let config = project.join("capsule.toml");
+    fs::write(&config, "schema = 999").unwrap();
+    ato(&home)
+        .args(["init", "--initial-only"])
+        .arg(&project)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unsupported capsule.toml schema"));
+    assert!(!project.join(".capsule").exists());
+
+    write_project(&project, r#"["test-command"]"#, "");
+    let config_text = fs::read_to_string(&config).unwrap();
+    fs::write(
+        &config,
+        config_text.replace(r#"cwd = ".""#, r#"cwd = "missing""#),
+    )
+    .unwrap();
+    ato(&home)
+        .args(["init", "--initial-only"])
+        .arg(&project)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cwd does not exist"));
+    assert!(!project.join(".capsule").exists());
+}
+
 fn write_project(root: &Path, command: &str, extra: &str) {
     fs::write(
         root.join("capsule.toml"),

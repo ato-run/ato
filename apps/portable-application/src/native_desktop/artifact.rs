@@ -9,8 +9,8 @@
 //! The digest of what was actually placed is recorded as execution evidence.
 //!
 //! A `zip` payload is unpacked by the sibling `zip` module: it applies the same
-//! rules to the entries its central directory lists, and a `dmg` still has no
-//! extractor in this build.
+//! rules to the entries its central directory lists. macOS DMGs are mounted
+//! read-only and their bounded app bundles are copied by the `dmg` module.
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -22,7 +22,7 @@ use ato_formation::native_desktop::NativeArtifactFormat;
 use sha2::{Digest, Sha256};
 
 /// Total bytes a Run may materialize from one artifact.
-pub const MAX_EXTRACTED_BYTES: u64 = 512 * 1024 * 1024;
+pub const MAX_EXTRACTED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Extract limits for one archive.
 ///
@@ -79,6 +79,24 @@ fn extract_tar_reader_with<R: Read>(
     destination: &Path,
     limits: ExtractLimits,
 ) -> Result<ExtractedArtifact> {
+    extract_checked_tar(archive, destination, limits, || Ok(()))
+}
+
+pub(super) fn extract_budgeted_tar(
+    bytes: &[u8],
+    destination: &Path,
+    checkpoint: impl Fn() -> Result<()>,
+) -> Result<ExtractedArtifact> {
+    extract_checked_tar(bytes, destination, ARTIFACT_LIMITS, checkpoint)
+}
+
+fn extract_checked_tar<R: Read>(
+    archive: R,
+    destination: &Path,
+    limits: ExtractLimits,
+    checkpoint: impl Fn() -> Result<()>,
+) -> Result<ExtractedArtifact> {
+    checkpoint()?;
     ensure!(
         !destination.exists(),
         "artifact destination already exists: {}",
@@ -99,6 +117,7 @@ fn extract_tar_reader_with<R: Read>(
         .entries()
         .context("the native artifact is not a readable tar archive")?
     {
+        checkpoint()?;
         let mut entry = entry.context("the native artifact entry is unreadable")?;
         entries += 1;
         ensure!(
@@ -153,6 +172,7 @@ fn extract_tar_reader_with<R: Read>(
                 let mut written = 0_u64;
                 let mut buffer = [0_u8; 64 * 1024];
                 loop {
+                    checkpoint()?;
                     let read = entry
                         .read(&mut buffer)
                         .context("read a native artifact entry")?;
@@ -214,6 +234,7 @@ fn extract_tar_reader_with<R: Read>(
     for _ in 0..8 {
         let pending = std::mem::take(&mut links);
         for (link, target) in pending {
+            checkpoint()?;
             let Some(resolved) = resolve_inside(&link, &target) else {
                 bail!(
                     "native artifact symlink '{}' points outside the artifact",
@@ -265,6 +286,7 @@ fn extract_tar_reader_with<R: Read>(
         !files.is_empty(),
         "the native artifact carries no regular file"
     );
+    checkpoint()?;
     finish(destination, files, total_bytes)
 }
 
@@ -372,7 +394,7 @@ pub(super) fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
 /// is a named refusal here rather than a bundle-validation failure: the
 /// declaration is well-formed, this Adapter just cannot unpack it. A `zip` is
 /// unpacked by the sibling module under exactly the rules this one applies to a
-/// `tar.gz`; a `dmg` still has no extractor in this build.
+/// `tar.gz`; macOS disk images use the bounded `dmg` materializer.
 pub fn extract_archive(
     bytes: &[u8],
     format: NativeArtifactFormat,
@@ -381,10 +403,7 @@ pub fn extract_archive(
     match format {
         NativeArtifactFormat::TarGz => extract_tar_gz(bytes, destination),
         NativeArtifactFormat::Zip => super::zip::extract_zip(bytes, destination),
-        NativeArtifactFormat::Dmg => bail!(
-            "native_format_extractor_unavailable: this Adapter has no dmg extractor, so the \
-             declared disk image cannot be materialized"
-        ),
+        NativeArtifactFormat::Dmg => super::dmg::extract_bytes(bytes, destination),
     }
 }
 
@@ -401,13 +420,7 @@ pub fn extract_archive_file(
             extract_tar_reader(file, destination)
         }
         NativeArtifactFormat::Zip => super::zip::extract_zip_file(path, destination),
-        // The Adapter owns the packed formats it can unpack. A disk image is a
-        // well-formed declaration this build cannot materialize; saying so
-        // keeps "declared" and "implemented" apart.
-        NativeArtifactFormat::Dmg => bail!(
-            "native_format_extractor_unavailable: this Adapter has no dmg extractor, so the \
-             declared disk image cannot be materialized"
-        ),
+        NativeArtifactFormat::Dmg => super::dmg::extract_file(path, destination),
     }
 }
 
@@ -447,9 +460,8 @@ pub fn adopt_tree(root: &Path) -> Result<ExtractedArtifact> {
                 "the built tree carries more than {MAX_EXTRACTED_ENTRIES} entries"
             );
             let mode = built_mode(&metadata);
-            let bytes = fs::read(&path)
-                .with_context(|| format!("read the built file {}", path.display()))?;
-            total_bytes = total_bytes.saturating_add(bytes.len() as u64);
+            let size = metadata.len();
+            total_bytes = total_bytes.saturating_add(size);
             ensure!(
                 total_bytes <= MAX_EXTRACTED_BYTES,
                 "the built tree is larger than {MAX_EXTRACTED_BYTES} bytes"
@@ -460,8 +472,13 @@ pub fn adopt_tree(root: &Path) -> Result<ExtractedArtifact> {
             files.push(PlacedFile {
                 path: slash_path(relative),
                 mode,
-                size: bytes.len() as u64,
-                digest: format!("{:x}", Sha256::digest(&bytes)),
+                size,
+                digest: {
+                    let mut input = File::open(&path)?;
+                    let mut hash = Sha256::new();
+                    std::io::copy(&mut input, &mut hash)?;
+                    format!("{:x}", hash.finalize())
+                },
             });
         }
     }
@@ -725,17 +742,19 @@ mod tests {
         .unwrap();
         assert_eq!(extracted.file_count, 1);
 
-        // The disk image is the one packed form with no extractor in this
-        // build; a zip is unpacked by the zip module and has its own tests.
+        // A tar archive cannot be mounted as a disk image. Other platforms
+        // explicitly refuse DMG materialization before invoking host tools.
         let format = ato_formation::native_desktop::NativeArtifactFormat::Dmg;
         for error in [
             extract_archive_file(&payload, format, &scratch.path().join("file")).unwrap_err(),
             extract_archive(&bytes, format, &scratch.path().join("memory")).unwrap_err(),
         ] {
             assert!(
-                error
-                    .to_string()
-                    .starts_with("native_format_extractor_unavailable"),
+                error.to_string().starts_with(if cfg!(target_os = "macos") {
+                    "native_dmg_attach_failed"
+                } else {
+                    "native_format_extractor_unavailable"
+                }),
                 "{format:?}: {error}"
             );
         }
@@ -772,6 +791,29 @@ mod tests {
         let empty = scratch.path().join("empty");
         fs::create_dir_all(&empty).unwrap();
         assert!(adopt_tree(&empty).is_err());
+    }
+
+    #[test]
+    fn installed_tree_has_a_stable_address_and_refuses_modified_contents() {
+        let bytes = archive(&[Entry::File("app/run", b"verified binary", 0o755)]);
+        let root = temp_root();
+        let archive = root.path().join("archive.tar.gz");
+        fs::write(&archive, &bytes).unwrap();
+        let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+        let installed =
+            cached_archive_tree(&archive, NativeArtifactFormat::TarGz, &digest, root.path())
+                .unwrap();
+        fs::remove_file(&archive).unwrap();
+        assert_eq!(
+            installed,
+            cached_archive_tree(&archive, NativeArtifactFormat::TarGz, &digest, root.path())
+                .unwrap()
+        );
+        fs::write(installed.join("app/run"), b"tampered binary").unwrap();
+        assert!(
+            cached_archive_tree(&archive, NativeArtifactFormat::TarGz, &digest, root.path())
+                .is_err()
+        );
     }
 
     #[test]
@@ -832,5 +874,45 @@ mod symlink_tests {
         let scratch = tempfile::tempdir().unwrap();
         let root = scratch.path().join("artifact");
         assert!(extract_tar_gz(&archive, &root).is_err());
+    }
+}
+
+/// Keep a verified installation tree at a stable path outside any Run. Every
+/// start rehashes it; partial extractions are never published as installations.
+pub fn cached_archive_tree(
+    archive: &Path,
+    format: NativeArtifactFormat,
+    archive_digest: &str,
+    home: &Path,
+) -> Result<PathBuf> {
+    let cache = home.join("cache/native-installed-v1").join(format.as_str());
+    fs::create_dir_all(&cache)?;
+    let entry = cache.join(archive_digest.trim_start_matches("sha256:"));
+    let validate = || -> Result<PathBuf> {
+        let tree = entry.join("tree");
+        let observed = adopt_tree(&tree)?;
+        let manifest = fs::read_to_string(entry.join("verified-tree"))?;
+        ensure!(
+            manifest == format!("{archive_digest}\n{}\n", observed.tree_digest),
+            "native_install_cache_corrupt: {}",
+            entry.display()
+        );
+        Ok(tree)
+    };
+    if entry.exists() {
+        return validate();
+    }
+    let pending = tempfile::Builder::new()
+        .prefix("install-")
+        .tempdir_in(&cache)?;
+    let extracted = extract_archive_file(archive, format, &pending.path().join("tree"))?;
+    fs::write(
+        pending.path().join("verified-tree"),
+        format!("{archive_digest}\n{}\n", extracted.tree_digest),
+    )?;
+    match fs::rename(pending.path(), &entry) {
+        Ok(()) => Ok(entry.join("tree")),
+        Err(_) if entry.exists() => validate(), // Another installer won the atomic publish.
+        Err(error) => Err(error).context("publish native installation tree"),
     }
 }

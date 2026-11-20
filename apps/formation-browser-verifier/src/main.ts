@@ -11,6 +11,7 @@ import { closeSync, readFileSync } from "node:fs";
 
 import { agentKeyVariable, StagehandDriver, DEFAULT_AGENT_MODEL, type BrowserDriver } from "./browser.ts";
 import { DEFAULT_JEV_MODEL, JevJudge, type Judge } from "./judge.ts";
+import { OllamaJudge } from "./local-judge.ts";
 import { RequestSchema } from "./protocol.ts";
 import { sequencer, verify } from "./verify.ts";
 
@@ -87,10 +88,10 @@ async function main(): Promise<number> {
   const judgeKey = secrets.JEV_API_KEY ?? "";
 
   const sequence = sequencer();
-  const browser: BrowserDriver = agentKey
+  const browser = (request.operation_session || agentKey)
     ? new StagehandDriver({
         agentModel,
-        agentApiKey: agentKey,
+        agentApiKey: request.operation_session ? null : agentKey,
         scratchDir: request.scratch_dir,
         chromePath: process.env.ATO_BROWSER_CHROME_PATH || undefined,
         sequence,
@@ -98,12 +99,17 @@ async function main(): Promise<number> {
     : new UnconfiguredDriver(agentModel);
   let judge: Judge | null = null;
   try {
-    judge = judgeKey ? new JevJudge(judgeKey, process.env.ATO_JEV_MODEL || DEFAULT_JEV_MODEL) : null;
+    const localJudgeUrl = process.env.ATO_OLLAMA_JUDGE_URL;
+    judge = request.operation_session && localJudgeUrl
+      ? new OllamaJudge(localJudgeUrl, process.env.ATO_OLLAMA_JUDGE_MODEL ?? "", process.env.ATO_OLLAMA_JUDGE_DIGEST ?? "")
+      : judgeKey ? new JevJudge(judgeKey, process.env.ATO_JEV_MODEL || DEFAULT_JEV_MODEL) : null;
   } catch {
     judge = null;
   }
 
-  const result = await verify(request, { browser, judge, sequence });
+  const operator = request.operation_session && browser instanceof StagehandDriver ? browser : undefined;
+  const result = await verify(request, { browser, judge, sequence, ...(operator ? { operator } : {}) });
+  if (operator) result.verifier.agent_model = "structured_mcp_operator";
   await writeAll(JSON.stringify(result) + "\n");
   return 0;
 }

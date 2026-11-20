@@ -60,10 +60,7 @@ jobs:
           cat > .tmp/staging-release-notes.md <<EOF
           Staging-only CLI candidate for macOS arm64, source ${GITHUB_SHA}.
 
-          Includes native terminal/source Derivations, scoped macOS DNS access,
-          Run-owned build scratch directories, and explicit local signature override.
-
-          Install from https://stg-app.ato.run/install.sh with --cli-only.
+          Install using the macOS arm64 archive and checksum attached below.
           This prerelease does not update production, stable latest, or Homebrew.
           Other platforms are not included in this staging candidate.
           EOF

@@ -15,8 +15,8 @@
 use super::{SandboxPolicy, SandboxResult};
 use anyhow::{Context, Result};
 use landlock::{
-    ABI, Access, AccessFs, AccessNet, NetPort, Ruleset, RulesetAttr, RulesetCreatedAttr,
-    RulesetStatus, path_beneath_rules,
+    ABI, Access, AccessFs, AccessNet, CompatLevel, Compatible, NetPort, Ruleset, RulesetAttr,
+    RulesetCreatedAttr, RulesetStatus, path_beneath_rules,
 };
 use std::path::Path;
 use tracing::{debug, info, warn};
@@ -27,6 +27,21 @@ pub fn is_landlock_supported() -> bool {
     Ruleset::default()
         .handle_access(AccessFs::from_all(ABI::V1))
         .is_ok()
+}
+
+pub fn is_landlock_tcp_supported() -> bool {
+    let ruleset = Ruleset::default()
+        .set_compatibility(CompatLevel::HardRequirement)
+        .handle_access(AccessFs::from_all(ABI::V4));
+    let Ok(ruleset) = ruleset else {
+        return false;
+    };
+    let Ok(ruleset) = ruleset.handle_access(AccessNet::from_all(ABI::V4)) else {
+        return false;
+    };
+    // Create the ruleset to measure kernel support without restricting this
+    // worker. A best-effort builder alone accepts missing kernel features.
+    ruleset.create().is_ok()
 }
 
 /// Apply Landlock sandbox to the current process

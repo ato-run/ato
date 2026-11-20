@@ -30,33 +30,51 @@ use ato_formation::native_desktop::NativeDescriptor;
 use ato_runtime_attempt::realize::{RealizeFailure, Realized};
 
 use crate::ValidatedNativePort;
-use toolchain::ToolchainConsent;
 
 // Only the macOS adapter materializes an artifact today. Gating the module
 // keeps every other target free of helpers that have no caller there; the
 // Windows Adapter is fail-closed before extraction and will use the same code
 // once its mandatory policy is enforceable.
 #[cfg(target_os = "macos")]
+mod app_bundle;
+#[cfg(target_os = "macos")]
 pub(crate) mod artifact;
+#[cfg(target_os = "macos")]
+mod dmg;
 
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
 
 /// Streaming acquisition of a digest-pinned remote artifact.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) mod remote;
 /// The isolated, content-addressed build of a source route.
 #[cfg(target_os = "macos")]
 pub(crate) mod source_build;
-/// The declared terminal exchanges of a Terminal surface.
-#[cfg(target_os = "macos")]
+/// The declared terminal exchanges of a Terminal surface. Pure framing tests
+/// run on every host; native execution remains macOS-only.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) mod terminal;
 /// The managed toolchain a source build needs: policy, layout and installer.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) mod toolchain;
 #[cfg(target_os = "windows")]
 pub(crate) mod windows;
 /// Safe unpacking of a `zip` remote artifact, from its central directory.
 #[cfg(target_os = "macos")]
 pub(crate) mod zip;
+
+/// Whether this Run may install a managed toolchain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ToolchainConsent {
+    /// The user approved installing under `@@ATO_HOME`.
+    Approved,
+    /// The user was asked and did not approve.
+    #[default]
+    Denied,
+    /// There is no one to ask (a non-interactive Run).
+    Unavailable,
+}
 
 /// A named native-adapter refusal. The code is stable and user-facing; the
 /// detail names what could not be enforced.
@@ -93,16 +111,22 @@ pub(crate) fn artifact_refusal(error: anyhow::Error) -> NativeRefusal {
 pub(crate) enum NativeArtifactPayload {
     /// A packed archive: the bundle's own blob, or a verified remote fetch on
     /// disk.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Archive(NativeArchiveSource),
     /// A staged directory a source build produced in this Run. The declared
     /// entry is already laid out inside it.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     BuiltTree(PathBuf),
+    /// A generated macOS wrapper around an unchanged verified source executable.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    WindowApp { root: PathBuf, entry: String },
 }
 
 /// Where one archive's bytes live.
 pub(crate) enum NativeArchiveSource {
     /// The bundle closure's blob, already verified by the delivery path.
+    /// Other native hosts currently refuse admission before unpacking it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Memory(Vec<u8>),
     /// A file this Run fetched and verified.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -132,17 +156,18 @@ pub(crate) struct NativeProvenance {
     pub build_argv: Option<String>,
 }
 
+#[cfg(target_os = "macos")]
 impl NativeProvenance {
     /// What the acquisition stage did, in one line for the receipt.
     pub fn materialization(&self) -> String {
         match self.kind {
             "remote" => format!(
-                "digest-pinned upstream reference fetched by this Run from {}; Ato did not \
+                "digest-pinned upstream artifact verified from cache or downloaded from {}; Ato did not \
                  redistribute the artifact",
                 self.fetched_from.as_deref().unwrap_or("(unnamed)")
             ),
             "source" => format!(
-                "built in this Run from commit {} with {} ({}), cache {}",
+                "source artifact from commit {} with {} ({}), build cache {}",
                 self.source_commit.as_deref().unwrap_or("(unknown)"),
                 self.toolchain.as_deref().unwrap_or("(unknown toolchain)"),
                 self.build_argv.as_deref().unwrap_or("(unknown command)"),
@@ -203,23 +228,44 @@ pub(crate) fn acquire(
             })
         }
         NativeArtifactSource::Remote(remote) => {
-            let destination = runtime_root.join("native-fetch").join("artifact");
             let transport = remote::ReqwestFetcher::default();
-            let fetched =
-                remote::fetch_to_file(remote, &destination, &transport).map_err(|error| {
-                    let code = match &error {
-                        remote::FetchFailure::NotFound(_) => "native_fetch_not_found",
-                        remote::FetchFailure::DigestMismatch { .. } => {
-                            "native_fetch_digest_mismatch"
-                        }
-                        remote::FetchFailure::SizeMismatch { .. } => "native_fetch_size_mismatch",
-                        remote::FetchFailure::UrlInvalid(_) => "native_fetch_url_invalid",
-                        remote::FetchFailure::Unavailable(_) => "native_fetch_unavailable",
-                    };
-                    refusal(code, error.to_string())
-                })?;
+            let fetched = remote::fetch_cached(
+                &remote.url,
+                &remote.sha256,
+                remote.bytes,
+                Some(remote.bytes),
+                &home.join("cache/native-artifacts"),
+                &transport,
+            )
+            .map_err(|error| {
+                let code = match &error {
+                    remote::FetchFailure::NotFound(_) => "native_fetch_not_found",
+                    remote::FetchFailure::DigestMismatch { .. } => "native_fetch_digest_mismatch",
+                    remote::FetchFailure::SizeMismatch { .. } => "native_fetch_size_mismatch",
+                    remote::FetchFailure::UrlInvalid(_) => "native_fetch_url_invalid",
+                    remote::FetchFailure::Unavailable(_) => "native_fetch_unavailable",
+                };
+                refusal(code, error.to_string())
+            })?;
             Ok(AcquiredArtifact {
-                payload: NativeArtifactPayload::Archive(NativeArchiveSource::File(fetched.path)),
+                payload: if descriptor.local_window {
+                    NativeArtifactPayload::BuiltTree(
+                        artifact::cached_archive_tree(
+                            &fetched.path,
+                            descriptor.format,
+                            &fetched.sha256,
+                            home,
+                        )
+                        .map_err(|error| {
+                            refusal(
+                                "native_install_materialization_failed",
+                                format!("{error:#}"),
+                            )
+                        })?,
+                    )
+                } else {
+                    NativeArtifactPayload::Archive(NativeArchiveSource::File(fetched.path))
+                },
                 provenance: NativeProvenance {
                     kind: "remote",
                     artifact_ref: fetched.sha256,
@@ -264,8 +310,15 @@ pub(crate) fn acquire(
                 };
                 refusal(code, error.to_string())
             })?;
-            let source_archive = runtime_root.join("native-source").join("source.tar.gz");
-            remote::fetch_source_archive(build, &source_archive, &transport).map_err(|error| {
+            let source_archive = remote::fetch_cached(
+                &build.url,
+                &build.sha256,
+                remote::MAX_NATIVE_SOURCE_BYTES,
+                None,
+                &home.join("cache/native-artifacts"),
+                &transport,
+            )
+            .map_err(|error| {
                 let code = match &error {
                     remote::FetchFailure::NotFound(_) => "native_fetch_not_found",
                     remote::FetchFailure::DigestMismatch { .. } => "native_fetch_digest_mismatch",
@@ -274,7 +327,8 @@ pub(crate) fn acquire(
                     remote::FetchFailure::Unavailable(_) => "native_fetch_unavailable",
                 };
                 refusal(code, error.to_string())
-            })?;
+            })?
+            .path;
             let built = source_build::build(
                 build,
                 &descriptor.entry,
@@ -306,8 +360,26 @@ pub(crate) fn acquire(
                 };
                 refusal(code, error.to_string())
             })?;
+            eprintln!(
+                "Native source build cache: {} ({})",
+                built.cache.as_str(),
+                built.cache_key
+            );
             Ok(AcquiredArtifact {
-                payload: NativeArtifactPayload::BuiltTree(built.root),
+                payload: if descriptor.local_window {
+                    let (root, entry) =
+                        app_bundle::materialize(&built.entry, &built.output_digest, home).map_err(
+                            |error| {
+                                refusal(
+                                    "native_install_materialization_failed",
+                                    format!("{error:#}"),
+                                )
+                            },
+                        )?;
+                    NativeArtifactPayload::WindowApp { root, entry }
+                } else {
+                    NativeArtifactPayload::BuiltTree(built.root)
+                },
                 provenance: NativeProvenance {
                     kind: "source",
                     artifact_ref: built.output_digest,
@@ -459,3 +531,6 @@ pub(crate) fn resolve_entry(artifact_root: &Path, entry: &str) -> Result<PathBuf
     }
     Ok(canonical)
 }
+
+#[cfg(target_os = "macos")]
+mod window;

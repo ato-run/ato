@@ -307,7 +307,7 @@ fn resolve_token_at(path: &Path, explicit: Option<String>, api_url: &str) -> Res
         return Ok(credential.token);
     }
     bail!(
-        "no Ato credential for {}; run `ato login --api-url {} first`",
+        "no Ato credential for {}; run `ato login --api-url {}` first",
         api_origin(api_url)?,
         api_url.trim_end_matches('/')
     )
@@ -586,7 +586,7 @@ mod tests {
         let error = resolve_token_at(&path, None, "https://api.ato.run").unwrap_err();
         let message = error.to_string();
         assert!(
-            message.contains("run `ato login --api-url https://api.ato.run first`"),
+            message.contains("run `ato login --api-url https://api.ato.run` first"),
             "{message}"
         );
         assert!(!message.contains("ato_dev_stored"), "{message}");

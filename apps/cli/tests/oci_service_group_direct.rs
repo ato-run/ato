@@ -94,6 +94,42 @@ fn field(stdout: &str, name: &str) -> String {
         .to_owned()
 }
 
+#[cfg(unix)]
+#[test]
+fn run_without_docker_explains_how_to_retry() {
+    let root = tempfile::tempdir().unwrap();
+    let capsule = root.path().join("app.capsule");
+    let (bytes, _) = ato_portable_application::build_authored_bundle_v2(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/oci-service-group-proof"),
+    )
+    .unwrap();
+    fs::write(&capsule, bytes).unwrap();
+    let empty_path = root.path().join("empty-path");
+    fs::create_dir(&empty_path).unwrap();
+
+    let output = AtoCommand::cargo_bin("ato")
+        .unwrap()
+        .env("ATO_HOME", root.path().join("home"))
+        .env("PATH", empty_path)
+        .env_remove("DOCKER_HOST")
+        .env_remove("DOCKER_CONTEXT")
+        .args(["run", "--no-open"])
+        .arg(capsule)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let message = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        message.contains("Docker CLI was not found") && message.contains("`docker info`"),
+        "{message}"
+    );
+    assert!(
+        message.contains("retry the original command") && !message.contains("ato pack"),
+        "{message}"
+    );
+}
+
 #[test]
 fn the_sample_runs_directly_on_a_linux_docker_host() {
     if !cfg!(target_os = "linux") {

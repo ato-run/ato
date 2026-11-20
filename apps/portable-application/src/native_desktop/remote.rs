@@ -182,12 +182,14 @@ pub struct FetchedArtifact {
 
 /// Largest source tarball this build will download. A source tree is smaller
 /// than a packaged desktop application, so the artifact bound is reused.
+#[cfg(target_os = "macos")]
 pub const MAX_NATIVE_SOURCE_BYTES: u64 = ato_formation::native_desktop::MAX_NATIVE_REMOTE_BYTES;
 
 /// Fetch one pinned remote artifact to `destination`.
 ///
 /// The destination is created atomically: a failed fetch removes its temporary
 /// file and never leaves a short or mismatched artifact behind.
+#[cfg(test)]
 pub fn fetch_to_file(
     remote: &RemoteArtifact,
     destination: &Path,
@@ -203,20 +205,52 @@ pub fn fetch_to_file(
     )
 }
 
-/// Fetch a digest-pinned source tarball, whose exact size is not declared.
-pub fn fetch_source_archive(
-    build: &ato_formation::native_desktop::SourceBuild,
-    destination: &Path,
+/// Reuse only rehashed bytes, and publish downloads atomically from a unique
+/// directory so concurrent Instances cannot truncate each other's transfers.
+#[allow(clippy::too_many_arguments)]
+pub fn fetch_cached(
+    url: &str,
+    sha256: &str,
+    limit: u64,
+    expected_bytes: Option<u64>,
+    cache: &Path,
     fetcher: &dyn NativeFetcher,
 ) -> Result<FetchedArtifact, FetchFailure> {
-    fetch_checked(
-        &build.url,
-        &build.sha256,
-        MAX_NATIVE_SOURCE_BYTES,
-        None,
-        destination,
+    let unavailable = |error: std::io::Error| FetchFailure::Unavailable(error.to_string());
+    fs::create_dir_all(cache).map_err(unavailable)?;
+    let destination = cache.join(sha256.trim_start_matches("sha256:"));
+    if let Ok(metadata) = fs::symlink_metadata(&destination)
+        && metadata.is_file()
+        && metadata.len() <= limit
+        && expected_bytes.is_none_or(|expected| metadata.len() == expected)
+    {
+        let mut input = File::open(&destination).map_err(unavailable)?;
+        let mut hash = Sha256::new();
+        let size = std::io::copy(&mut input, &mut hash).map_err(unavailable)?;
+        let digest = format!("sha256:{:x}", hash.finalize());
+        if digest == sha256 && size == metadata.len() {
+            return Ok(FetchedArtifact {
+                path: destination,
+                bytes: size,
+                sha256: digest,
+            });
+        }
+    }
+    let scratch = tempfile::Builder::new()
+        .prefix("download-")
+        .tempdir_in(cache)
+        .map_err(unavailable)?;
+    let mut fetched = fetch_checked(
+        url,
+        sha256,
+        limit,
+        expected_bytes,
+        &scratch.path().join("artifact"),
         fetcher,
-    )
+    )?;
+    fs::rename(&fetched.path, &destination).map_err(unavailable)?;
+    fetched.path = destination;
+    Ok(fetched)
 }
 
 /// Fetch a body, verify it against one pinned digest, and place it atomically.
@@ -316,6 +350,44 @@ mod tests {
     use std::io::{BufRead, BufReader};
     use std::net::TcpListener;
     use std::thread;
+
+    struct BytesFetcher<'a>(&'a [u8]);
+    impl NativeFetcher for BytesFetcher<'_> {
+        fn fetch(&self, _: &str, sink: &mut dyn Write) -> Result<u64, FetchFailure> {
+            sink.write_all(self.0).unwrap();
+            Ok(self.0.len() as u64)
+        }
+    }
+    struct Offline;
+    impl NativeFetcher for Offline {
+        fn fetch(&self, _: &str, _: &mut dyn Write) -> Result<u64, FetchFailure> {
+            Err(FetchFailure::Unavailable("offline".into()))
+        }
+    }
+    #[test]
+    fn cache_is_rehashed_and_corrupt_bytes_never_run_offline() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = b"trusted artifact";
+        let digest = format!("sha256:{:x}", Sha256::digest(bytes));
+        let get = |fetcher: &dyn NativeFetcher| {
+            fetch_cached(
+                "https://example.com/app",
+                &digest,
+                bytes.len() as u64,
+                Some(bytes.len() as u64),
+                root.path(),
+                fetcher,
+            )
+        };
+        let first = get(&BytesFetcher(bytes)).unwrap();
+        assert_eq!(get(&Offline).unwrap().sha256, digest);
+        fs::write(&first.path, b"changed artifact").unwrap();
+        assert!(get(&Offline).is_err());
+        assert_eq!(
+            fs::read(get(&BytesFetcher(bytes)).unwrap().path).unwrap(),
+            bytes
+        );
+    }
 
     /// Serve exactly one request with a canned response and close.
     fn serve(status: &str, body: Vec<u8>) -> String {

@@ -38,6 +38,7 @@ export const RequestSchema = z.strictObject({
     wall_clock_ms: z.number().int().positive(),
   }),
   scratch_dir: z.string().min(1),
+  operation_session: z.string().max(128).optional(),
 });
 
 export type VerificationRequest = z.infer<typeof RequestSchema>;

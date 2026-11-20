@@ -23,12 +23,261 @@ use ato_portable_application::build_static_bundle;
 use base64::Engine as _;
 use serde_json::{Value, json};
 
+const INFO_DERIVATION: &str =
+    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+fn information_body(revision: u64, info: Value) -> Value {
+    json!({"digest": SAMPLE_DIGEST, "derivation_ref": INFO_DERIVATION,
+        "source": "publisher", "revision": revision, "updated_at": null, "info": info})
+}
+
+#[test]
+fn describe_reads_a_pinned_version_without_downloading_or_authenticating() {
+    let home = tempfile::tempdir().unwrap();
+    let api = StubApi::new(vec![
+        json_response("200 OK", resolve_body(&sample_bytes())),
+        json_response("200 OK", information_body(0, json!({}))),
+    ]);
+    let output = ato_with_home(home.path())
+        .args([
+            "hub",
+            "describe",
+            "capsules/koh0920/interop-static",
+            "--derivation",
+            INFO_DERIVATION,
+            "--api-url",
+            &api.base,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        serde_json::from_str::<Value>(&stdout(&output)).unwrap()["revision"],
+        0
+    );
+    let requests = api.wait_requests(2);
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].starts_with(&format!("GET /v1/hub/capsules/koh0920/interop-static/versions/{SAMPLE_DIGEST}/derivations/{INFO_DERIVATION}/info ")));
+    assert!(
+        requests
+            .iter()
+            .all(|r| !r.to_ascii_lowercase().contains("authorization:"))
+    );
+}
+
+#[test]
+fn describe_writes_explicit_revision_to_resolved_digest_with_owner_auth() {
+    let home = tempfile::tempdir().unwrap();
+    let info = json!({"label":"Build from source", "estimated_first_run_seconds":2700,
+        "dependencies":[{"name":"Rust", "version":"1.95.0", "provisioning":"managed", "purpose":"build"}]});
+    let input = home.path().join("info.json");
+    fs::write(
+        &input,
+        serde_json::to_vec(&json!({"expected_revision":4,"info":info})).unwrap(),
+    )
+    .unwrap();
+    let api = StubApi::new(vec![
+        json_response("200 OK", resolve_body(&sample_bytes())),
+        json_response("200 OK", information_body(5, info.clone())),
+    ]);
+    let output = ato_with_home(home.path())
+        .args([
+            "hub",
+            "describe",
+            "capsules/koh0920/interop-static",
+            "--derivation",
+            INFO_DERIVATION,
+            "--api-url",
+            &api.base,
+            "--file",
+            input.to_str().unwrap(),
+            "--token",
+            "info-owner-token",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let requests = api.wait_requests(2);
+    assert!(!requests[0].to_ascii_lowercase().contains("authorization:"));
+    assert!(requests[1].starts_with("PUT "));
+    assert!(
+        requests[1]
+            .to_ascii_lowercase()
+            .contains("authorization: bearer info-owner-token")
+    );
+    let body: Value = serde_json::from_str(requests[1].split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(body, json!({"expected_revision":4,"info":info}));
+    assert!(!stdout(&output).contains("info-owner-token"));
+}
+
+#[test]
+fn describe_conflict_is_not_retried_or_reported_as_saved() {
+    let home = tempfile::tempdir().unwrap();
+    let input = home.path().join("info.json");
+    fs::write(&input, br#"{"expected_revision":1,"info":{}}"#).unwrap();
+    let api = StubApi::new(vec![
+        json_response("200 OK", resolve_body(&sample_bytes())),
+        json_response("409 Conflict", json!({"error":"revision_conflict"})),
+    ]);
+    let output = ato_with_home(home.path())
+        .args([
+            "hub",
+            "describe",
+            "capsules/koh0920/interop-static",
+            "--derivation",
+            INFO_DERIVATION,
+            "--api-url",
+            &api.base,
+            "--file",
+            input.to_str().unwrap(),
+            "--token",
+            "info-owner-token",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("revision_conflict"));
+    assert!(stdout(&output).is_empty());
+    assert_eq!(api.wait_requests(2).len(), 2);
+}
+
+#[test]
+fn describe_refuses_malformed_write_intent_before_network() {
+    let home = tempfile::tempdir().unwrap();
+    let input = home.path().join("info.json");
+    fs::write(&input, br#"{"info":{"label":"missing revision"}}"#).unwrap();
+    let api = StubApi::new(vec![]);
+    let output = ato_with_home(home.path())
+        .args([
+            "hub",
+            "describe",
+            "capsules/koh0920/interop-static",
+            "--derivation",
+            INFO_DERIVATION,
+            "--api-url",
+            &api.base,
+            "--file",
+            input.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("expected_revision"));
+    assert!(api.requests.lock().unwrap().is_empty());
+}
+
+#[test]
+fn describe_refuses_a_different_version_before_writing() {
+    let home = tempfile::tempdir().unwrap();
+    let api = StubApi::new(vec![json_response("200 OK", resolve_body(&sample_bytes()))]);
+    let reference = format!("capsules/koh0920/interop-static@sha256:{}", "0".repeat(64));
+    let output = ato_with_home(home.path())
+        .args([
+            "hub",
+            "describe",
+            &reference,
+            "--derivation",
+            INFO_DERIVATION,
+            "--api-url",
+            &api.base,
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("different digest"));
+    assert_eq!(api.wait_requests(1).len(), 1);
+}
+
+#[test]
+fn describe_refuses_redirects_and_mismatched_acknowledgements() {
+    for response in [
+        b"HTTP/1.1 302 Found\r\nlocation: https://other.invalid/\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_vec(),
+        json_response("200 OK", information_body(7, json!({}))),
+        json_response("200 OK", json!({"digest": SAMPLE_DIGEST,"derivation_ref":format!("sha256:{}","0".repeat(64)),
+            "source":"publisher","revision":1,"info":{}})),
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let input = home.path().join("info.json");
+        fs::write(&input, br#"{"expected_revision":0,"info":{}}"#).unwrap();
+        let api = StubApi::new(vec![json_response("200 OK", resolve_body(&sample_bytes())), response]);
+        let output = ato_with_home(home.path()).args(["hub", "describe", "capsules/koh0920/interop-static",
+            "--derivation", INFO_DERIVATION, "--api-url", &api.base, "--file", input.to_str().unwrap(),
+            "--token", "info-owner-token"]).output().unwrap();
+        assert!(!output.status.success());
+        assert!(stdout(&output).is_empty());
+        assert_eq!(api.wait_requests(2).len(), 2);
+    }
+}
+
 /// SHA-256 of the committed interop-static bundle bytes.
 const SAMPLE_DIGEST: &str =
     "sha256:95b837f4e8ed3c3354a4560e56820030cdb2ba34ba2a7c65aa6d26e139bdd813";
 
 fn repo_sample() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/interop-static.capsule")
+}
+
+#[test]
+fn export_plan_accepts_a_public_hub_reference_without_starting_a_run() {
+    let bundle = sample_bytes();
+    let api = StubApi::new(vec![
+        json_response("200 OK", resolve_body(&bundle)),
+        binary_response(&bundle),
+    ]);
+    let home = tempfile::tempdir().unwrap();
+    let output = ato_with_home(home.path())
+        .args([
+            "export-plan",
+            "capsules/koh0920/interop-static",
+            "--api-url",
+            &api.base,
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["profile"], "cached");
+    let requests = api.wait_requests(2);
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|request| request.starts_with("GET ")));
+    assert!(!home.path().join("runs").exists());
+}
+
+#[test]
+fn export_from_a_hub_reference_preserves_contract_and_routes() {
+    let bundle = sample_bytes();
+    let api = StubApi::new(vec![
+        json_response("200 OK", resolve_body(&bundle)),
+        binary_response(&bundle),
+    ]);
+    let home = tempfile::tempdir().unwrap();
+    let target = home.path().join("offline.capsule");
+    let output = ato_with_home(home.path())
+        .args([
+            "export",
+            "capsules/koh0920/interop-static",
+            "--api-url",
+            &api.base,
+            "--portability",
+            "offline",
+            "-o",
+        ])
+        .arg(&target)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let source: Value = serde_json::from_slice(&bundle).unwrap();
+    let result: Value = serde_json::from_slice(&fs::read(target).unwrap()).unwrap();
+    assert_eq!(
+        result["index"]["root_contract_ref"],
+        source["index"]["root_contract_ref"]
+    );
+    assert_eq!(
+        result["index"]["derivations"],
+        source["index"]["derivations"]
+    );
+    assert_eq!(api.wait_requests(2).len(), 2);
 }
 
 fn readme_sample() -> PathBuf {
@@ -182,7 +431,10 @@ impl StubApi {
             let stop = Arc::clone(&stop);
             thread::spawn(move || {
                 for response in responses {
-                    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                    // The CLI may validate/hash the large bundle between requests.
+                    // Keep the stub alive for the same bound as ato(), including
+                    // debug builds on a loaded host. Drop still stops it promptly.
+                    let deadline = std::time::Instant::now() + Duration::from_secs(120);
                     let stream = loop {
                         if stop.load(Ordering::Relaxed) {
                             return;
@@ -556,6 +808,60 @@ fn running_a_hub_reference_resolves_verifies_executes_and_reports_the_run() {
     assert!(
         report["receipt"]["execution"]["attempt_id"].is_string(),
         "{report}"
+    );
+}
+
+#[test]
+fn a_small_hub_bundle_is_downloaded_again_only_when_its_cache_is_invalid() {
+    let bytes = sample_bytes();
+    let describe = || json_response("200 OK", resolve_body(&bytes));
+    let report = || json_response("200 OK", json!({}));
+    let api = StubApi::new(vec![
+        describe(),
+        binary_response(&bytes),
+        report(),
+        describe(),
+        report(),
+        describe(),
+        binary_response(&bytes),
+        report(),
+    ]);
+    let home = tempfile::tempdir().unwrap();
+    let cache = home.path().join("hub").join(format!(
+        "{}.capsule",
+        SAMPLE_DIGEST.trim_start_matches("sha256:")
+    ));
+    for attempt in 0..3 {
+        if attempt == 2 {
+            fs::write(&cache, b"invalid").unwrap();
+        }
+        let outcome = ato_with_home(home.path())
+            .args([
+                "run",
+                "capsules/koh0920/interop-static",
+                "--no-open",
+                "--api-url",
+                &api.base,
+            ])
+            .output()
+            .unwrap();
+        assert!(outcome.status.success(), "{}", stderr(&outcome));
+        assert_eq!(fs::read(&cache).unwrap(), bytes);
+    }
+    let requests = api.wait_requests(8);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.contains("/artifacts/"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.contains("/resolve?"))
+            .count(),
+        3
     );
 }
 
