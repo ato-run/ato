@@ -333,6 +333,13 @@ const ACTIVITY_FRAME_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 /// How often a quarantined/recovering slot re-runs reconciliation. Kept slow:
 /// each pass may stop containers and report to the control plane.
 const RECOVERY_POLL_INTERVAL: Duration = Duration::from_secs(15);
+/// How often an idle single-slot Runner asks the control plane which leases it
+/// believes this Runner holds. The claim is committed by the control plane
+/// before its response is delivered, so a response that never arrives (a
+/// long-poll issued by a process that has since exited, a dropped connection)
+/// leaves a lease `claimed` that nobody executes. This bounds how long such a
+/// lease can pin the slot, the state writer and the volume.
+const IDLE_OPEN_LEASE_AUDIT_INTERVAL: Duration = Duration::from_secs(30);
 #[cfg(unix)]
 const GUEST_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 #[cfg(unix)]
@@ -2145,6 +2152,43 @@ impl ConnectedWorker {
         }
     }
 
+    /// While this single-slot Runner is idle it executes nothing, so any lease
+    /// the control plane still holds open for it was never delivered here (or
+    /// its terminal report was lost). Hand those to the same recovery that
+    /// settles them at startup, without waiting for an operator restart.
+    /// Returns true when recovery was requested.
+    fn audit_idle_open_leases(&self, audit: &mut IdleOpenLeaseAudit) -> bool {
+        let found = self.idle_runner_has_open_leases(audit);
+        if found {
+            // Stops claiming; the next loop pass runs lease recovery.
+            runtime_launch::recovery::mark_slot_recovered(false);
+        }
+        found
+    }
+
+    fn idle_runner_has_open_leases(&self, audit: &mut IdleOpenLeaseAudit) -> bool {
+        // runner_leases does not record the owning slot; see
+        // `recover_control_plane_leases`.
+        if self.config.max_slots != 1 || !audit.take_due(Instant::now()) {
+            return false;
+        }
+        match self.api.open_leases() {
+            Ok(leases) => {
+                for lease in &leases {
+                    eprintln!(
+                        "[claim] the control plane holds lease_id={} run_id={} open for this idle Runner; settling it through recovery",
+                        lease.id, lease.run_id
+                    );
+                }
+                !leases.is_empty()
+            }
+            Err(error) => {
+                eprintln!("[claim] could not audit control-plane leases: {error:#}");
+                false
+            }
+        }
+    }
+
     pub fn run(&self) -> Result<()> {
         // One process owns this slot on the work root. Sibling slots may
         // share the root — the lock is scoped by slot id. Leftover lease
@@ -2164,6 +2208,8 @@ impl ConnectedWorker {
         // dispatches what the last heartbeat proved this Runner can do.
         self.heartbeat_with_retry(0)?;
         let mut claim_backoff = ControlPlaneBackoff::new();
+        // Startup recovery just reconciled the control plane's open leases.
+        let mut open_lease_audit = IdleOpenLeaseAudit::new(Instant::now());
         loop {
             self.recover_runtime_launch();
             if !runtime_launch::recovery::slot_recovered() {
@@ -2193,22 +2239,74 @@ impl ConnectedWorker {
                                 "[claim] transient control-plane failure; next poll in {}ms: {error:#}",
                                 delay.as_millis()
                             );
+                            // The request may have claimed a lease whose
+                            // response was lost: ask instead of assuming not.
+                            open_lease_audit.force(Instant::now());
                             thread::sleep(delay);
                             self.heartbeat_best_effort(0);
+                            self.audit_idle_open_leases(&mut open_lease_audit);
                             continue;
                         }
                         _ => return Err(error),
                     }
                 }
             };
-            let Some(lease) = claim.lease else {
-                if self.config.once {
-                    return Ok(());
+            let lease = match claim {
+                ClaimDelivery::Lease(lease) => lease,
+                ClaimDelivery::Empty { next_poll_seconds } => {
+                    if self.config.once {
+                        return Ok(());
+                    }
+                    if self.audit_idle_open_leases(&mut open_lease_audit) {
+                        continue;
+                    }
+                    thread::sleep(Duration::from_secs(next_poll_seconds.clamp(1, 30)));
+                    self.heartbeat_with_retry(0)?;
+                    continue;
                 }
-                thread::sleep(Duration::from_secs(claim.next_poll_seconds.clamp(1, 30)));
-                self.heartbeat_with_retry(0)?;
-                continue;
+                ClaimDelivery::Undecodable { lease_id, kind } => {
+                    // The control plane already counts this lease as claimed.
+                    // Nothing was started for it, so the slot stays usable.
+                    let message = undecodable_lease_message(kind.as_deref());
+                    eprintln!("[claim] refusing lease_id={lease_id}: {message}");
+                    if let Err(report_error) =
+                        self.api
+                            .report_failed(&lease_id, LEASE_UNDECODABLE_CODE, &message)
+                    {
+                        eprintln!(
+                            "[claim] refusal report failed lease_id={lease_id} error={report_error:#}"
+                        );
+                        open_lease_audit.force(Instant::now());
+                    }
+                    ensure!(!self.config.once, "{message}");
+                    continue;
+                }
+                ClaimDelivery::Unreadable { reason } => {
+                    ensure!(
+                        !self.config.once,
+                        "claim response could not be read: {reason}"
+                    );
+                    let delay = claim_backoff.next();
+                    eprintln!(
+                        "[claim] unreadable claim response; next poll in {}ms: {reason}",
+                        delay.as_millis()
+                    );
+                    // A lease may have been claimed by the response we could
+                    // not read.
+                    open_lease_audit.force(Instant::now());
+                    thread::sleep(delay);
+                    self.heartbeat_best_effort(0);
+                    self.audit_idle_open_leases(&mut open_lease_audit);
+                    continue;
+                }
             };
+            // Never credentials: the lease id, Run id and command kind only.
+            eprintln!(
+                "[claim] received lease_id={} run_id={} kind={}",
+                lease.id,
+                lease.run_id,
+                lease.command.kind()
+            );
             self.heartbeat_best_effort(1);
             if let Err(error) = self.execute_lease(&lease) {
                 let message = format!("connected Realization failed: {error:#}");
@@ -5132,11 +5230,105 @@ fn safe_component(value: &str) -> String {
         .collect()
 }
 
-#[derive(Debug, Deserialize)]
-struct ClaimResponse {
-    lease: Option<ClaimedLease>,
-    #[serde(default = "default_poll_seconds")]
-    next_poll_seconds: u64,
+/// What one `/leases/next` response means to this Runner. The control plane
+/// commits the claim before it answers, so every body that names a lease is a
+/// lease this Runner now owes a report for, whether or not it can run it.
+#[derive(Debug)]
+enum ClaimDelivery {
+    /// Nothing to claim, or the Runner is at capacity.
+    Empty {
+        next_poll_seconds: u64,
+    },
+    Lease(Box<ClaimedLease>),
+    /// A claimed lease whose command this Runner cannot decode. `kind` is the
+    /// command kind when it is a plain identifier.
+    Undecodable {
+        lease_id: String,
+        kind: Option<String>,
+    },
+    /// A body that names no usable lease id; only the open-lease audit can
+    /// tell whether it claimed anything.
+    Unreadable {
+        reason: String,
+    },
+}
+
+const LEASE_UNDECODABLE_CODE: &str = "lease_undecodable";
+
+fn decode_claim(body: &[u8]) -> ClaimDelivery {
+    let unreadable = |reason: &str| ClaimDelivery::Unreadable {
+        reason: reason.to_owned(),
+    };
+    let Ok(serde_json::Value::Object(response)) = serde_json::from_slice(body) else {
+        return unreadable("the body is not a JSON object");
+    };
+    let lease = match response.get("lease") {
+        None | Some(serde_json::Value::Null) => {
+            return ClaimDelivery::Empty {
+                next_poll_seconds: response
+                    .get("next_poll_seconds")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_else(default_poll_seconds),
+            };
+        }
+        Some(lease) => lease,
+    };
+    match ClaimedLease::deserialize(lease) {
+        Ok(lease) => ClaimDelivery::Lease(Box::new(lease)),
+        Err(_) => {
+            let text = |value: Option<&serde_json::Value>| {
+                value
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|text| valid_control_id(text))
+                    .map(str::to_owned)
+            };
+            match text(lease.get("id")) {
+                Some(lease_id) => ClaimDelivery::Undecodable {
+                    lease_id,
+                    kind: text(lease.get("command").and_then(|command| command.get("kind"))),
+                },
+                None => unreadable("the lease carries no usable id"),
+            }
+        }
+    }
+}
+
+/// The reason reported for a lease this Runner received and will not run.
+/// Deliberately free of the decoder's own message: that can quote values from
+/// the command.
+fn undecodable_lease_message(kind: Option<&str>) -> String {
+    format!(
+        "this Runner (agent {}) cannot decode the lease command of kind {}",
+        env!("CARGO_PKG_VERSION"),
+        kind.unwrap_or("<unreadable>")
+    )
+}
+
+/// Schedules the idle open-lease audit: periodic, and immediately after any
+/// claim exchange whose outcome this Runner could not read.
+#[derive(Debug)]
+struct IdleOpenLeaseAudit {
+    next_due: Instant,
+}
+
+impl IdleOpenLeaseAudit {
+    fn new(now: Instant) -> Self {
+        Self {
+            next_due: now + IDLE_OPEN_LEASE_AUDIT_INTERVAL,
+        }
+    }
+
+    fn force(&mut self, now: Instant) {
+        self.next_due = now;
+    }
+
+    fn take_due(&mut self, now: Instant) -> bool {
+        if now < self.next_due {
+            return false;
+        }
+        self.next_due = now + IDLE_OPEN_LEASE_AUDIT_INTERVAL;
+        true
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -5182,6 +5374,17 @@ pub(crate) enum LeaseCommand {
     RuntimeLaunch(Box<runtime_launch::lease::RuntimeLaunchLeaseCommand>),
     #[serde(rename = "state_volume_maintenance")]
     VolumeMaintenance(runtime_launch::volume_maintenance::VolumeMaintenanceLeaseCommand),
+}
+
+impl LeaseCommand {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Portable(_) => "portable_capsule_v2",
+            Self::Activity(_) => "activity_browser_executor_v0",
+            Self::RuntimeLaunch(_) => "runtime_launch",
+            Self::VolumeMaintenance(_) => "state_volume_maintenance",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -5653,13 +5856,14 @@ impl HttpRunnerApi {
             .into())
     }
 
-    fn claim_next(&self) -> Result<ClaimResponse> {
+    fn claim_next(&self) -> Result<ClaimDelivery> {
         let path = format!("/v1/runners/{}/leases/next?wait_ms=20000", self.runner_id);
-        Ok(self
+        let body = self
             .signed_request(reqwest::Method::GET, &path, None)
             .send()?
             .error_for_status()?
-            .json()?)
+            .bytes()?;
+        Ok(decode_claim(&body))
     }
 
     fn open_leases(&self) -> Result<Vec<OpenLease>> {
@@ -8776,6 +8980,9 @@ mod native_dispatch_tests;
 
 #[cfg(test)]
 mod explicit_placement_tests;
+
+#[cfg(test)]
+mod claim_delivery_tests;
 
 /// The native readiness report is the one control-plane call whose answer
 /// depends on a server-side probe of the workload. These tests pin the retry

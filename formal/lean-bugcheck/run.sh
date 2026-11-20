@@ -10,11 +10,14 @@ export TMPDIR="$OUT"
 trap 'rm -rf "$OUT"' EXIT
 LEAN="${LEAN:-$HOME/.elan/bin/lean}"
 echo '== Lean kernel check'
-"$LEAN" "$HERE/AtoBugcheck.lean"
-if grep -nE '(^|[^[:alnum:]_])sorry([^[:alnum:]_]|$)' "$HERE/AtoBugcheck.lean"; then
-  echo 'Lean source contains sorry' >&2
-  exit 1
-fi
+# Every model file in this directory is checked on its own.
+for model in "$HERE"/*.lean; do
+  "$LEAN" "$model"
+  if grep -nE '(^|[^[:alnum:]_])sorry([^[:alnum:]_]|$)' "$model"; then
+    echo "Lean source contains sorry: $model" >&2
+    exit 1
+  fi
+done
 echo '== missing allowlist root regression'
 rustc --edition 2021 "$HERE/repro/path_widening.rs" -o "$OUT/path"
 "$OUT/path"
@@ -25,6 +28,8 @@ rustc --edition 2021 -O "$HERE/repro/budget_wrap.rs" -o "$OUT/budget"
 "$OUT/budget"
 echo '== grant and subprotocol regressions'
 (cd "$REPO" && cargo test -p netd --lib surface_websocket_auth::tests)
+echo '== Runner claim delivery regression'
+(cd "$REPO" && cargo test -p ato-connected-realization-worker --lib claim_delivery_tests)
 echo '== manifest error regression'
 (cd "$REPO" && cargo test -p ato-materializer-static-web --lib distinguishes_empty_and_invalid_materialization_ids)
 echo '== discontinuous record counterexample'
