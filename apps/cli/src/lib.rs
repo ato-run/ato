@@ -4023,7 +4023,7 @@ fn run_portable_application(
         return print_application_bindings(
             &application,
             args.json,
-            "Run the app to enter required values, or use --bind-env BINDING_ID=ENV_VAR in a script.",
+            "Run the app to be prompted for required values (a secret is not echoed), or pass --bind BINDING_ID=VALUE / --bind-env BINDING_ID=ENV_VAR.",
         );
     }
     if args.list_derivations {
