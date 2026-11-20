@@ -1268,7 +1268,10 @@ impl PortableBundleExecutor<'_> {
                     .map(|value| value.parse())
                     .transpose()?,
                 argv: step.argv.clone(),
-                working_dir: "/app".to_owned(),
+                working_dir: runtime
+                    .get(OCI_WORKING_DIR_RUNTIME)
+                    .cloned()
+                    .unwrap_or_else(|| "/app".to_owned()),
                 workspace_mount_path: runtime
                     .get(OCI_WORKSPACE_MOUNT_RUNTIME)
                     .cloned()

@@ -3890,6 +3890,9 @@ fn validate_oci_service_group(
         if let Some(entrypoint) = step.runtimes.get(OCI_ENTRYPOINT_RUNTIME) {
             validate_oci_entrypoint(entrypoint)?;
         }
+        if let Some(directory) = step.runtimes.get(OCI_WORKING_DIR_RUNTIME) {
+            validate_oci_working_dir(directory)?;
+        }
         let workspace_mount = match step.runtimes.get(OCI_WORKSPACE_MOUNT_RUNTIME) {
             Some(target) => {
                 validate_oci_workspace_mount(target)?;
@@ -3960,6 +3963,7 @@ fn validate_oci_service_group(
                     .contains_key(ato_ipc::oci_component_inputs::OCI_INPUT_IDS_RUNTIME),
             ) + usize::from(step.runtimes.contains_key(OCI_ENTRYPOINT_RUNTIME))
                 + usize::from(step.runtimes.contains_key(OCI_WORKSPACE_MOUNT_RUNTIME))
+                + usize::from(step.runtimes.contains_key(OCI_WORKING_DIR_RUNTIME))
                 + usize::from(step.runtimes.contains_key(OCI_USER_RUNTIME))
         {
             return Err(profile(format!(
@@ -5684,6 +5688,30 @@ status = 200
             |d| d.steps[0].bindings.push("secret".to_owned()),
         ] {
             assert!(revalidate(&route, mutate).is_err());
+        }
+    }
+
+    #[test]
+    fn the_group_profile_validates_oci_working_directories_per_service() {
+        let route = group_route();
+        assert_eq!(
+            revalidate(&route, |derivation| {
+                for (step, directory) in derivation.steps.iter_mut().zip(["/app", "/opt/web"]) {
+                    step.runtimes
+                        .insert(OCI_WORKING_DIR_RUNTIME.to_owned(), directory.to_owned());
+                }
+            })
+            .unwrap(),
+            PortableRealizationKind::OciServiceGroup
+        );
+        for invalid in ["relative", "/opt/../escape", "/opt/app,override"] {
+            let error = revalidate(&route, |derivation| {
+                derivation.steps[0]
+                    .runtimes
+                    .insert(OCI_WORKING_DIR_RUNTIME.to_owned(), invalid.to_owned());
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains("OCI working directory"));
         }
     }
 
