@@ -789,9 +789,12 @@ fn report_with_workspace_bytes(
             .entry
             .as_deref()
             .context("static surface omitted entry")?;
-        let spa_fallback = surface
-            .spa_fallback
-            .context("static surface omitted spa_fallback")?;
+        // A capsule/2 static route keeps `spa_fallback` on its Derivation and
+        // leaves the Surface's value unset. The realization reads a missing
+        // value as `false` (see the static-web listener in lib.rs), so the
+        // manifest the API serves from must agree instead of refusing the
+        // bundle.
+        let spa_fallback = surface.spa_fallback.unwrap_or(false);
         let files = validated
             .tree
             .entries
