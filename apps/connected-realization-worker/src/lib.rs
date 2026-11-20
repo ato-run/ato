@@ -6242,38 +6242,6 @@ fn http_prelude_header<'a>(head: &'a [u8], name: &str) -> Option<&'a str> {
     })
 }
 
-/// Remove every `name` header line from the request head and rebuild
-/// head + terminator + tail. The workload never sees the assertion it was
-/// admitted by, so a compromised app cannot replay it against anything else
-/// that trusts it. The tail is appended untouched: it is data, not headers.
-fn strip_http_prelude_header(head: &[u8], tail: &[u8], name: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(head.len() + tail.len() + 4);
-    match std::str::from_utf8(head) {
-        Ok(text) => {
-            for (index, line) in text.split("\r\n").enumerate() {
-                let is_header = index > 0
-                    && line
-                        .split_once(':')
-                        .is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case(name));
-                if !is_header {
-                    out.extend_from_slice(line.as_bytes());
-                    out.extend_from_slice(b"\r\n");
-                }
-            }
-        }
-        // A non-UTF-8 head cannot be parsed line-wise; forward it unchanged.
-        // With the gate on this is unreachable — the assertion lookup already
-        // failed closed — so this only keeps the helper total.
-        Err(_) => {
-            out.extend_from_slice(head);
-            out.extend_from_slice(b"\r\n");
-        }
-    }
-    out.extend_from_slice(b"\r\n");
-    out.extend_from_slice(tail);
-    out
-}
-
 /// Why this Runner's Surface listener is reachable from outside the host.
 ///
 /// One listener may be public for more than one reason (a host-boundary slot
@@ -6439,6 +6407,15 @@ impl TcpProxy {
             while !thread_stop.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((client, _)) => {
+                        // The listener accepts non-blockingly, and macOS makes
+                        // the accepted socket inherit that flag. Every handler
+                        // below reads blocking with explicit timeouts, so the
+                        // accepted socket is put back in blocking mode; without
+                        // this a read can return EAGAIN before the client's
+                        // request arrives and the connection is dropped.
+                        if client.set_nonblocking(false).is_err() {
+                            continue;
+                        }
                         let target = target.clone();
                         let mux = mux.clone();
                         thread::spawn(move || {
@@ -6571,11 +6548,698 @@ fn proxy_dispatched(mut client: TcpStream, surface_target: &ProxyTarget, mux: &S
         serve_browser_presentation(&mut client, mux.presentation_frame.as_ref());
         return;
     }
-    let forwarded = match &mux.gate {
-        SurfaceGate::Assertion(_) => strip_http_prelude_header(head, tail, RUN_ASSERTION_HEADER),
-        SurfaceGate::LoopbackOnly => prelude,
+    // A gated connection carries exactly one request: the assertion proves
+    // this request, and nothing after it. Turning the connection into a raw
+    // pipe here would forward every later keep-alive request unchecked, which
+    // is an authentication bypass through a pooling reverse proxy.
+    match &mux.gate {
+        SurfaceGate::Assertion(_) => {
+            proxy_asserted_connection(&mut client, surface_target, head, tail);
+            return;
+        }
+        SurfaceGate::LoopbackOnly => {}
+    }
+    proxy_connection_with_prelude(&mut client, surface_target, &prelude);
+}
+
+/// Bound on one chunk-size line, including its chunk extensions.
+const MAX_CHUNK_SIZE_LINE_BYTES: usize = 8 * 1024;
+/// Bound on a chunked request's trailer section.
+const MAX_CHUNKED_TRAILER_BYTES: usize = 8 * 1024;
+/// Bound on one upstream response head.
+const MAX_UPSTREAM_RESPONSE_HEAD_BYTES: usize = 64 * 1024;
+/// How long a spent gated connection is drained before it is closed. The
+/// drain only discards bytes: nothing read here is ever forwarded.
+const CLIENT_CLOSE_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
+/// Bound on what the drain discards, so a hostile client cannot pin the thread.
+const MAX_DISCARDED_CLIENT_BYTES: usize = 64 * 1024;
+
+fn invalid_http_framing(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+/// One HTTP/1.x message head: the start line plus its header lines, each kept
+/// verbatim so a forwarded head can be re-emitted byte-for-byte except for the
+/// lines the gate deliberately rewrites.
+struct ParsedHttpHead<'a> {
+    start_line: &'a str,
+    headers: Vec<ParsedHttpHeadLine<'a>>,
+}
+
+struct ParsedHttpHeadLine<'a> {
+    raw: &'a str,
+    name: &'a str,
+    value: &'a str,
+}
+
+impl<'a> ParsedHttpHead<'a> {
+    /// Parse a head (start line plus headers, terminator excluded). Obsolete
+    /// line folding is rejected: it would make the header lookups ambiguous
+    /// exactly where body framing is decided. A non-UTF-8 head cannot be
+    /// parsed and is rejected too.
+    fn parse(head: &'a [u8]) -> Option<Self> {
+        let text = std::str::from_utf8(head).ok()?;
+        let mut lines = text.split("\r\n");
+        let start_line = lines.next()?;
+        if start_line.is_empty() {
+            return None;
+        }
+        let mut headers = Vec::new();
+        for line in lines {
+            if line.is_empty() {
+                return None;
+            }
+            if line.starts_with(' ') || line.starts_with('\t') {
+                return None;
+            }
+            let (name, value) = line.split_once(':')?;
+            if name.is_empty() || !name.bytes().all(is_http_token_byte) {
+                return None;
+            }
+            headers.push(ParsedHttpHeadLine {
+                raw: line,
+                name,
+                value: value.trim_matches([' ', '\t']),
+            });
+        }
+        Some(Self {
+            start_line,
+            headers,
+        })
+    }
+
+    /// First value of the named header, compared case-insensitively.
+    fn header(&self, name: &str) -> Option<&'a str> {
+        self.headers
+            .iter()
+            .find(|line| line.name.eq_ignore_ascii_case(name))
+            .map(|line| line.value)
+    }
+
+    /// Every value of every header named "name", in message order.
+    fn header_values(&self, name: &str) -> Vec<&'a str> {
+        self.headers
+            .iter()
+            .filter(|line| line.name.eq_ignore_ascii_case(name))
+            .map(|line| line.value)
+            .collect()
+    }
+
+    /// The numeric status of an HTTP/1.x response start line.
+    fn response_status(&self) -> Option<u16> {
+        let mut fields = self.start_line.split(' ');
+        let version = fields.next()?;
+        if !version.starts_with("HTTP/1.") {
+            return None;
+        }
+        let status = fields.next()?;
+        if status.len() != 3 || !status.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        status
+            .parse::<u16>()
+            .ok()
+            .filter(|status| (100..1000).contains(status))
+    }
+}
+
+/// RFC 7230 tchar: what a header field name may consist of.
+fn is_http_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\x27'
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'|'
+                | b'~'
+        )
+}
+
+/// Body framing of a verified request, exactly as the gate will forward it.
+/// Anything ambiguous is refused: a second framing is how a second request
+/// would ride through a one-request gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestFraming {
+    None,
+    ContentLength(u64),
+    Chunked,
+}
+
+fn request_framing(head: &ParsedHttpHead<'_>) -> Option<RequestFraming> {
+    let transfer_encodings = head.header_values("transfer-encoding");
+    if !transfer_encodings.is_empty() {
+        if transfer_encodings.len() != 1 || !transfer_encodings[0].eq_ignore_ascii_case("chunked") {
+            return None;
+        }
+        // Both framings on one request is a smuggling surface even when they
+        // agree, so it is refused rather than resolved.
+        if head.header("content-length").is_some() {
+            return None;
+        }
+        return Some(RequestFraming::Chunked);
+    }
+    let content_lengths = head.header_values("content-length");
+    if content_lengths.is_empty() {
+        return Some(RequestFraming::None);
+    }
+    let mut length = None;
+    for value in content_lengths {
+        for part in value.split(',') {
+            let part = part.trim_matches([' ', '\t']);
+            if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            let parsed = part.parse::<u64>().ok()?;
+            match length {
+                Some(existing) if existing != parsed => return None,
+                _ => length = Some(parsed),
+            }
+        }
+    }
+    length.map(RequestFraming::ContentLength)
+}
+
+/// True when the client asked for a protocol switch: an Upgrade header plus
+/// the upgrade token in Connection. A plain header-presence check would miss
+/// that the token can be one of several Connection tokens.
+fn request_wants_upgrade(head: &ParsedHttpHead<'_>) -> bool {
+    head.header("upgrade")
+        .is_some_and(|value| !value.is_empty())
+        && head
+            .header_values("connection")
+            .iter()
+            .flat_map(|value| value.split(','))
+            .any(|token| {
+                token
+                    .trim_matches([' ', '\t'])
+                    .eq_ignore_ascii_case("upgrade")
+            })
+}
+
+/// Re-emit a request head for the workload. The assertion is always removed:
+/// the workload never sees the credential it was admitted by. For a
+/// non-upgrade request every Connection and Keep-Alive header is removed and
+/// exactly one "Connection: close" is added, so the client cannot pipeline a
+/// second request onto this connection. An upgrade head keeps its
+/// Connection and Upgrade headers: the switch is handled by the caller.
+fn render_forwarded_request_head(head: &ParsedHttpHead<'_>, upgrade: bool) -> Vec<u8> {
+    let mut rendered = Vec::with_capacity(256);
+    rendered.extend_from_slice(head.start_line.as_bytes());
+    rendered.extend_from_slice(b"\r\n");
+    for line in &head.headers {
+        if line.name.eq_ignore_ascii_case(RUN_ASSERTION_HEADER) {
+            continue;
+        }
+        if !upgrade
+            && (line.name.eq_ignore_ascii_case("connection")
+                || line.name.eq_ignore_ascii_case("keep-alive"))
+        {
+            continue;
+        }
+        rendered.extend_from_slice(line.raw.as_bytes());
+        rendered.extend_from_slice(b"\r\n");
+    }
+    if !upgrade {
+        rendered.extend_from_slice(b"Connection: close\r\n");
+    }
+    rendered.extend_from_slice(b"\r\n");
+    rendered
+}
+
+/// Re-emit a final upstream response head. Connection and Keep-Alive are
+/// removed and "Connection: close" is added: once the client has this response
+/// the gate forwards nothing else on this connection.
+fn render_forwarded_response_head(head: &ParsedHttpHead<'_>) -> Vec<u8> {
+    let mut rendered = Vec::with_capacity(256);
+    rendered.extend_from_slice(head.start_line.as_bytes());
+    rendered.extend_from_slice(b"\r\n");
+    for line in &head.headers {
+        if line.name.eq_ignore_ascii_case("connection")
+            || line.name.eq_ignore_ascii_case("keep-alive")
+        {
+            continue;
+        }
+        rendered.extend_from_slice(line.raw.as_bytes());
+        rendered.extend_from_slice(b"\r\n");
+    }
+    rendered.extend_from_slice(b"Connection: close\r\n\r\n");
+    rendered
+}
+
+/// 1xx heads other than 101 are informational: forward them unchanged and
+/// keep reading for the final response.
+fn is_informational_response(status: u16) -> bool {
+    (100..200).contains(&status) && status != 101
+}
+
+/// Read exactly one HTTP response head (terminator included) from the
+/// upstream, keeping any bytes read past it in "buffer" for the body relay.
+fn read_http_response_head(upstream: &mut TcpStream, buffer: &mut Vec<u8>) -> io::Result<Vec<u8>> {
+    loop {
+        if let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+            let length = index + 4;
+            return Ok(buffer.drain(..length).collect());
+        }
+        if buffer.len() >= MAX_UPSTREAM_RESPONSE_HEAD_BYTES {
+            return Err(invalid_http_framing("HTTP response head exceeds bound"));
+        }
+        let mut chunk = [0_u8; 1024];
+        let read = upstream.read(&mut chunk)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "HTTP response ended before its head",
+            ));
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+    }
+}
+
+/// Write the upstream bytes already read past the head, then every byte up to
+/// upstream EOF. The client is never read here.
+fn copy_upstream_tail(
+    client: &mut TcpStream,
+    upstream: &mut TcpStream,
+    buffered: &mut Vec<u8>,
+) -> io::Result<()> {
+    client.write_all(buffered)?;
+    buffered.clear();
+    io::copy(upstream, client)?;
+    client.flush()
+}
+
+/// Answer 400 and close: the request cannot be forwarded under a framing the
+/// gate can prove is exactly one request.
+fn proxy_bad_request(client: &mut TcpStream) {
+    let _ = client.write_all(
+        b"HTTP/1.1 400 Bad Request\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    );
+    finish_gated_client(client);
+}
+
+/// End a spent gated connection from the proxy side. The write half is closed
+/// once the answer is complete; bytes the client keeps sending are read and
+/// discarded (never forwarded, never parsed as a request) so the close is a
+/// clean fin rather than a reset that could discard an unread response.
+fn finish_gated_client(client: &mut TcpStream) {
+    let _ = client.shutdown(std::net::Shutdown::Write);
+    if client
+        .set_read_timeout(Some(CLIENT_CLOSE_DRAIN_TIMEOUT))
+        .is_err()
+    {
+        return;
+    }
+    let mut discarded = 0_usize;
+    let mut chunk = [0_u8; 1024];
+    while discarded < MAX_DISCARDED_CLIENT_BYTES {
+        match client.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => discarded += read,
+        }
+    }
+    let _ = client.set_read_timeout(None);
+}
+
+/// Proxy one request on an assertion-gated Surface connection.
+///
+/// The assertion proves this one request. Turning the connection into a raw
+/// pipe after it (what "proxy_connection_with_prelude" does) forwarded every
+/// later keep-alive request unchecked, and the reverse proxy in front of the
+/// Runner pools upstream connections across clients, so that pipe is an
+/// authentication bypass. This path admits exactly one request: the body is
+/// forwarded by its own framing only, no later client byte is forwarded, and
+/// the upstream is never half-closed after the request (Go net/http cancels a
+/// request on client EOF).
+fn proxy_asserted_connection(
+    client: &mut TcpStream,
+    target: &ProxyTarget,
+    head: &[u8],
+    tail: &[u8],
+) {
+    let Some(parsed) = ParsedHttpHead::parse(head) else {
+        proxy_bad_request(client);
+        return;
     };
-    proxy_connection_with_prelude(&mut client, surface_target, &forwarded);
+    let Some(framing) = request_framing(&parsed) else {
+        proxy_bad_request(client);
+        return;
+    };
+    let upgrade = request_wants_upgrade(&parsed);
+    if upgrade
+        && !matches!(
+            framing,
+            RequestFraming::None | RequestFraming::ContentLength(0)
+        )
+    {
+        // An upgrade carries no body: bytes after its head belong to the
+        // switched protocol and must not be mistaken for one.
+        proxy_bad_request(client);
+        return;
+    }
+    let ProxyTarget::Tcp(address) = target else {
+        // The mux listeners publish a TCP Surface target; a Unix target has no
+        // gated caller, so close instead of falling back to a raw pipe.
+        return;
+    };
+    let Ok(mut upstream) = TcpStream::connect(*address) else {
+        return;
+    };
+    if upgrade {
+        proxy_asserted_upgrade(client, &mut upstream, &parsed, tail);
+    } else {
+        proxy_asserted_exchange(client, &mut upstream, &parsed, framing, tail);
+    }
+}
+
+/// Forward one verified non-upgrade request, then its response. Nothing after
+/// the request body is forwarded, and the upstream write half stays open until
+/// the exchange is over.
+fn proxy_asserted_exchange(
+    client: &mut TcpStream,
+    upstream: &mut TcpStream,
+    request_head: &ParsedHttpHead<'_>,
+    framing: RequestFraming,
+    tail: &[u8],
+) {
+    let forwarded_head = render_forwarded_request_head(request_head, false);
+    if upstream.write_all(&forwarded_head).is_err() {
+        return;
+    }
+    if forward_request_body(client, upstream, framing, tail).is_err() {
+        return;
+    }
+    // Anything in "tail" past the body was a pipelined request: it is dropped
+    // here, never forwarded. The response tells the client that instead.
+    let mut response_buffer = Vec::with_capacity(1024);
+    while let Ok(raw_head) = read_http_response_head(upstream, &mut response_buffer) {
+        let Some(parsed) = ParsedHttpHead::parse(&raw_head[..raw_head.len() - 4]) else {
+            return;
+        };
+        let Some(status) = parsed.response_status() else {
+            return;
+        };
+        if is_informational_response(status) {
+            if client.write_all(&raw_head).is_err() {
+                return;
+            }
+            continue;
+        }
+        let forwarded = render_forwarded_response_head(&parsed);
+        if client.write_all(&forwarded).is_err() {
+            return;
+        }
+        let _ = copy_upstream_tail(client, upstream, &mut response_buffer);
+        finish_gated_client(client);
+        return;
+    }
+}
+
+/// Forward a verified upgrade request and wait for the upstream's first final
+/// status. Only a 101 turns the connection into a raw pipe; any other final
+/// status is forwarded as an ordinary one-request response and the client's
+/// later bytes are never forwarded.
+fn proxy_asserted_upgrade(
+    client: &mut TcpStream,
+    upstream: &mut TcpStream,
+    request_head: &ParsedHttpHead<'_>,
+    tail: &[u8],
+) {
+    let forwarded_head = render_forwarded_request_head(request_head, true);
+    if upstream.write_all(&forwarded_head).is_err() {
+        return;
+    }
+    let (Ok(mut client_read), Ok(mut upstream_write)) = (client.try_clone(), upstream.try_clone())
+    else {
+        return;
+    };
+    let tail = tail.to_vec();
+    let (decision_tx, decision_rx) = mpsc::channel::<bool>();
+    let forward = thread::spawn(move || {
+        // Until the response side reports 101, no post-head client byte is
+        // forwarded: a non-upgrade answer ends the connection instead of
+        // becoming a raw pipe.
+        if decision_rx.recv().ok() != Some(true) {
+            return;
+        }
+        if !tail.is_empty() && upstream_write.write_all(&tail).is_err() {
+            return;
+        }
+        let _ = io::copy(&mut client_read, &mut upstream_write);
+        let _ = upstream_write.shutdown(std::net::Shutdown::Write);
+    });
+    let mut response_buffer = Vec::with_capacity(1024);
+    let mut decision = Some(decision_tx);
+    while let Ok(raw_head) = read_http_response_head(upstream, &mut response_buffer) {
+        let Some(parsed) = ParsedHttpHead::parse(&raw_head[..raw_head.len() - 4]) else {
+            break;
+        };
+        let Some(status) = parsed.response_status() else {
+            break;
+        };
+        if is_informational_response(status) {
+            if client.write_all(&raw_head).is_err() {
+                break;
+            }
+            continue;
+        }
+        if status == 101 {
+            // The protocol switch is granted: from here the connection is a
+            // raw pipe in both directions.
+            if client.write_all(&raw_head).is_err() {
+                break;
+            }
+            if let Some(decision) = decision.take() {
+                let _ = decision.send(true);
+            }
+            let _ = copy_upstream_tail(client, upstream, &mut response_buffer);
+            let _ = client.shutdown(std::net::Shutdown::Write);
+            let _ = forward.join();
+            return;
+        }
+        // Any other final status is an ordinary one-request response: forward
+        // it with Connection: close and never forward client bytes.
+        let forwarded = render_forwarded_response_head(&parsed);
+        if client.write_all(&forwarded).is_err() {
+            break;
+        }
+        if let Some(decision) = decision.take() {
+            let _ = decision.send(false);
+        }
+        let _ = copy_upstream_tail(client, upstream, &mut response_buffer);
+        finish_gated_client(client);
+        let _ = forward.join();
+        return;
+    }
+    // No final status was read (or an answer could not be written): dropping
+    // the sender tells the client side to stop without forwarding anything.
+    drop(decision);
+    let _ = forward.join();
+}
+
+/// Forward exactly the request body the head declared. Nothing after it is
+/// forwarded.
+fn forward_request_body(
+    client: &mut TcpStream,
+    upstream: &mut TcpStream,
+    framing: RequestFraming,
+    tail: &[u8],
+) -> io::Result<()> {
+    match framing {
+        // No framing means no body: whatever the prelude read past the head is
+        // a pipelined request, and it is dropped.
+        RequestFraming::None => Ok(()),
+        RequestFraming::ContentLength(length) => {
+            forward_content_length_body(client, upstream, length, tail)
+        }
+        RequestFraming::Chunked => forward_chunked_body(client, upstream, tail),
+    }
+}
+
+/// Forward exactly "length" body bytes. "tail" holds bytes the prelude read
+/// already took; they count toward the length, and nothing after it is
+/// forwarded. A short body is an error: a partial request must not be
+/// presented to the workload as complete.
+fn forward_content_length_body(
+    client: &mut TcpStream,
+    upstream: &mut TcpStream,
+    length: u64,
+    tail: &[u8],
+) -> io::Result<()> {
+    let mut remaining = length;
+    let from_tail = (tail.len() as u64).min(remaining) as usize;
+    upstream.write_all(&tail[..from_tail])?;
+    remaining -= from_tail as u64;
+    let mut chunk = [0_u8; 8192];
+    while remaining > 0 {
+        let wanted = (chunk.len() as u64).min(remaining) as usize;
+        let read = client.read(&mut chunk[..wanted])?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "client ended before the declared request body",
+            ));
+        }
+        upstream.write_all(&chunk[..read])?;
+        remaining -= read as u64;
+    }
+    Ok(())
+}
+
+/// Client-side reader for a chunked request body. The prelude read may already
+/// hold body bytes; further bytes are read on demand.
+struct ChunkedBodyReader<'a> {
+    client: &'a mut TcpStream,
+    buffer: Vec<u8>,
+    position: usize,
+}
+
+impl<'a> ChunkedBodyReader<'a> {
+    fn new(client: &'a mut TcpStream, initial: &[u8]) -> Self {
+        Self {
+            client,
+            buffer: initial.to_vec(),
+            position: 0,
+        }
+    }
+
+    fn pending(&self) -> &[u8] {
+        &self.buffer[self.position..]
+    }
+
+    fn consume(&mut self, count: usize) {
+        self.position += count;
+        if self.position == self.buffer.len() {
+            self.buffer.clear();
+            self.position = 0;
+        }
+    }
+
+    fn fill(&mut self) -> io::Result<()> {
+        if self.position > 0 {
+            self.buffer.drain(..self.position);
+            self.position = 0;
+        }
+        let mut chunk = [0_u8; 8192];
+        let read = self.client.read(&mut chunk)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "client ended before the chunked request body completed",
+            ));
+        }
+        self.buffer.extend_from_slice(&chunk[..read]);
+        Ok(())
+    }
+
+    /// Length of the next CRLF-terminated line, terminator included. A line
+    /// longer than "max" (or a missing terminator at that bound) is malformed.
+    fn next_line(&mut self, max: usize) -> io::Result<usize> {
+        loop {
+            if let Some(index) = self
+                .pending()
+                .windows(2)
+                .position(|window| window == b"\r\n")
+            {
+                let length = index + 2;
+                if length > max {
+                    return Err(invalid_http_framing("chunked framing line exceeds bound"));
+                }
+                return Ok(length);
+            }
+            if self.pending().len() >= max {
+                return Err(invalid_http_framing("chunked framing line exceeds bound"));
+            }
+            self.fill()?;
+        }
+    }
+}
+
+/// Parse a chunk-size line (extensions ignored) as the body relay forwards it.
+fn parse_chunk_size_line(line: &[u8]) -> io::Result<u64> {
+    let size = match line.iter().position(|byte| *byte == b';') {
+        Some(index) => &line[..index],
+        None => line,
+    };
+    if size.is_empty() || size.len() > 16 {
+        return Err(invalid_http_framing("malformed chunk size"));
+    }
+    let mut value = 0_u64;
+    for byte in size {
+        let digit = (*byte as char)
+            .to_digit(16)
+            .ok_or_else(|| invalid_http_framing("malformed chunk size"))?;
+        value = value
+            .checked_mul(16)
+            .and_then(|value| value.checked_add(u64::from(digit)))
+            .ok_or_else(|| invalid_http_framing("chunk size overflow"))?;
+    }
+    Ok(value)
+}
+
+fn forward_exactly(
+    reader: &mut ChunkedBodyReader<'_>,
+    upstream: &mut TcpStream,
+    mut remaining: u64,
+) -> io::Result<()> {
+    while remaining > 0 {
+        if reader.pending().is_empty() {
+            reader.fill()?;
+        }
+        let take = (reader.pending().len() as u64).min(remaining) as usize;
+        upstream.write_all(&reader.pending()[..take])?;
+        reader.consume(take);
+        remaining -= take as u64;
+    }
+    Ok(())
+}
+
+/// Forward a chunked request body through the last chunk and its trailer
+/// section. Only those bytes are forwarded; pipelined bytes after the
+/// terminator are dropped, never read.
+fn forward_chunked_body(
+    client: &mut TcpStream,
+    upstream: &mut TcpStream,
+    initial: &[u8],
+) -> io::Result<()> {
+    let mut reader = ChunkedBodyReader::new(client, initial);
+    loop {
+        let line_length = reader.next_line(MAX_CHUNK_SIZE_LINE_BYTES)?;
+        let chunk_size = parse_chunk_size_line(&reader.pending()[..line_length - 2])?;
+        upstream.write_all(&reader.pending()[..line_length])?;
+        reader.consume(line_length);
+        if chunk_size == 0 {
+            // Trailer section: field lines up to the empty terminator line.
+            let mut trailer_bytes = 0_usize;
+            loop {
+                let line_length = reader.next_line(MAX_CHUNKED_TRAILER_BYTES)?;
+                trailer_bytes += line_length;
+                if trailer_bytes > MAX_CHUNKED_TRAILER_BYTES {
+                    return Err(invalid_http_framing("chunked trailer exceeds bound"));
+                }
+                let is_terminator = line_length == 2;
+                upstream.write_all(&reader.pending()[..line_length])?;
+                reader.consume(line_length);
+                if is_terminator {
+                    return Ok(());
+                }
+            }
+        }
+        forward_exactly(&mut reader, upstream, chunk_size)?;
+        // The data is followed by its own CRLF; validating it here keeps a
+        // garbled body from being forwarded as if it were framed.
+        let terminator = reader.next_line(2)?;
+        upstream.write_all(&reader.pending()[..terminator])?;
+        reader.consume(terminator);
+    }
 }
 
 fn serve_browser_presentation(
@@ -8694,16 +9358,18 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         drop(proxy);
     }
 
-    /// One-shot upstream that captures EVERYTHING it receives until the
-    /// client half-closes, then answers. Used to assert the body tail
-    /// survives the gate byte-for-byte.
+    /// One-shot upstream that captures everything it receives until the
+    /// connection settles, then answers. Used to assert the body tail
+    /// survives the gate byte-for-byte. The settle timeout replaces waiting
+    /// for EOF: a gated connection never half-closes the upstream after its
+    /// request (Go net/http cancels a request on client EOF).
     fn request_capture_upstream() -> (SocketAddr, JoinHandle<Vec<u8>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let worker = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             stream
-                .set_read_timeout(Some(Duration::from_secs(10)))
+                .set_read_timeout(Some(Duration::from_millis(750)))
                 .unwrap();
             let mut received = Vec::new();
             let mut chunk = [0_u8; 4096];
@@ -8767,6 +9433,464 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         .into_bytes();
         expected.extend_from_slice(&body);
         assert_eq!(received, expected);
+        drop(proxy);
+    }
+
+    /// Send one request on a fresh connection and return the whole answer.
+    /// Half-closing is fine: a gated connection is spent after its one
+    /// request, so the gate never waits for further client bytes.
+    fn gated_request(public: SocketAddr, request: &[u8]) -> Vec<u8> {
+        let mut client = TcpStream::connect(public).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        client.write_all(request).unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut response = Vec::new();
+        let _ = client.read_to_end(&mut response);
+        response
+    }
+
+    /// The assertion header line for the test gate's lease.
+    fn assertion_header() -> String {
+        let assertion = http_assertion(
+            &"k".repeat(32),
+            "run_1",
+            "lease_1",
+            "runner_1",
+            OffsetDateTime::now_utc().unix_timestamp() + 60,
+        );
+        format!("{RUN_ASSERTION_HEADER}: {assertion}\r\n")
+    }
+
+    /// The bytes of the response or request head, terminator included.
+    fn head_bytes(message: &[u8]) -> &[u8] {
+        match message.windows(4).position(|window| window == b"\r\n\r\n") {
+            Some(index) => &message[..index + 4],
+            None => message,
+        }
+    }
+
+    /// Case-insensitive search inside the head only, never the body.
+    fn head_contains(message: &[u8], needle: &str) -> bool {
+        let head = head_bytes(message);
+        head.windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+    }
+
+    fn count_occurrences(haystack: &[u8], needle: &[u8]) -> usize {
+        haystack
+            .windows(needle.len())
+            .filter(|window| *window == needle)
+            .count()
+    }
+
+    /// One-request upstream for the gate framing tests: reads the request
+    /// head, then exactly "body_len" body bytes when given, settles briefly to
+    /// catch any byte the gate should have dropped, answers "response", and
+    /// closes. It never waits for client EOF, because the gate deliberately
+    /// does not half-close the upstream after the request.
+    fn framed_upstream(
+        body_len: Option<usize>,
+        response: &'static [u8],
+    ) -> (SocketAddr, JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut received = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let head_end = loop {
+                if let Some(index) = received.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break index + 4;
+                }
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    return received;
+                }
+                received.extend_from_slice(&chunk[..read]);
+            };
+            if let Some(body_len) = body_len {
+                while received.len() < head_end + body_len {
+                    let read = stream.read(&mut chunk).unwrap();
+                    if read == 0 {
+                        return received;
+                    }
+                    received.extend_from_slice(&chunk[..read]);
+                }
+            }
+            // Anything the gate forwarded past the request would arrive before
+            // the response and is captured by the caller's assertion.
+            stream
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .unwrap();
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => received.extend_from_slice(&chunk[..read]),
+                }
+            }
+            let _ = stream.write_all(response);
+            received
+        });
+        (address, worker)
+    }
+
+    /// A refused request must not even open a connection to the workload.
+    fn assert_no_upstream_connection(listener: &TcpListener) {
+        listener.set_nonblocking(true).unwrap();
+        thread::sleep(Duration::from_millis(100));
+        match listener.accept() {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            other => panic!("a refused request reached the workload: {other:?}"),
+        }
+    }
+
+    /// Two requests written back-to-back on one connection: only the first,
+    /// verified one reaches the workload. The raw pipe forwarded both.
+    #[test]
+    fn a_gated_connection_forwards_only_its_one_verified_request() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok";
+        let (upstream_addr, upstream) = framed_upstream(None, response);
+        let (public, proxy) = gated_proxy(test_gate(), upstream_addr);
+
+        let request = format!(
+            "GET /first HTTP/1.1\r\nHost: s0-runner.ato.run\r\n{}\r\nGET /second HTTP/1.1\r\nHost: s0-runner.ato.run\r\n\r\n",
+            assertion_header()
+        );
+        let answer = gated_request(public, request.as_bytes());
+
+        assert!(answer.starts_with(b"HTTP/1.1 200"), "{answer:?}");
+        assert!(
+            head_contains(&answer, "Connection: close"),
+            "the client must be told the connection is spent: {answer:?}"
+        );
+        let received = upstream.join().unwrap();
+        assert_eq!(
+            count_occurrences(&received, b"GET /"),
+            1,
+            "exactly one request may reach the workload: {received:?}"
+        );
+        assert_eq!(count_occurrences(&received, b"/second"), 0, "{received:?}");
+        drop(proxy);
+    }
+
+    /// A second request on the same connection is refused even when it carries
+    /// a bogus assertion: the connection was already spent by the first one.
+    #[test]
+    fn a_gated_connection_refuses_a_second_request_with_a_bogus_assertion() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+        let (upstream_addr, upstream) = framed_upstream(None, response);
+        let (public, proxy) = gated_proxy(test_gate(), upstream_addr);
+
+        let request = format!(
+            "GET /first HTTP/1.1\r\nHost: s0-runner.ato.run\r\n{}\r\nGET /second HTTP/1.1\r\nHost: s0-runner.ato.run\r\n{RUN_ASSERTION_HEADER}: bogus\r\n\r\n",
+            assertion_header()
+        );
+        let answer = gated_request(public, request.as_bytes());
+
+        assert!(answer.starts_with(b"HTTP/1.1 200"), "{answer:?}");
+        let received = upstream.join().unwrap();
+        assert_eq!(count_occurrences(&received, b"GET /"), 1, "{received:?}");
+        assert_eq!(count_occurrences(&received, b"/second"), 0, "{received:?}");
+        drop(proxy);
+    }
+
+    /// The declared body is forwarded exactly, and pipelined bytes after it are
+    /// not. A 1xx head before the final response is forwarded and skipped over.
+    #[test]
+    fn a_gated_content_length_body_is_forwarded_exactly_without_pipelined_bytes() {
+        let response = b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok";
+        let (upstream_addr, upstream) = framed_upstream(Some(5), response);
+        let (public, proxy) = gated_proxy(test_gate(), upstream_addr);
+
+        let mut request = format!(
+            "POST /upload HTTP/1.1\r\nHost: s0-runner.ato.run\r\nContent-Length: 5\r\nConnection: keep-alive\r\n{}\r\n",
+            assertion_header()
+        )
+        .into_bytes();
+        request.extend_from_slice(b"hello");
+        request.extend_from_slice(b"GET /smuggled HTTP/1.1\r\nHost: s0-runner.ato.run\r\n\r\n");
+        let answer = gated_request(public, &request);
+
+        assert!(answer.starts_with(b"HTTP/1.1 100 Continue"), "{answer:?}");
+        assert!(
+            answer
+                .windows(b"HTTP/1.1 200 OK".len())
+                .any(|window| window == b"HTTP/1.1 200 OK"),
+            "{answer:?}"
+        );
+        assert_eq!(
+            count_occurrences(&answer, b"Connection: close"),
+            1,
+            "only the final head is rewritten: {answer:?}"
+        );
+
+        let received = upstream.join().unwrap();
+        let mut expected = b"POST /upload HTTP/1.1\r\nHost: s0-runner.ato.run\r\nContent-Length: 5\r\nConnection: close\r\n\r\n".to_vec();
+        expected.extend_from_slice(b"hello");
+        assert_eq!(
+            received, expected,
+            "the body is forwarded exactly and the pipelined request is not"
+        );
+        drop(proxy);
+    }
+
+    /// The chunked body reaches its terminator (last chunk plus trailer) and
+    /// nothing after it is forwarded.
+    #[test]
+    fn a_gated_chunked_body_is_forwarded_through_its_terminator_only() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+        let (upstream_addr, upstream) = framed_upstream(None, response);
+        let (public, proxy) = gated_proxy(test_gate(), upstream_addr);
+
+        let body = b"5\r\nhello\r\n6\r\n world\r\n0\r\nX-Trailer: done\r\n\r\n";
+        let mut request = format!(
+            "POST /upload HTTP/1.1\r\nHost: s0-runner.ato.run\r\nTransfer-Encoding: chunked\r\n{}\r\n",
+            assertion_header()
+        )
+        .into_bytes();
+        request.extend_from_slice(body);
+        request.extend_from_slice(b"GET /smuggled HTTP/1.1\r\nHost: s0-runner.ato.run\r\n\r\n");
+        let answer = gated_request(public, &request);
+        assert!(answer.starts_with(b"HTTP/1.1 200"), "{answer:?}");
+
+        let received = upstream.join().unwrap();
+        let mut expected = b"POST /upload HTTP/1.1\r\nHost: s0-runner.ato.run\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
+        expected.extend_from_slice(body);
+        assert_eq!(
+            received, expected,
+            "the chunked body is forwarded through its terminator and no farther"
+        );
+        drop(proxy);
+    }
+
+    /// Ambiguous request framing is refused before the workload is contacted.
+    #[test]
+    fn a_gated_request_with_ambiguous_framing_is_refused_before_the_workload() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let upstream_addr = listener.local_addr().unwrap();
+        let (public, proxy) = gated_proxy(test_gate(), upstream_addr);
+
+        for request in [
+            format!(
+                "POST /upload HTTP/1.1\r\nHost: s0-runner.ato.run\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n{}\r\nhello",
+                assertion_header()
+            ),
+            format!(
+                "POST /upload HTTP/1.1\r\nHost: s0-runner.ato.run\r\nTransfer-Encoding: gzip, chunked\r\n{}\r\n0\r\n\r\n",
+                assertion_header()
+            ),
+        ] {
+            let answer = gated_request(public, request.as_bytes());
+            assert!(answer.starts_with(b"HTTP/1.1 400"), "{answer:?}");
+            assert!(head_contains(&answer, "Connection: close"), "{answer:?}");
+        }
+        assert_no_upstream_connection(&listener);
+        drop(proxy);
+    }
+
+    /// An upgrade becomes a raw pipe only if the upstream answers 101. Any
+    /// other final status is an ordinary one-request response, and the client's
+    /// later bytes are never forwarded.
+    #[test]
+    fn a_gated_upgrade_switches_only_on_101() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut received = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            while !received.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    return (received, Vec::new());
+                }
+                received.extend_from_slice(&chunk[..read]);
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+                )
+                .unwrap();
+            let mut from_client = Vec::new();
+            while from_client.len() < 11 {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                from_client.extend_from_slice(&chunk[..read]);
+            }
+            stream.write_all(b"pong-from-upstream").unwrap();
+            (received, from_client)
+        });
+        let (public, proxy) = gated_proxy(test_gate(), address);
+        let request = format!(
+            "GET /socket HTTP/1.1\r\nHost: s0-runner.ato.run\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n{}\r\n",
+            assertion_header()
+        );
+        let mut client = TcpStream::connect(public).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        client.write_all(request.as_bytes()).unwrap();
+        let mut answer = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        while !answer.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = client.read(&mut chunk).unwrap();
+            assert!(read > 0, "upstream closed before the 101: {answer:?}");
+            answer.extend_from_slice(&chunk[..read]);
+        }
+        assert!(
+            answer.starts_with(b"HTTP/1.1 101 Switching Protocols"),
+            "{answer:?}"
+        );
+        client.write_all(b"ping-client").unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let _ = client.read_to_end(&mut answer);
+        assert!(
+            answer
+                .windows(b"pong-from-upstream".len())
+                .any(|window| window == b"pong-from-upstream"),
+            "bytes must flow from the upstream after the switch: {answer:?}"
+        );
+        let (head, from_client) = upstream.join().unwrap();
+        let head = String::from_utf8(head).unwrap();
+        assert!(head.contains("Upgrade: websocket"), "{head}");
+        assert!(!head.contains(RUN_ASSERTION_HEADER), "{head}");
+        assert_eq!(from_client, b"ping-client".to_vec());
+        drop(proxy);
+
+        // The same upgrade answered 400 stays a single request: no client byte
+        // after the head is ever forwarded.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut received = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            while !received.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    return received;
+                }
+                received.extend_from_slice(&chunk[..read]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .unwrap();
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => received.extend_from_slice(&chunk[..read]),
+                }
+            }
+            received
+        });
+        let (public, proxy) = gated_proxy(test_gate(), address);
+        let mut request = format!(
+            "GET /socket HTTP/1.1\r\nHost: s0-runner.ato.run\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n{}\r\n",
+            assertion_header()
+        )
+        .into_bytes();
+        request.extend_from_slice(b"SMUGGLED-AFTER-UPGRADE");
+        let answer = gated_request(public, &request);
+        assert!(answer.starts_with(b"HTTP/1.1 400"), "{answer:?}");
+        assert!(head_contains(&answer, "Connection: close"), "{answer:?}");
+        let received = upstream.join().unwrap();
+        assert_eq!(
+            count_occurrences(&received, b"SMUGGLED"),
+            0,
+            "a non-101 answer must not forward the client's later bytes: {received:?}"
+        );
+        drop(proxy);
+    }
+
+    /// The forwarded head carries Connection: close and never the assertion
+    /// credential, and the client's Connection/Keep-Alive headers are removed.
+    #[test]
+    fn the_forwarded_gated_head_carries_connection_close_and_no_assertion() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+        let (upstream_addr, upstream) = framed_upstream(None, response);
+        let (public, proxy) = gated_proxy(test_gate(), upstream_addr);
+        let request = format!(
+            "GET /i/ HTTP/1.1\r\nHost: s0-runner.ato.run\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n{}\r\n",
+            assertion_header()
+        );
+        let answer = gated_request(public, request.as_bytes());
+        assert!(answer.starts_with(b"HTTP/1.1 200"), "{answer:?}");
+
+        let received = upstream.join().unwrap();
+        let received = String::from_utf8(received).unwrap();
+        assert!(!received.contains(RUN_ASSERTION_HEADER), "{received}");
+        assert!(
+            head_contains(received.as_bytes(), "Connection: close"),
+            "{received}"
+        );
+        assert!(
+            !head_contains(received.as_bytes(), "Keep-Alive:"),
+            "{received}"
+        );
+        assert_eq!(
+            count_occurrences(received.as_bytes(), b"Connection:"),
+            1,
+            "{received}"
+        );
+        drop(proxy);
+    }
+
+    /// The gate must not half-close the upstream after its one request: some
+    /// servers (Go net/http) cancel a request on client EOF.
+    #[test]
+    fn the_gate_does_not_half_close_the_upstream_after_the_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut received = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !received.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    return (received, true);
+                }
+                received.extend_from_slice(&chunk[..read]);
+            }
+            stream
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .unwrap();
+            let saw_eof = matches!(stream.read(&mut chunk), Ok(0));
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+            (received, saw_eof)
+        });
+        let (public, proxy) = gated_proxy(test_gate(), address);
+        let request = format!(
+            "GET /i/ HTTP/1.1\r\nHost: s0-runner.ato.run\r\n{}\r\n",
+            assertion_header()
+        );
+        let answer = gated_request(public, request.as_bytes());
+        assert!(answer.starts_with(b"HTTP/1.1 200"), "{answer:?}");
+        let (_, saw_eof) = upstream.join().unwrap();
+        assert!(
+            !saw_eof,
+            "the gate must not half-close the upstream after its one request"
+        );
         drop(proxy);
     }
 }
