@@ -177,6 +177,12 @@ impl ValidatorAgent {
             }
             Err(error) => {
                 let rejection_code = classify_rejection(&error).to_owned();
+                // The code is all the uploader sees; the operator needs the
+                // reason. Bundle contents are never part of this message.
+                eprintln!(
+                    "[validator] rejected bundle {} as {rejection_code}: {error:#}",
+                    job.bundle_id
+                );
                 self.api.ack_rejected(&job, &rejection_code)?;
                 Ok(ValidatorRunOutcome::Rejected {
                     bundle_id: job.bundle_id,
