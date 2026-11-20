@@ -17,6 +17,8 @@ services:
       # Operator settings: each is passed through from .env only when set there.
       # Extra Runner ingress origins (Runner 1..3), comma-separated; see README.
       ATO_RUNNER_INGRESS_ORIGINS:
+      # "on" runs DataResource operations in a local isolated executor (see README).
+      ATO_DATA_RESOURCES:
       ATO_AUTH_METHODS:
       ATO_AUTH_AUTO_METHODS:
       # Requests on this socket come from Caddy's management site and carry
