@@ -110,6 +110,10 @@ OUT="$OUT/lifecycle" ATO_CLI="$ATO_CLI" "$HERE/repro/cli_lifecycle_order.sh"
 if [ -n "${ATO_API_DIR:-}" ]; then
   echo '== ato-api resident restart after Runner recovery (AlwaysOnRecovery)'
   (cd "$ATO_API_DIR" && ./node_modules/.bin/vitest run src/tests/always-on-policy.test.ts src/tests/runner-lease-state-authz.test.ts)
+  echo '== ato-api volume operation dispatch, report race and export gate (VolumeOperationDispatch, VolumeOperationReport, VolumeExportGate)'
+  (cd "$ATO_API_DIR" && ./node_modules/.bin/vitest run src/tests/state-volume-operations.test.ts src/tests/portable-instance-snapshot.test.ts)
+  echo '== ato-api owner Stop, Start and Keep running (AlwaysOnOwnerControls)'
+  (cd "$ATO_API_DIR" && ./node_modules/.bin/vitest run src/tests/always-on-start-stop.test.ts)
 fi
 if [ "${RUN_CHECK:-0}" = 1 ] && [ -z "${CHECK_JSON:-}" ]; then
   CHECK_JSON="$OUT/check.json"

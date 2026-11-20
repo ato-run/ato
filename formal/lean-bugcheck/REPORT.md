@@ -570,6 +570,27 @@ A2 と A3 は実機の症状からではなく、A1 のモデルを書くため�
 
 限界: バックオフの遅延と、健全期間による失敗回数のリセットは抽象化した（起動の有無ではなく時刻だけを変えるため）。未確認（`unconfirmed`）の復旧は writer の隔離と合わせて別の検証が必要で、ここでは固定 TCP を解放しないことをテストで確認したのみ。複数 Instance が同じ Runner の枠を争う場合と、再調整の同時実行は対象外。
 
+## 第5回 本番の常駐 Instance の書き出しで見つけた不具合（ato-api、2026-11-20）
+
+本番 ato.run で、利用者管理 Runner（`max_slots=1`、明示配置）上の常駐・`runner_volume` の Instance を書き出した際に 4 件が出た。
+修正は ato-api `fix/volume-checkpoint-export-races`（base `dev` @ `b948d5fae`）。第4回の A1〜A3 は `feat/oss-selfhost-node` にあり `dev` には未マージで、今回の修正はそれらに依存しない。
+
+| ID | 場所（ato-api） | 挙動 | Lean（修正前 → 修正後） | 修正 commit・回帰テスト |
+|---|---|---|---|---|
+| V1 | `volume_operations.ts` `advanceVolumeOperation`（待機側） | 停止中の Run は writer を先に返し、lease の終了は後になる。その間の poll が利用者 Runner の枠不足（`user_runner_no_capacity`）を恒久的な失敗 `state_volume_runner_unavailable` にする | `VolumeOperationDispatch.slot_of_stopping_run_fails_operation_BUG` → `fixed_never_fails_on_usable_runner`、`fixed_dispatches_after_stop`、`fixed_retired_runner_still_fails` | `776f73190`、`state-volume-operations.test.ts`「waits while the stopped Run still occupies…」「still fails a waiting personal operation once its Runner is drained」 |
+| V2 | 同 `completeVolumeOperation` と `advanceRunning` | Runner の報告が独立した複数の書き込みで、lease を終了させてから operation を確定する。その間の `GET /state/operations/:id` が成功した checkpoint を `interrupted` にし、checkpoint 列だけが進む | `VolumeOperationReport.poll_between_report_writes_interrupts_success_BUG` → `fixed_always_consistent`、`fixed_polls_cannot_interrupt_report`、`fixed_late_report_changes_nothing` | `3fc119c14`、同テスト「records the Runner's success even when an owner poll runs between any two of its writes」「applies nothing from a report that loses…」 |
+| V3 | `portable_instance_export.ts` `quiescePortableFilesystemState` | データ付き書き出しが Run を止めて writer の解放を待ち、その後で `state_volume_checkpoint_required` になる | `VolumeExportGate.export_stops_run_then_fails_BUG` → `fixed_refusal_has_no_side_effect`、`fixed_never_stops_a_run`、`fixed_accepts_the_same_exports` | `619dbc1c6`、同テスト「refuses a with-data export of an uncheckpointed volume before stopping its Run」 |
+| V4 | `routes/compute_instances.ts` の Stop / Start / `PATCH runtime-policy`、`always_on.ts`、`execution_authorization.ts` | Stop → Start で `desired_state: stopped` のまま Run が動く（更新権限なし・再起動されない）。ポリシーを戻す PATCH と、内容が変わらない PATCH が稼働中の Run を止める | `AlwaysOnOwnerControls.stop_start_is_not_resident_BUG`、`restoring_policy_stops_the_run_BUG`、`unchanged_policy_request_stops_the_run_BUG` → `fixed_stop_start_is_resident`、`fixed_unchanged_policy_is_a_noop`、`fixed_keep_running_adopts_renewable_run`、`fixed_controls_keep_supervision` | `a28aab0ed`、`always-on-start-stop.test.ts`（8 件） |
+
+設計上の決定:
+
+- V3 は「止める前に拒否」を選んだ。Run は writer 取得時に必ず世代を進め、停止は世代を変えないので、止める前に結果が決まる（`stop_does_not_change_the_answer`、`live_run_is_never_exportable`）。受理される書き出しの集合は変わらない。書き出し内で checkpoint まで行う案は、同期的な capture claim に Runner の非同期処理と新しい job 状態（migration）を持ち込むため採らなかった。
+- V4 は「明示的な Start は常駐の再開」とした。Run を作る前に `desired_state` を `running` に戻すので、Run は最初から更新可能な権限を持ちポリシーに結び付く。PATCH は、変更がなければ何も止めず、`stopped → running` では更新可能な権限を既に持つ Run だけを引き継ぐ。期限固定で起動した Run は従来どおり止めて置き換える（`fixed_keep_running_replaces_hard_deadline_run`）。
+
+モデルを書く過程で、`supervised` の不変条件が最初の定義では証明できず、「意図が `running` で Run が無いなら再調整待ち」を条件に加えた。
+
+限界: V1 は Runner の heartbeat 切れ（オフライン）をモデル化しておらず、実装でも従来どおり失敗にする。枠を別の Instance の Run が占有し続ける場合、operation は待ち続ける（管理プールの既存挙動と同じ）。V2 は D1 の batch が 1 トランザクションであることを前提にする。V4 は `degraded`・`launching`・`starting` と、訪問による起動（`stopped` のままの on-demand Run）を抽象化した。Start の起動と再調整の同時起動は対象外。本番・staging での実機確認はしていない。
+
 ## 引き継ぎ後の修正
 
 対象は `feat/lean-bugcheck` @ `bbeea6f` を起点とする worktree。下の5件を修正し、Lean 4.36.0 で修正版のモデルを検査した。`run.sh` は失敗時に非ゼロ終了し、ソースを書き換えずに回帰検証する。Lean は `$LEAN` または `~/.elan/bin/lean` から指定する。
