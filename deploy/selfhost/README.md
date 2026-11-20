@@ -120,6 +120,8 @@ Runnerの同じユーザー・権限でデータと資格情報を戻し、元�
 
 内部CAでMailを試す場合は、検証用の公開CAをDER化し、`openssl dgst -sha256` で照合した `<64 hex>.der` を `.tmp/mail-ca/` に0644で配置します。validatorはここを読み取り専用で参照し、CLIで同じ条件を試すときは `ATO_TLS_ROOT_DIR` に同じ公開証明書ディレクトリを指定します。検証用の作業コピーの4つのTLS観測に `use = "ato.contract.tls-pinned-root@1"`、`root_ca_digest = "sha256:<64 hex>"` と検証用ホスト名を明記して、新しいbundleをsealします。CA秘密鍵は配布物・binding・validatorに含めません。[固定rootのTLS観測](../../docs/rfcs/draft/PINNED_TLS_ROOT_OBSERVATION.md)
 
+管理者は、検証済みの同じRustリビジョンから `ato-egress-firewall-status` をビルドし、rootだけが変更できる `/usr/local/libexec/ato-egress-firewall-status` に配置します。配布の `ato-egress-firewall.service`、`ato-egress-firewall-status.socket`、`ato-egress-firewall-status@.service` をroot所有のsystem unitとして配置します。前者は管理者が有効化するboot時の設定で、ato専用bridgeの先頭2ルール（1080/TCPを許可、そのほかを拒否）を設定します。後者は引数や要求本文を受け付けず、起動時点のINPUTルールの検査結果だけを返します。Runner起動前に管理者は設定unitとstatus socketを有効化・起動します。Runnerユーザーとワークロードにsudo権限は必要ありません。Runner設定の `ATO_RUNNER_EGRESS_FIREWALL_MODE=verify-only` はこの読み取り専用socketで検査し、規則の欠落・順序違い・検査不能ならネットワーク実行を開始しません。
+
 Mailの固定TCP listenerを割り当てる場合は、他サービスで使用していないゲスト側のIP・ポートを確認します。同居構成のvalidatorから到達できるcontrol bridgeのゲスト側アドレスを使用できます。Runnerの `runner.env` に `ATO_RUNTIME_NETWORK_CONTROLS=true` と `ATO_RUNTIME_FIXED_TCP_ALLOWLIST=<IP>:<port>,...` を指定し、heartbeatの固定TCP・egress能力を確認します。
 
 所有者は対象Runnerを明示してInstanceを停止状態で作成します。運用者は `./stack run --rm --no-deps -T api configure-network INSTANCE_ID RUNNER_ID /run/policy.json` に、読み取り専用でマウントしたポリシーを渡します。ファイルをマウントする実行例です。

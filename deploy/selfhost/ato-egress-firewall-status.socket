@@ -1,0 +1,12 @@
+[Unit]
+Description=Read-only Ato firewall status
+
+[Socket]
+ListenStream=/run/ato-egress-firewall-status.sock
+SocketUser=root
+SocketMode=0666
+Accept=yes
+MaxConnections=8
+
+[Install]
+WantedBy=sockets.target
