@@ -24,7 +24,9 @@ Linux、Docker Engine/Compose v2、Git、OpenSSL、Bashが必要です。Runner�
    ./stack build
    ```
 
-   初回ビルドにはコンテナ・npm・Cargoの依存が必要です。切り離した環境には、事前に作成した3つのイメージ、固定Runnerのバイナリ、Mailのdigest指定イメージを移送します。`./prepare.sh` はローカルのGitオブジェクトからソースを取り出し、validatorのトークンを初回に生成します。ビルドコンテキストに作業中の変更や未追跡ファイルは入りません。
+   初回ビルドにはコンテナ・npm・Cargoの依存が必要です。`./prepare.sh` は指定コミットのGitオブジェクトだけを取り出し、validatorのトークンを初回に生成します。
+
+   外部ネットワークのないゲストでは、ビルド端末でゲストのCPU向けに上記3つのイメージを作成し、`docker image save` で移送します。ゲストには同じ配布ディレクトリ、固定したRunnerバイナリ、Mailが指定するdigestのOCIイメージも用意し、Composeの3つのイメージを `docker image load` してください。ゲストでは次の手順から開始できます。`./start.sh` がローカルの秘密を初期化し、読み込み済みのイメージを起動します。
 
 3. `.env` の `ATO_HOST` に所有者用DNS名、`ATO_BIND_IP` に専用ゲストのLANアドレスを設定します。管理用ホスト名と `*.apps.<管理ホスト>` を同じIPに解決するローカルDNSを設定します。既定の内部ingress名はComposeのDNS aliasに登録されます。既定のbindはloopbackです。標準443を使えない場合は `ATO_HTTPS_PORT` を変更し、URLにも同じポートを付けます。
 
@@ -100,11 +102,12 @@ mkdir -p "$backup"
 ./stack run --rm --no-deps -T --entrypoint tar api -C /var/lib/ato-api -cf - . > "$backup/api.tar"
 ./stack run --rm --no-deps -T --entrypoint tar web -C /data -cf - . > "$backup/tls.tar"
 cp .env versions.env .tmp/secrets/validator_token "$backup/"
+cp -R .tmp/mail-ca "$backup/"
 ```
 
 Runnerではsystemdサービスの停止後、専用ユーザーの `~/.local/share/ato-selfhost`（work、volumes、identity）と `~/.config/ato-selfhost` をアクセス制限付きで別途保存します。同じデバイス資格情報を複製した2台を同時起動しないでください。
 
-空の復元先で同一バージョンを用意し、同じDNS名と保存済み `.env` を設定します。`./prepare.sh` 実行後、保管した専用トークンを `.tmp/secrets/validator_token` へ0444で配置します（親ディレクトリは0700）。APIやCaddyを初めて起動する前に、**空の専用volume**に復元します。
+空の復元先で同一バージョンのイメージ、同じDNS名、保存済みの `.env` を用意します。`./init-runtime.sh` 実行後、保管した専用トークンを `.tmp/secrets/validator_token` に0444で配置し（親ディレクトリは0700）、保管したMailの公開CAを `.tmp/mail-ca/` に戻します。APIやCaddyを初めて起動する前に、**空の専用volume**に復元します。
 
 ```sh
 ./stack run --rm --no-deps -T --entrypoint tar api -C /var/lib/ato-api -xf - < "$backup/api.tar"
