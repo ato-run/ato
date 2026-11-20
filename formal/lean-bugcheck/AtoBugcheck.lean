@@ -2937,3 +2937,134 @@ theorem only_the_fixed_combination_is_live (requeue includeStarting release : Bo
     exact fixed_recovery_relaunches w r (r + 1) hw
 
 end AlwaysOnRecovery
+
+/-! ## ato-api (cross-repo) :: volume operation dispatch after a confirmed stop
+
+`src/services/dynamic_state/volume_operations.ts` (`advanceVolumeOperation`, waiting
+branch). Found on production on 2026-11-20: a checkpoint requested about ten seconds
+after a stop failed `state_volume_runner_unavailable`; the same request succeeded fifty
+seconds later.
+
+A stopping Run gives its writer back before its lease ends, so for a while the resident
+Runner's only slot is still held by the very Run the operation asked to stop. The model
+keeps the operation status, who holds the writer, whether that lease is still open and
+whether the Runner is durably usable (owner, pool, capability, active, not drained).
+Heartbeat freshness is not modelled: an offline Runner still fails the operation. -/
+namespace VolumeOperationDispatch
+
+inductive Status where
+  | waiting | running | failed
+  deriving DecidableEq, Repr
+
+inductive Writer where
+  | free | app | operation
+  deriving DecidableEq, Repr
+
+structure World where
+  status : Status
+  writer : Writer
+  appLeaseOpen : Bool
+  runnerUsable : Bool
+  deriving DecidableEq, Repr
+
+/-- One `advanceVolumeOperation` call. `waitForSlot` is the fix: a full slot keeps the
+    operation waiting instead of failing it. -/
+def poll (waitForSlot : Bool) (w : World) : World :=
+  if w.status != .waiting then w
+  else if !w.runnerUsable then { w with status := .failed, writer := if w.writer == .operation then .free else w.writer }
+  else if w.writer == .app then w
+  else if w.appLeaseOpen then
+    if waitForSlot then { w with writer := .operation }
+    else { w with status := .failed, writer := .free }
+  else { w with status := .running, writer := .operation }
+
+inductive Event where
+  | poll            -- the owner's poll, the cron or the Runner's poll
+  | writerReleased  -- the stopping Run commits or releases its state
+  | leaseEnded      -- the Runner reports the Run stopped
+  | runnerRetired   -- the Runner is drained, archived or loses the capability
+  deriving DecidableEq, Repr
+
+def step (waitForSlot : Bool) (w : World) : Event → World
+  | .poll => poll waitForSlot w
+  | .writerReleased => if w.writer == .app then { w with writer := .free } else w
+  | .leaseEnded => { w with appLeaseOpen := false }
+  | .runnerRetired => { w with runnerUsable := false }
+
+def run (waitForSlot : Bool) (w : World) : List Event → World
+  | [] => w
+  | e :: rest => run waitForSlot (step waitForSlot w e) rest
+
+/-- A checkpoint requested while the App's Run is live on a usable Runner. -/
+def requested : World := ⟨.waiting, .app, true, true⟩
+
+/-- BUG (ato-api `fix/volume-checkpoint-export-races`): the poll that lands between the
+    writer release and the end of the lease fails the operation for good, although the
+    Runner is usable and the stop is completing normally. -/
+theorem slot_of_stopping_run_fails_operation_BUG :
+    (run false requested [.writerReleased, .poll, .leaseEnded, .poll]).status = .failed := by
+  decide
+
+/-- The failure is the timing of the poll alone: the same stop with the poll after the
+    lease ended dispatches the operation. -/
+theorem same_stop_later_poll_dispatches :
+    (run false requested [.writerReleased, .leaseEnded, .poll]).status = .running := by
+  decide
+
+/-- HOLDS (the fix): on a Runner that stays usable no interleaving of polls with the
+    stop's two reports fails the operation. -/
+theorem fixed_never_fails_on_usable_runner (events : List Event)
+    (h : ∀ e ∈ events, e ≠ .runnerRetired) :
+    ∀ w, w.runnerUsable = true → w.status ≠ .failed →
+      (run true w events).status ≠ .failed := by
+  induction events with
+  | nil => intro w _ hs; exact hs
+  | cons e rest ih =>
+    intro w hu hs
+    have hrest : ∀ e ∈ rest, e ≠ .runnerRetired := fun e he => h e (List.mem_cons_of_mem _ he)
+    have he : e ≠ .runnerRetired := h e (List.mem_cons_self ..)
+    apply ih hrest
+    · cases e <;> simp [step, poll] at * <;> (repeat' split) <;> simp_all
+    · cases e <;> simp [step, poll] at * <;> (repeat' split) <;> simp_all
+
+/-- HOLDS: once both reports of the stop arrived, the next poll dispatches. -/
+theorem fixed_dispatches_after_stop (w : World)
+    (hs : w.status = .waiting) (hu : w.runnerUsable = true)
+    (hw : w.writer ≠ .app) (hl : w.appLeaseOpen = false) :
+    (poll true w).status = .running := by
+  cases w with
+  | mk status writer appLeaseOpen runnerUsable =>
+    simp only at hs hu hw hl
+    subst hs hu hl
+    cases writer <;> simp_all [poll]
+
+/-- HOLDS: every order of the stop's reports and any number of early polls ends with
+    the operation running. -/
+theorem fixed_stop_then_checkpoint_runs :
+    (run true requested [.poll, .writerReleased, .poll, .poll, .leaseEnded, .poll]).status = .running ∧
+    (run true requested [.poll, .leaseEnded, .poll, .writerReleased, .poll]).status = .running := by
+  decide
+
+/-- HOLDS (negative case kept by the fix): a Runner that is durably unusable still
+    fails the operation and gives the writer back. -/
+theorem fixed_retired_runner_still_fails (w : World)
+    (hs : w.status = .waiting) (hu : w.runnerUsable = false) :
+    (poll true w).status = .failed ∧ (poll true w).writer ≠ .operation := by
+  cases w with
+  | mk status writer appLeaseOpen runnerUsable =>
+    simp only at hs hu
+    subst hs hu
+    cases writer <;> simp [poll]
+
+/-- HOLDS: while the previous Run still holds the writer nothing is dispatched or
+    failed, with or without the fix (the handover order is unchanged). -/
+theorem waits_for_writer (waitForSlot : Bool) (w : World)
+    (hs : w.status = .waiting) (hu : w.runnerUsable = true) (hw : w.writer = .app) :
+    poll waitForSlot w = w := by
+  cases w with
+  | mk status writer appLeaseOpen runnerUsable =>
+    simp only at hs hu hw
+    subst hs hu hw
+    simp [poll]
+
+end VolumeOperationDispatch
