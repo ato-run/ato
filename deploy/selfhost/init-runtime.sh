@@ -2,9 +2,9 @@
 set -eu
 site=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 keys="$site/.tmp/secrets"
-mkdir -p "$keys" "$site/.tmp/trust" "$site/.tmp/runner-ingress"
+mkdir -p "$keys" "$site/.tmp/trust" "$site/.tmp/mail-ca" "$site/.tmp/runner-ingress"
 chmod 0700 "$keys"
-chmod 0755 "$site/.tmp/trust"
+chmod 0755 "$site/.tmp/trust" "$site/.tmp/mail-ca"
 if [ ! -f "$keys/validator_token" ]; then
   umask 077
   temp=$(mktemp "$keys/.validator.XXXXXXXX")
