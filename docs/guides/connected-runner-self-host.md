@@ -110,6 +110,18 @@ loopback-only Runner with no public origin keeps running without a key.
 `--state-volume-root <directory>` uses the existing volume-store admission;
 configured storage is not advertised as durable until admission succeeds.
 
+## Trusted PROXY v2 source for fixed TCP services
+
+When a workload accepts PROXY v2 only from a trusted IP, set
+`ATO_RUNTIME_FIXED_TCP_PROXY_SOURCE` (or `--fixed-tcp-proxy-source`) to the
+concrete local IP in `ATO_RUNTIME_FIXED_TCP_ALLOWLIST` used by its listener.
+Configure the workload to trust that single address (/32 for IPv4, /128 for
+IPv6). The Runner binds the upstream connection to that IP before connecting
+and writes the observed client address in the PROXY v2 header. The upstream
+must use the same address family. A bind or connect failure closes the
+connection. Leave this option unset for the operating system's usual source
+address selection. Plain TCP allocations keep their existing route.
+
 ## Supervision
 
 After enrolling in the foreground, a systemd user service can reuse those
