@@ -1,9 +1,9 @@
 diff --git a/src/ato_identity.rs b/src/ato_identity.rs
 new file mode 100644
-index 0000000..b189376
+index 0000000..21fff9d
 --- /dev/null
 +++ b/src/ato_identity.rs
-@@ -0,0 +1,367 @@
+@@ -0,0 +1,373 @@
 +//! Ato identity header support.
 +//!
 +//! Ato's app gateway removes client-sent identity headers and adds
@@ -138,11 +138,6 @@ index 0000000..b189376
 +        validate_account(value)?;
 +        Ok(Some((identity, value.to_owned())))
 +    }
-+
-+    /// The resolved identity, or `None` when the feature is not enabled.
-+    pub fn identity(&self) -> Option<&AtoIdentity> {
-+        self.0.as_deref()
-+    }
 +}
 +
 +/// Validate the account value carried by the header.
@@ -185,6 +180,17 @@ index 0000000..b189376
 +///
 +/// The session keeps only the account name: no password (the broker's or the
 +/// person's) is stored for a session opened this way.
++/// End a session the gateway no longer vouches for: remove its cached client
++/// and clear the session, so the next page is the password form.
++pub async fn forget_account(
++    cache: &JmapClientCache,
++    account: &str,
++    session: &mut TypedSession<MissiveSession>,
++) {
++    cache.remove(account);
++    let _ = session.clear().await;
++}
++
 +pub async fn open_account(
 +    identity: &AtoIdentity,
 +    cache: &JmapClientCache,
@@ -799,7 +805,7 @@ index 8d7a3dd..aae6a89 100644
 +    }
  }
 diff --git a/src/routes/pages.rs b/src/routes/pages.rs
-index 24c3d58..7af39b8 100644
+index 24c3d58..156ed97 100644
 --- a/src/routes/pages.rs
 +++ b/src/routes/pages.rs
 @@ -1,6 +1,10 @@
@@ -813,7 +819,7 @@ index 24c3d58..7af39b8 100644
  use crate::session::MissiveSession;
  
  #[derive(Template)]
-@@ -33,22 +37,72 @@ struct ContactsTemplate {
+@@ -33,22 +37,80 @@ struct ContactsTemplate {
      version: &'static str,
  }
  
@@ -845,6 +851,14 @@ index 24c3d58..7af39b8 100644
 +    {
 +        return Ok(Some(account));
      }
++    // An impersonated session (no stored password) without the header is not
++    // this visitor's: drop it and show the password form instead.
++    if session.data().password.is_none() {
++        if let Some(username) = session.data().username.clone() {
++            ato_identity::forget_account(cache, &username, session).await;
++        }
++        return Ok(None);
++    }
 +    Ok(session.data().username.clone())
  }
  
@@ -896,7 +910,7 @@ index 24c3d58..7af39b8 100644
              active_app: "mail".to_string(),
              version: env!("CARGO_PKG_VERSION"),
          })
-@@ -57,10 +111,20 @@ pub async fn inbox(session: TypedSession<MissiveSession>) -> impl IntoResponse {
+@@ -57,10 +119,20 @@ pub async fn inbox(session: TypedSession<MissiveSession>) -> impl IntoResponse {
      }
  }
  
@@ -920,7 +934,7 @@ index 24c3d58..7af39b8 100644
              active_app: "calendar".to_string(),
              version: env!("CARGO_PKG_VERSION"),
          })
-@@ -69,10 +133,20 @@ pub async fn calendar(session: TypedSession<MissiveSession>) -> impl IntoRespons
+@@ -69,10 +141,20 @@ pub async fn calendar(session: TypedSession<MissiveSession>) -> impl IntoRespons
      }
  }
  
@@ -945,7 +959,7 @@ index 24c3d58..7af39b8 100644
              version: env!("CARGO_PKG_VERSION"),
          })
 diff --git a/src/session.rs b/src/session.rs
-index 62ccf38..aef753f 100644
+index 62ccf38..e606ea1 100644
 --- a/src/session.rs
 +++ b/src/session.rs
 @@ -7,6 +7,7 @@ use axum::extract::FromRequestParts;
@@ -965,7 +979,7 @@ index 62ccf38..aef753f 100644
              .await
              .map_err(|_| MissiveError::SessionRequired)?;
  
-@@ -67,19 +68,54 @@ impl FromRequestParts<AppState<MissiveConfig>> for AuthenticatedClient {
+@@ -67,19 +68,52 @@ impl FromRequestParts<AppState<MissiveConfig>> for AuthenticatedClient {
                      message: "Client cache not available".to_string(),
                  })
              })?;
@@ -1017,17 +1031,15 @@ index 62ccf38..aef753f 100644
 +                let raw_session = session.session().clone();
 +                Ok(AuthenticatedClient(client, username, raw_session))
 +            }
-+            // A session opened by the Ato header carries no password. Rebuild
-+            // its client through the impersonator when the cache misses; never
-+            // try to read a stored password for it.
++            // A session opened by the Ato header carries no password, and it is
++            // only valid while the gateway keeps naming that account. A request
++            // without the header (another person signed in to Ato in this
++            // browser, or the account link was removed) must not inherit it.
 +            None => {
-+                let username = stored_username.ok_or(MissiveError::SessionRequired)?;
-+                let identity = identity.identity().ok_or(MissiveError::SessionRequired)?;
-+                let client =
-+                    ato_identity::open_account(identity, &cache, jmap_url, &username, &mut session)
-+                        .await?;
-+                let raw_session = session.session().clone();
-+                Ok(AuthenticatedClient(client, username, raw_session))
++                if let Some(username) = stored_username {
++                    ato_identity::forget_account(&cache, &username, &mut session).await;
++                }
++                Err(MissiveError::SessionRequired)
 +            }
 +        }
      }
