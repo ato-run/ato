@@ -127,8 +127,6 @@ Runnerの同じユーザー・権限でデータと資格情報を戻し、元�
 
 Mailの固定TCP listenerを割り当てる場合は、他サービスで使用していないゲスト側のIP・ポートを確認します。同居構成のvalidatorから到達できるcontrol bridgeのゲスト側アドレスを使用できます。Runnerの `runner.env` に `ATO_RUNTIME_NETWORK_CONTROLS=true` と `ATO_RUNTIME_FIXED_TCP_ALLOWLIST=<IP>:<port>,...` を指定し、heartbeatの固定TCP・egress能力を確認します。
 
-StalwartでPROXY v2を使う場合は、`runner.env` の `ATO_RUNTIME_FIXED_TCP_PROXY_SOURCE` に固定listenerと同じゲスト側のIPを指定します。Stalwartの信頼するproxyにもその1アドレス（IPv4なら /32、IPv6なら /128）を設定します。RunnerはこのIPを送信元にして同じアドレス族のサービスへ接続します。省略時はOSが送信元を選択します。
-
 所有者は対象Runnerを明示してInstanceを停止状態で作成します。運用者は `./stack run --rm --no-deps -T api configure-network INSTANCE_ID RUNNER_ID /run/policy.json` に、読み取り専用でマウントしたポリシーを渡します。ファイルをマウントする実行例です。
 
 ```sh

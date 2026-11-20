@@ -1439,9 +1439,6 @@ pub struct WorkerConfig {
     /// Comma-separated exact sockets this slot may own as fixed listeners.
     #[arg(long, env = "ATO_RUNTIME_FIXED_TCP_ALLOWLIST", default_value = "")]
     pub fixed_tcp_allowlist: String,
-    /// Local listener IP trusted by fixed TCP workloads that require PROXY v2.
-    #[arg(long, env = "ATO_RUNTIME_FIXED_TCP_PROXY_SOURCE")]
-    pub fixed_tcp_proxy_source: Option<std::net::IpAddr>,
     /// How a `process` workload is isolated. `namespace` (default) needs
     /// bubblewrap. `host-boundary` is for a dedicated machine that cannot
     /// create namespaces: the machine is the boundary, and the workload runs
@@ -1925,14 +1922,12 @@ impl ConnectedWorker {
                 .ok()
         });
         api.persistent_volumes = volume_store.is_some();
-        let fixed_tcp = runtime_launch::network_broker::FixedTcpRegistry::with_proxy_source(
-            if config.network_controls {
+        let fixed_tcp =
+            runtime_launch::network_broker::FixedTcpRegistry::new(if config.network_controls {
                 &config.fixed_tcp_allowlist
             } else {
                 ""
-            },
-            config.fixed_tcp_proxy_source,
-        )?;
+            })?;
         Ok(Self {
             config,
             api,
@@ -7869,7 +7864,6 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             state_volume_root: None,
             network_controls: false,
             fixed_tcp_allowlist: String::new(),
-            fixed_tcp_proxy_source: None,
             isolation: IsolationMode::Namespace,
             workload_uid: None,
             workload_gid: None,
@@ -7903,7 +7897,6 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             state_volume_root: None,
             network_controls: false,
             fixed_tcp_allowlist: String::new(),
-            fixed_tcp_proxy_source: None,
             isolation: IsolationMode::Namespace,
             workload_uid: None,
             workload_gid: None,
@@ -7948,7 +7941,6 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             state_volume_root: None,
             network_controls: false,
             fixed_tcp_allowlist: String::new(),
-            fixed_tcp_proxy_source: None,
             isolation: IsolationMode::Namespace,
             workload_uid: None,
             workload_gid: None,
@@ -8011,7 +8003,6 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             state_volume_root: None,
             network_controls: false,
             fixed_tcp_allowlist: String::new(),
-            fixed_tcp_proxy_source: None,
             isolation: IsolationMode::Namespace,
             workload_uid: None,
             workload_gid: None,
@@ -8079,7 +8070,6 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             state_volume_root: None,
             network_controls: false,
             fixed_tcp_allowlist: String::new(),
-            fixed_tcp_proxy_source: None,
             isolation: IsolationMode::Namespace,
             workload_uid: None,
             workload_gid: None,
@@ -8305,7 +8295,6 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
             state_volume_root: None,
             network_controls: false,
             fixed_tcp_allowlist: String::new(),
-            fixed_tcp_proxy_source: None,
             isolation: IsolationMode::Namespace,
             workload_uid: None,
             workload_gid: None,

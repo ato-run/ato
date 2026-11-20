@@ -648,7 +648,6 @@ struct FixedTarget {
     run_id: String,
     generation: u64,
     address: SocketAddr,
-    proxy_source: Option<IpAddr>,
     client_address_transport: ClientAddressTransport,
     connections: Arc<ConnectionGroup>,
 }
@@ -697,7 +696,6 @@ impl FixedListener {
                                         peer,
                                         dialled: address,
                                         upstream: target.address,
-                                        proxy_source: target.proxy_source,
                                         client_address_transport: target.client_address_transport,
                                     },
                                     &group,
@@ -743,15 +741,10 @@ impl Drop for FixedListener {
 /// may bind only addresses explicitly configured for its Runner slot.
 pub struct FixedTcpRegistry {
     listeners: Mutex<BTreeMap<SocketAddr, FixedListener>>,
-    proxy_source: Option<IpAddr>,
 }
 
 impl FixedTcpRegistry {
     pub fn new(allowlist: &str) -> Result<Self> {
-        Self::with_proxy_source(allowlist, None)
-    }
-
-    pub fn with_proxy_source(allowlist: &str, proxy_source: Option<IpAddr>) -> Result<Self> {
         let allowed = allowlist
             .split(',')
             .map(str::trim)
@@ -762,22 +755,12 @@ impl FixedTcpRegistry {
                     .with_context(|| format!("invalid fixed TCP allowlist entry `{entry}`"))
             })
             .collect::<Result<BTreeSet<_>>>()?;
-        if let Some(source) = proxy_source {
-            ensure!(
-                !source.is_unspecified()
-                    && !source.is_multicast()
-                    && source != IpAddr::V4(Ipv4Addr::BROADCAST)
-                    && allowed.iter().any(|listener| listener.ip() == source),
-                "fixed TCP proxy source must be a concrete unicast IP in the listener allowlist"
-            );
-        }
         let listeners = allowed
             .into_iter()
             .map(|address| Ok((address, FixedListener::bind(address)?)))
             .collect::<Result<BTreeMap<_, _>>>()?;
         Ok(Self {
             listeners: Mutex::new(listeners),
-            proxy_source,
         })
     }
 
@@ -869,21 +852,10 @@ impl FixedTcpRegistry {
                 && state.pending_run_id.as_deref() == Some(run_id),
             "fixed TCP activation does not match pending generation"
         );
-        let proxy_source = match allocation.client_address_transport {
-            ClientAddressTransport::None => None,
-            ClientAddressTransport::ProxyProtocolV2 => self.proxy_source,
-        };
-        if let Some(source) = proxy_source {
-            ensure!(
-                source == address.ip() && source.is_ipv4() == target.is_ipv4(),
-                "fixed TCP proxy source must match the listener IP and upstream address family"
-            );
-        }
         state.target = Some(FixedTarget {
             run_id: run_id.to_owned(),
             generation: allocation.generation,
             address: target,
-            proxy_source,
             client_address_transport: allocation.client_address_transport,
             connections: Arc::new(ConnectionGroup::default()),
         });
@@ -929,23 +901,7 @@ struct FixedHop {
     peer: SocketAddr,
     dialled: SocketAddr,
     upstream: SocketAddr,
-    proxy_source: Option<IpAddr>,
     client_address_transport: ClientAddressTransport,
-}
-
-fn connect_fixed_upstream(upstream: SocketAddr, source: Option<IpAddr>) -> io::Result<TcpStream> {
-    use socket2::{Domain, Protocol, Socket, Type};
-    let Some(source) = source else {
-        return TcpStream::connect_timeout(&upstream, CONNECT_TIMEOUT);
-    };
-    let socket = Socket::new(
-        Domain::for_address(upstream),
-        Type::STREAM,
-        Some(Protocol::TCP),
-    )?;
-    socket.bind(&SocketAddr::new(source, 0).into())?;
-    socket.connect_timeout(&upstream.into(), CONNECT_TIMEOUT)?;
-    Ok(socket.into())
 }
 
 fn proxy_fixed(
@@ -970,7 +926,7 @@ fn proxy_fixed(
             }
         }
     };
-    let Ok(mut upstream) = connect_fixed_upstream(hop.upstream, hop.proxy_source) else {
+    let Ok(mut upstream) = TcpStream::connect_timeout(&hop.upstream, CONNECT_TIMEOUT) else {
         return;
     };
     if !connections.track(connection_id, &upstream) {
@@ -1334,89 +1290,6 @@ mod tests {
         );
 
         registry.deactivate("run-current", &current);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn proxy_source_uses_the_fixed_listener_ip_for_the_actual_tcp_peer() {
-        // Linux routes the whole 127/8 network locally. A normal second hop
-        // to 127.0.0.1 uses 127.0.0.1; the trusted listener here is 127.0.0.2.
-        let reserved = TcpListener::bind("127.0.0.2:0").unwrap();
-        let public = reserved.local_addr().unwrap();
-        drop(reserved);
-        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
-        let target = upstream.local_addr().unwrap();
-        let registry =
-            FixedTcpRegistry::with_proxy_source(&public.to_string(), Some(public.ip())).unwrap();
-        let current =
-            transported_allocation("mail", public, 1, ClientAddressTransport::ProxyProtocolV2);
-        registry
-            .register_pending("run", std::slice::from_ref(&current))
-            .unwrap();
-        registry.activate("run", &current, target).unwrap();
-
-        let mut client = TcpStream::connect(public).unwrap();
-        client.write_all(b"request").unwrap();
-        client.shutdown(Shutdown::Write).unwrap();
-        let (mut stream, peer) = upstream.accept().unwrap();
-        assert_eq!(peer.ip(), public.ip());
-        let mut received = Vec::new();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(3)))
-            .unwrap();
-        stream.read_to_end(&mut received).unwrap();
-        let mut expected = proxy_protocol_v2_header(client.local_addr().unwrap(), public).unwrap();
-        expected.extend_from_slice(b"request");
-        assert_eq!(received, expected);
-        stream.write_all(b"response").unwrap();
-        stream.shutdown(Shutdown::Write).unwrap();
-        let mut response = Vec::new();
-        client
-            .set_read_timeout(Some(Duration::from_secs(3)))
-            .unwrap();
-        client.read_to_end(&mut response).unwrap();
-        assert_eq!(response, b"response");
-    }
-
-    #[test]
-    fn proxy_source_refuses_wildcards_unknown_addresses_and_family_mismatches() {
-        for address in ["0.0.0.0:0", "[::]:0"] {
-            let socket = address.parse::<SocketAddr>().unwrap();
-            assert!(FixedTcpRegistry::with_proxy_source(address, Some(socket.ip())).is_err());
-        }
-        let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
-        let public = reserved.local_addr().unwrap();
-        drop(reserved);
-        assert!(
-            FixedTcpRegistry::with_proxy_source(
-                &public.to_string(),
-                Some("127.0.0.2".parse().unwrap())
-            )
-            .is_err()
-        );
-        let registry =
-            FixedTcpRegistry::with_proxy_source(&public.to_string(), Some(public.ip())).unwrap();
-        let current =
-            transported_allocation("mail", public, 1, ClientAddressTransport::ProxyProtocolV2);
-        registry
-            .register_pending("run", std::slice::from_ref(&current))
-            .unwrap();
-        assert!(
-            registry
-                .activate("run", &current, "[::1]:143".parse().unwrap())
-                .is_err()
-        );
-
-        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
-        upstream.set_nonblocking(true).unwrap();
-        assert!(
-            connect_fixed_upstream(upstream.local_addr().unwrap(), Some("::1".parse().unwrap()))
-                .is_err()
-        );
-        assert_eq!(
-            upstream.accept().unwrap_err().kind(),
-            io::ErrorKind::WouldBlock
-        );
     }
 
     /// The header is the published wire format, byte for byte.
