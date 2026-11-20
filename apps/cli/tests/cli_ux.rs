@@ -406,3 +406,108 @@ fn a_worker_without_ports_packs_in_a_web_db_queue_worker_group() {
         explicit_ref
     );
 }
+
+/// The paths an image declares but the manifest cannot assign are named while
+/// the image configuration is readable, before a Run would refuse them.
+#[cfg(unix)]
+#[test]
+fn pack_lists_the_image_volumes_the_manifest_cannot_assign() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let docker = bin.join("docker");
+    fs::write(
+        &docker,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "context show") printf '%s\n' default ;;
+  "context inspect") printf '%s\n' 'unix:///var/run/docker.sock' ;;
+  "info --format")
+    printf '%s\n' '{"OSType":"linux","Architecture":"x86_64","OperatingSystem":"Test Linux","SecurityOptions":["name=rootless"]}'
+    ;;
+  "image inspect")
+    printf '%s\n' '{"/data":{},"/var/opt/extra":{},"/var/log/extra":{}}'
+    ;;
+  *) exit 1 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&docker, fs::Permissions::from_mode(0o700)).unwrap();
+    let home = root.path().join("home");
+    let output = ato()
+        .env("PATH", &bin)
+        .env("ATO_HOME", &home)
+        .env_remove("DOCKER_HOST")
+        .env_remove("DOCKER_CONTEXT")
+        .args(["pack"])
+        .arg(sample("oci-persistent-volume-proof"))
+        .arg("--output")
+        .arg(root.path().join("proof.capsule"))
+        .output()
+        .unwrap();
+    let stdout = assert_success(output);
+    assert!(
+        stdout.contains("oci-mount derivation_ref=sha256:"),
+        "{stdout}"
+    );
+    // `/data` is declared as the state slot; the other two paths are not.
+    assert!(
+        stdout.contains("checked=yes unassigned=/var/log/extra,/var/opt/extra"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("oci-mount next=a Run refuses an image VOLUME"),
+        "{stdout}"
+    );
+}
+
+/// An image whose configuration cannot be read is reported as unchecked
+/// instead of disappearing from the diagnosis.
+#[cfg(unix)]
+#[test]
+fn pack_reports_an_unreadable_image_configuration_as_unchecked() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let docker = bin.join("docker");
+    fs::write(
+        &docker,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "context show") printf '%s\n' default ;;
+  "context inspect") printf '%s\n' 'unix:///var/run/docker.sock' ;;
+  "info --format") printf '%s\n' '{"OSType":"linux","Architecture":"x86_64","OperatingSystem":"Test Linux"}' ;;
+  "image inspect")
+    printf '%s\n' 'Error response from daemon: No such image: proof' >&2
+    exit 1
+    ;;
+  *) exit 1 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&docker, fs::Permissions::from_mode(0o700)).unwrap();
+    let home = root.path().join("home");
+    let output = ato()
+        .env("PATH", &bin)
+        .env("ATO_HOME", &home)
+        .env_remove("DOCKER_HOST")
+        .env_remove("DOCKER_CONTEXT")
+        .args(["pack"])
+        .arg(sample("oci-persistent-volume-proof"))
+        .arg("--output")
+        .arg(root.path().join("proof.capsule"))
+        .output()
+        .unwrap();
+    let stdout = assert_success(output);
+    assert!(
+        stdout.contains("checked=no reason=the image is not present locally"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("was not checked"), "{stdout}");
+}

@@ -16,6 +16,7 @@ mod llm_serve;
 mod mcp_stdio;
 mod model_cache;
 mod object_transport;
+mod oci_mounts;
 mod portable_dependency;
 mod publication;
 mod run_bindings;
@@ -1501,6 +1502,13 @@ fn report_route_capabilities(bundle: &ato_objects::PortableApplicationBundle) {
             println!("{line}");
         }
     }
+    // The image configuration is readable here, so the paths this profile
+    // cannot assign are named before a Run would refuse them.
+    for (_, validated, _) in &routes {
+        for line in oci_mounts::lines(validated) {
+            println!("{line}");
+        }
+    }
 }
 
 /// The capability lines for one validated route.
@@ -1567,6 +1575,14 @@ fn preflight_portable_route(
     let host = ato_host_facts::HostFacts::probe(std::slice::from_ref(&requirements));
     let status = ato_host_facts::execution_status(&host, &requirements);
     if status.state == ato_host_facts::CapabilityState::Advertised {
+        // Name the image mount paths this profile cannot assign before the
+        // Bindings prompt and before anything is started.
+        let diagnosis = oci_mounts::lines(validated);
+        if detailed || oci_mounts::needs_attention(&diagnosis) {
+            for line in &diagnosis {
+                eprintln!("{line}");
+            }
+        }
         return Ok(host);
     }
     let code = if hub.is_some() {

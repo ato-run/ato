@@ -1450,6 +1450,19 @@ pub(super) fn publish_pinned_bytes(
     Ok((reference, response.url))
 }
 
+/// Print the image mount paths the manifest cannot assign, before uploading.
+///
+/// A publisher needs this before a version is written: it is the same
+/// diagnosis `ato run` acts on, read from the image configuration when that
+/// is possible and reported as unchecked when it is not.
+fn report_image_mounts(derivations: &[ValidatedPortableApplication]) {
+    for validated in derivations {
+        for line in crate::oci_mounts::lines(validated) {
+            eprintln!("{line}");
+        }
+    }
+}
+
 fn send_base64_bytes(
     args: &PublishArgs,
     bytes: &[u8],
@@ -1470,6 +1483,7 @@ fn send_base64_bytes(
     // routes rather than from any publisher-declared value.
     let formed = crate::hub::validate_formed_bundle_document(bytes)
         .with_context(|| format!("{} must not be published", args.capsule.display()))?;
+    report_image_mounts(&formed.derivations);
     let capabilities =
         derive_capabilities(&formed.bundle, &formed.derivations).with_context(|| {
             format!(
@@ -1589,6 +1603,7 @@ fn publish_large(
     let formed = crate::hub::validate_formed_bundle_document(&bytes)
         .with_context(|| format!("{} must not be published", args.capsule.display()))
         .map_err(LargePublish::Fatal)?;
+    report_image_mounts(&formed.derivations);
     let capabilities = derive_capabilities(&formed.bundle, &formed.derivations)
         .with_context(|| {
             format!(
