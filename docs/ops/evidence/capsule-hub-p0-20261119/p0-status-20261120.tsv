@@ -1,0 +1,59 @@
+調査ID	アプリ名	Hub参照	前回の結果	現行digest	Hub検証状態	実行方式	必須Binding	既知の最初の失敗段階	分類	次のアクション
+O0002	Kestra	capsules/koh0920/kestra	起動未確認	same	experimental	oci	-	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0003	Wekan	capsules/koh0920/wekan	起動未確認	same	experimental	other	-	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0005	Apache Superset	capsules/koh0920/superset	起動未確認	same	experimental	oci	secret_key,admin_password	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0006	Gitea	capsules/koh0920/gitea	主要操作確認	changed	verified	oci	admin_password	主要操作: 非公開リポジトリとIssue作成・読み出し	完了	digest変更のため回帰確認
+O0009	Keycloak	capsules/koh0920/keycloak	起動未確認	same	experimental	oci	admin_password	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0015	Stirling-PDF	capsules/koh0920/stirling-pdf	Contract確認	same	verified	native	-	起動: Javaが一時ディレクトリを作れず終了	Derivation（一時領域）	現行digestで9段階を1件ずつ確認
+O0016	Uptime Kuma	capsules/koh0920/uptime-kuma	主要操作確認	changed	verified	oci	-	主要操作: ログインと監視対象の登録・再取得	完了	digest変更のため回帰確認
+O0022	Beszel	capsules/koh0920/beszel	主要操作確認	same	verified	oci	-	主要操作: 管理者作成と監視対象登録	完了	維持
+O0025	GLPI	capsules/koh0920/glpi	起動未確認	same	experimental	other	db_password,db_root,app_db_password	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0026	Grafana	capsules/koh0920/grafana	主要操作確認	same	experimental	oci	admin_password	主要操作: ダッシュボードとテキストパネル作成・照合	完了（現行はdigest変更で成功履歴なし）	現行digestで9段階を1件ずつ確認
+O0031	Mattermost	capsules/koh0920/mattermost	起動未確認	same	experimental	other	db_password,app_db_password	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0033	Memos	capsules/koh0920/memos	主要操作確認	same	verified	oci	-	主要操作: メモ作成とAPI読み出し	完了	維持
+O0036	Odoo	capsules/koh0920/odoo	起動未確認	same	experimental	other	db_password,app_db_password	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0038	OpenProject	capsules/koh0920/openproject	起動未確認	same	experimental	other	db_password,app_db_password,app_secret	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0040	SiYuan	capsules/koh0920/siyuan	主要操作確認	changed	verified		-	主要操作: ノートブックとMarkdown文書の作成・照合	完了	digest変更のため回帰確認
+O0041	Strapi	capsules/koh0920/strapi	起動未確認	same	experimental	oci	-	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0043	Twenty	capsules/koh0920/twenty	起動未確認	same	experimental	other	db_password,app_db_password,app_secret	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0048	chatwoot	capsules/koh0920/chatwoot	起動未確認	same	experimental	other	db_password,app_db_password,app_secret	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0055	AFFiNE	capsules/koh0920/affine	起動未確認	same	experimental	native	-	起動: ElectronのIOKit呼び出しで終了	ホスト（GUI権限）/上流	現行digestで9段階を1件ずつ確認
+O0056	Apache Airflow	capsules/koh0920/airflow	起動未確認	same	experimental	oci	-	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0057	Authelia	capsules/koh0920/authelia	起動未確認	same	experimental	oci	session_secret,storage_key,jwt_secret,login_password	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0065	Formbricks	capsules/koh0920/formbricks	起動未確認	same	experimental	other	db_password,app_db_password,auth_secret,encryption_key	起動: Web側の依存サービスと保存先	Derivation（複数書き込み領域・Web依存）	現行digestで9段階を1件ずつ確認
+O0072	Homepage (gethomepage)	capsules/koh0920/homepage	主要操作確認	changed	verified	oci	-	主要操作: サービス一覧の読み込みとリンク照合	完了	digest変更のため回帰確認
+O0075	Krayin	capsules/koh0920/krayin	起動未確認	same	experimental	other	db_password,db_root,app_db_password,app_key	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0078	Matomo	capsules/koh0920/matomo	起動未確認	same	experimental	other	db_password,db_root	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0079	NocoDB	capsules/koh0920/nocodb	起動未確認	same	experimental	oci	-	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0081	Paperless-ngx	capsules/koh0920/paperless-ngx	起動未確認	same	experimental	other	admin_password	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0083	Plane	capsules/koh0920/plane	起動未確認	same	experimental	other	db_password,queue_password,app_db_password,app_queue_password,site_key,live_key,object_region,object_bucket,object_endpoint,object_key,object_secret	起動: RabbitMQ(Erlang)がprim_tty:isattyで終了	Derivation/ホスト（amd64エミュレーション）	現行digestで9段階を1件ずつ確認
+O0085	Rocket.Chat	capsules/koh0920/rocket-chat	起動未確認	same	experimental	other	-	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0087	Super Productivity	capsules/koh0920/super-productivity	主要操作確認	changed	verified	other	-	主要操作: タスク追加と再読み込み	完了（現行digestで回帰確認が必要）	現行digestで9段階を1件ずつ確認
+O0095	AppFlowy	capsules/koh0920/appflowy	Contract確認	same	verified	native	-	主要操作: 初期画面が黒くセッション未作成	上流 or ホスト（GUIセッション）	現行digestで9段階を1件ずつ確認
+O0101	Invoice Ninja	capsules/koh0920/invoice-ninja	起動未確認	same	experimental	other	db_password,db_root,app_db_password,app_key	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0103	Leantime	capsules/koh0920/leantime	起動未確認	same	experimental	other	db_password,db_root,app_db_password,session_key	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0110	TriliumNext Notes	capsules/koh0920/trilium	主要操作確認	same	verified		-	主要操作: 子ノート作成と再読み込み照合	完了	維持
+O0132	Redmine	capsules/koh0920/redmine	主要操作確認	changed	verified	oci	secret_key,admin_password	主要操作: 非公開プロジェクトとチケット作成・照合	完了	digest変更のため回帰確認
+O0133	WordPress	capsules/koh0920/wordpress	主要操作確認	changed	verified	oci	site_key,admin_password	主要操作: 下書き作成と再取得	完了	digest変更のため回帰確認
+O0134	GitLab Community Edition	capsules/koh0920/gitlab-ce	起動未確認	same	experimental	oci	root_password	取得: 固定digestイメージのストリーム途中終了	ホスト（ネットワーク/ディスク）＋Derivation（3パス）	現行digestで9段階を1件ずつ確認
+O0135	PostgreSQL	capsules/koh0920/postgresql	主要操作確認	changed	verified	other	db_password	主要操作: 一時テーブル作成とSQL集計	完了	digest変更のため回帰確認
+O0136	Immich	capsules/koh0920/immich	起動未確認	same	experimental	other	db_password,app_db_password	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0137	Moodle	capsules/koh0920/moodle	起動未確認	same	experimental	other	db_password,app_db_password,admin_password,site_origin	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0138	opencode	capsules/koh0920/opencode	起動未確認	same	experimental	native	-	起動: ElectronのIOKit呼び出しで終了	ホスト（GUI権限）/上流	現行digestで9段階を1件ずつ確認
+O0139	QGIS	capsules/koh0920/qgis	起動未確認	same	experimental	native	-	取得: DMG展開が2GiB上限で停止	CLI（DMG展開上限。修正候補あり）	現行digestで9段階を1件ずつ確認
+O0140	ComfyUI	capsules/koh0920/comfyui	起動未確認	same	experimental	oci	-	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0141	Excalidraw	capsules/koh0920/excalidraw	主要操作確認	same	verified	other	-	主要操作: 描画・保存・再読み込み・書き出しに成功	完了	維持
+O0142	Pandoc	capsules/koh0920/pandoc	主要操作確認	same	verified	oci	-	主要操作: MarkdownからHTMLへの変換	完了	維持
+O0143	ONLYOFFICE Docs	capsules/koh0920/onlyoffice-docs	起動未確認	same	experimental	oci	jwt_secret	取得: 固定digestイメージのストリーム途中終了	ホスト（ネットワーク/ディスク）＋Derivation（4パス）	現行digestで9段階を1件ずつ確認
+O0144	MediaWiki	capsules/koh0920/mediawiki	起動未確認	same	experimental	oci	-	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0145	LibreOffice	capsules/koh0920/libreoffice	主要操作確認	changed	verified	native	-	主要操作: Writer編集・保存・読み戻しに成功	完了	digest変更のため回帰確認
+O0146	Cline	capsules/koh0920/cline	起動未確認	same	experimental	oci	login_password	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0147	PaddleOCR	capsules/koh0920/paddleocr	起動未確認	same	experimental	oci	-	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0148	Fess	capsules/koh0920/fess	起動未確認	same	experimental	other	-	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0149	LibreChat	capsules/koh0920/librechat	起動未確認	same	experimental	other	creds_key,creds_iv,jwt_secret,refresh_secret	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0150	Snipe-IT	capsules/koh0920/snipe-it	起動未確認	same	experimental	other	db_password,db_root,app_db_password,app_key	未実行（この環境ではRun開始不可）	未検証	現行digestで9段階を1件ずつ確認
+O0151	RustDesk	capsules/koh0920/rustdesk	起動未確認	same	experimental	native	-	起動: 署名済みアプリが終了コード255	上流/CLI（ネイティブ起動）	現行digestで9段階を1件ずつ確認
+O0152	OpenHands	capsules/koh0920/openhands	起動未確認	same	experimental	native	-	起動: 署名ポリシー不一致(adhoc)	セキュリティ（署名検証）	現行digestで9段階を1件ずつ確認
+O0153	Gemini CLI	capsules/koh0920/gemini-cli	起動未確認	same	experimental	oci	-	取得: OCIイメージ取得失敗の原因表示が空	CLI（エラー表示）/ホスト	現行digestで9段階を1件ずつ確認
+O0154	Mermaid	capsules/koh0920/mermaid	主要操作確認	changed	verified	oci	-	主要操作: SVG描画とラベル照合	完了	digest変更のため回帰確認
+O0155	code-server	capsules/koh0920/code-server	主要操作確認	same	verified	oci	login_password	主要操作: ファイルを開いて編集・保存	完了	維持

@@ -187,3 +187,5 @@ docker volume ls --filter "name=ato-" --format '{{.Name}}'
 ```
 
 Dockerを使わないDがあるアプリは `--list-derivations` の `realization` が `process` のDを選ぶ。ネイティブウィンドウのDは、親プロセスがサンドボックス内にあると `native_sandbox_unavailable` で拒否されるため、通常のターミナルから実行する。
+
+全58件の現状（前回の結果、現行digestとの一致、Hub検証状態、実行方式、必須Binding、既知の最初の失敗段階、分類、次のアクション）は[アプリ別の現状](evidence/capsule-hub-p0-20261119/p0-status-20261120.tsv)にまとめた。前回の内訳は主要操作確認17件、Contract確認のみ2件、起動未確認39件で、今回は増減していない。
