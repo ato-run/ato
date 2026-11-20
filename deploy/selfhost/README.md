@@ -103,6 +103,18 @@ APIは内部ネットワーク `control` だけに接続し、外部への経路
 
 設定後に `./start.sh` を実行し、`./stack run --rm --no-deps -T api mail-test <宛先>` で送信を確認します。
 
+## アプリを常駐させる
+
+Runの準備完了とContractの検証成功は、そのアプリが動き続けることを意味しません。取り込み時の起動や「Run」で始めたRunは、開始から60分でRunnerが終了し、自動では再開しません。動かし続けるアプリは、所有者がSettingsの「Keep running」を選ぶか、`PATCH /v1/compute-instances/<Instance ID>/runtime-policy` に `{"mode":"always_on","desired_state":"running"}` を送って常駐を指定します。指定すると現在のRunは停止し、更新可能な実行許可を持つRunに置き換わります。
+
+常駐しているかどうかは、Composeの操作者がホストで確認します。
+
+```sh
+acceptance/residency.sh "$instance_id"
+```
+
+終了コード0は次のすべてが成り立つ場合だけです。ポリシーが `always_on`／`running` で調整状態が `running`、そのRunに現在のポリシー世代で発行された有効期限内の実行許可があり、leaseが `ready` で停止要求がない。成り立たない条件はJSONの `reasons` に出力されます。数分おいて再実行し、`authorization_generation` が増えていればRunnerが実行許可を更新しています。
+
 ## Runnerの登録と再接続
 
 同じゲストではCaddyとRunnerの間に専用Unix socketを使用します。Runnerユーザーで `install -d -m 0711 "$HOME/.local/share/ato-selfhost/ingress"` を実行し、その絶対パスを `.env` の `ATO_RUNNER_INGRESS_DIR` に設定して `./start.sh` を再実行してください。Caddyコンテナにはこのディレクトリだけを読み取り専用でmountします。systemdのsocket proxyが各リクエストをloopback上の署名gateへ中継します。外部ホストのRunnerを追加する場合は、APIからそのホスト専用のTLS ingressへの経路を用意し、`ATO_RUNNER_INGRESS_ORIGIN` と `ATO_RUNNER_PUBLIC_BASE_URL` を揃えます。
@@ -216,8 +228,8 @@ cargo run --locked -p ato-portable-application --example seed_filesystem_slot --
 ```
 
 1. Cloudflareと商用ato.runへの通信を遮断します。操作端末とRunnerはローカルDNS、管理用URL、アプリ用URL、テストに必要なMail endpointだけへ到達できるようにします。
-2. 別端末から所有者としてログインし、Runnerを明示的に選択してMailのテストInstanceを起動します。検証receiptに同一bundle digest、ContractRef、選択Derivation、今回のattempt、`fully_satisfied=true` があることを確認します。
+2. 別端末から所有者としてログインし、Runnerを明示的に選択してMailのテストInstanceを起動します。検証receiptに同一bundle digest、ContractRef、選択Derivation、今回のattempt、`fully_satisfied=true` があることを確認します。続けて[常駐を指定](#アプリを常駐させる)し、置き換わったRunの検証成功と `acceptance/residency.sh` の終了コード0を確認します。開始から60分を過ぎても同じRunが動いていることを確認します。
 3. [メールボックス照合](acceptance/mailbox.py)を使って専用テストアカウントの下書きを保存します。アプリを保存・再開後、同じアプリURLから同じメールを確認します。
-4. 専用ゲストを再起動し、同じオリジン・Runner ID・Instance・保存内容と新しい実行attemptを確認します。続けて空の環境へのバックアップ復元で同じ確認を行います。
+4. 専用ゲストを再起動し、同じオリジン・Runner ID・Instance・保存内容と新しい実行attemptを確認します。`acceptance/residency.sh` が再び終了コード0を返すことを確認します。続けて空の環境へのバックアップ復元で同じ確認を行います。
 
 このディレクトリの設定やHTTPのhealth応答だけでは、Mailの登録・Surface経由のログイン・保存・再起動復旧の結果は確定しません。
