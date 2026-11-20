@@ -511,3 +511,22 @@ esac
     );
     assert!(stdout.contains("was not checked"), "{stdout}");
 }
+
+/// The first screen of `ato hub --help` has to separate the two things the
+/// same command group does: a share link (push/pull) and a public listing
+/// (publish).
+#[test]
+fn hub_help_states_the_share_link_and_the_public_listing_first() {
+    let help = assert_success(ato().args(["hub", "--help"]).output().unwrap());
+    let (first, rest) = help.split_once("Commands:").unwrap_or((help.as_str(), ""));
+    assert!(first.contains("Share link (push/pull)"), "{first}");
+    assert!(first.contains("Public listing (publish)"), "{first}");
+    assert!(first.contains("Encrypted"), "{first}");
+    assert!(
+        first.contains("stored under capsules/<owner>/<name>"),
+        "{first}"
+    );
+    assert!(rest.contains("push"), "{help}");
+    assert!(rest.contains("publish"), "{help}");
+    assert!(help.contains("capsules/<owner>/<name>"), "{help}");
+}

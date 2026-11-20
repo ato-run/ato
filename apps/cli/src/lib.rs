@@ -106,14 +106,17 @@ use ato_local_execution::{
     OwnedProcessIdentity, configure_detached_process, terminate_owned_process,
 };
 
-const SHARE_HELP: &str = "Encrypted link
-  ato hub push ./app.capsule --hub-url https://hub.example
-  The bundle is encrypted on this machine. Keep the full link private.
-  The recipient uses ato hub pull '<LINK>' -o app.capsule. The hub may require a token.
+const SHARE_HELP: &str = "Choose how the bundle travels
 
-Public listing
-  ato hub publish ./app.capsule --name owner/app
-  Requires Ato login or a publisher token. Anyone can run capsules/owner/app.
+  Share link (push/pull)
+    ato hub push ./app.capsule --hub-url https://hub.example
+    The bundle is encrypted on this machine and only the link holder can open it.
+    The recipient uses ato hub pull '<LINK>' -o app.capsule. The hub may require a token.
+
+  Public listing (publish)
+    ato hub publish ./app.capsule --name owner/app
+    The bundle and its metadata are stored publicly; anyone can run capsules/owner/app.
+    Requires Ato login or a publisher token.
 
 Authored project upload
   ato upload ./project --api-url https://api.ato.run --visibility private
@@ -163,8 +166,16 @@ enum Commands {
     /// Operate execution hosts and their Model Sets.
     #[command(subcommand)]
     Runtime(RuntimeCommands),
-    /// Share encrypted links or publish apps to the public Hub.
+    /// Share a bundle by link (push/pull) or publish it publicly (publish).
     #[command(
+        long_about = "Share a Capsule bundle two ways.\n\n\
+                      Share link (push/pull)\n\
+                      Encrypted: only the link holder can open it. Nothing is listed publicly.\n\
+                      ato hub push ./app.capsule --hub-url <URL>   prints the link\n\
+                      ato hub pull '<LINK>' -o app.capsule          restores it\n\n\
+                      Public listing (publish)\n\
+                      Public: the bundle and its metadata are stored under capsules/<owner>/<name>.\n\
+                      ato hub publish ./app.capsule --name <owner>/<name>\n",
         after_long_help = SHARE_HELP
     )]
     Hub {
