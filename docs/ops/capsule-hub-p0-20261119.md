@@ -1,0 +1,166 @@
+# OSS調査のP0をstaging Capsule Hubへ登録した記録
+
+2026年11月19日 12:21 JST 時点で、依頼時の301件のうちP0全58件（既存調査分34件、新規調査分24件）を `koh0920` 名前空間に公開した。Hub全体では既存7件を含めて65件になった。台帳にはアプリごとの詳細ページ、実行方式、最新バンドルのSHA-256、ContractRef、DerivationRef、起動条件を記録した。[staging Capsule Hub](https://stg-app.ato.run/capsules) · [全58件の台帳](evidence/capsule-hub-p0-20261119/catalog.csv)
+
+同日追試でP0全58件でstgの配信digestを指定して起動を試みた結果、主要操作の完了は17件、起動時のContractまでの確認は2件、起動未確認は39件だった。Dockerを使わず主要操作まで確認したのはExcalidraw、Mermaid、Super Productivity、LibreOffice。[アプリ別の結果](evidence/capsule-hub-p0-20261119/runtime.csv)
+
+## 初回公開時の確認結果（12:21 JST）
+
+全58件について、ページ送りを含む一覧、詳細、タグ解決、配信ファイルを取得した。表示名と上流リポジトリが調査記録に一致し、配信サイズ・SHA-256・バンドルのバイト列も手元の成果物と一致した。
+
+| 最新版の確認範囲 | 件数 | 確認内容 |
+| --- | ---: | --- |
+| CLIのContractとブラウザ操作が成功 | 1 | Excalidraw。最新digestを指定したCLI RunでHTTP応答の本文digestまで一致した。Hub配信物から取り出したサーバーとUIで、矩形の描画・保存・再読み込み・JSON書き出しを確認した。 |
+| CLI実行で起動失敗を再現 | 2 | RustDesk、LibreOffice。上流DMGのSHA-256照合後、アプリ内のリンクを展開する段階で失敗した。 |
+| イメージ構成とCLI仕様から起動制約を特定 | 4 | GitLab CE、ONLYOFFICE Docs、Formbricks、Plane。現在のバンドルに、公式イメージが要求する全マウントを割り当てられない。 |
+| 実機起動未確認 | 51 | 必要なデータ、モデル、認証、外部接続、試用版の機能と保存範囲を各アプリのREADMEと台帳に記載した。 |
+
+実行方式はLinux/amd64のOCIが48件、Apple Silicon向けネイティブGUIが9件、Python 3.12のローカルプロセスが1件。OCIは手元のDockerデーモンがCLIの5秒の照会に応答せず、確認した所有Runtimeは3台ともオフラインだった。GrafanaはHub参照の解決後、同じ理由でRun開始前に停止した。Hubの表示は「確認済み」1件、「実験的」57件だった。[観測記録とreceipt抜粋](evidence/capsule-hub-p0-20261119/observations.json)
+
+調査CSVが作業中にも拡張され、同じIDが別のアプリを指す変更があった。PostgreSQL・Pandoc・WordPressの表示名と出典を訂正した。最終照合には依頼時のP0と、301件時点のアプリID・上流リポジトリの対応を使った。全58件で調査ID・上流リポジトリ・Hub参照がそれぞれ一意である。
+
+## CLI・Hubの不具合と使い勝手
+
+優先度は今回の利用者への影響による。製品側で直した後に何を確認するかを右欄に示す。
+
+| 優先度・対象 | 現象と影響 | 改善と受け入れ条件 |
+| --- | --- | --- |
+| 高・Hub検証表示 | Excalidrawの新しいdigestを公開した直後、その版のRunは0回だったが、APIは旧版の成功1回と `verified` を返した。その後、新版の成功を別途確認した。詳細画面から現在の版が動いたかを判断できない。 | 選択中のdigestに一致する成功の有無を表示する。新版の最初の成功前は未確認、成功後は確認済みになり、旧版の履歴も参照できること。 |
+| 高・Hub検索 | `/capsules?q=interop-static` を直接開くと「検索に一致するカプセルはありません。」と表示された。同じ画面で「さらにロードする」を押すと既存の `koh0920/interop-static` が現れた。初期検索の範囲が最初の50件に限られる。 | 未読ページも検索対象に含める。51件目以降の名前から追加読み込みなしで詳細に移動できること。 |
+| 高・CLIのmacOSアプリ展開 | RustDeskの `window_size.framework/window_size` とLibreOfficeの `Contents/MacOS/urelibs` で `native_install_materialization_failed` を再現。RustDeskのリンク先はバンドル内の `Versions/Current/window_size`。ウィンドウ起動に到達しない。 | バンドル内で解決するframeworkリンクを扱えるようにする。外部・循環リンクは拒否し、展開後の署名検証を維持した上で両実物を起動できること。 |
+| 高・CLIのOCI事前診断 | 上記4件はpackと公開に成功する。GitLabは3パス、ONLYOFFICEは4パスを要求する一方、現在のプロファイルが宣言できる永続領域は1個。未割当パスが一覧に出ない。 | イメージ設定を参照できる時点で未割当パスを列挙する。未検査の状態も表示し、必要な永続領域・一時領域を明示して起動できること。 |
+| 中・CLIのバックグラウンドworker | TwentyとChatwootのworkerはポート省略で `missing field ports`、空配列で `every service serves at least one Port` となりpackが失敗する。公開した試用版ではメール配信・一括処理を利用できない。 | 待受ポートを必要としないworkerの起動・生存確認を表現する。Web・DB・キュー・workerを含む例で確かめる。 |
+| 中・CLIの容量エラー | 一般公開者として10,797,471バイトのExcalidrawを送ると `hub-bundle-too-large`。エラーには上限も実サイズも表示されない。Clineは上流v3.50.0のVSIX拡張ファイル一式を圧縮して7,784,270バイトで公開した。 | 一般公開枠の8 MiB、実サイズ、超過分を表示する。容量ポリシーを参照できる場合は転送前に案内する。 |
+| 中・実行前の必要条件 | Excalidrawの必要条件は「プラットフォーム —」、実行方法は「local_process」。必要なPython 3.12はREADMEにある。Grafanaのコピー用コマンドに必須の `admin_password` bindingが入らない。 | 実行方法の近くにランタイムのバージョン、必須bindingの名前、永続・一時データを表示する。コピー用コマンドに秘密値を保存せず入力方法を示す。 |
+| 中・アプリの操作確認 | 初版ExcalidrawはHTTP本文が一致しHubに成功Runが記録されたが、シーン読み込み先がなく描画面が開かなかった。 | HTTPの確認対象と主要操作の実機確認を区別して表示する。ホワイトボードでは描画・保存・再読み込み・書き出しを操作確認として残す。 |
+| 低・公開者とカテゴリ | Excalidrawの「作者」は登録者の `koh0920`。上流はソース欄にある。今回の58件はすべて `primary_category` が空で、カテゴリからは発見できない。`ato hub publish --help` にカテゴリ指定はない。 | 「公開者」「移植担当」「上流プロジェクト」を区別する。公開時に既存カテゴリを選択でき、一覧のフィルターに反映されること。 |
+| 低・CLIヘルプ | `ato hub --help` は冒頭で暗号化共有を説明する。同じコマンド群の `publish` はバンドルとメタデータを公開する。 | 最初の画面で `push/pull` の共有リンクと `publish` の公開範囲を読めること。 |
+
+検索の実画面は[追加読み込み前](evidence/capsule-hub-p0-20261119/search-before.png)と[追加読み込み後](evidence/capsule-hub-p0-20261119/search-after.png)に保存した。[モバイルの詳細画面](evidence/capsule-hub-p0-20261119/ui-mobile.png)
+
+## 登録時に選んだ試用条件
+
+- ExcalidrawはPython標準ライブラリで同梱アセットを配信する。シーンの処理には上流のハンドラーを使い、「Save in this browser」はそのアドレスのブラウザ内に保存する。別のRunへ持ち出すには「Export scene」を使う。公開バンドルは3,621,881バイト。書き出したJSONには幅235の矩形1個が含まれていた。[描画の証跡](evidence/capsule-hub-p0-20261119/drawing.png)
+- Immichのアップロード画像、Moodleの教材添付、OdooのDBは試用中の一時データになる。継続利用を判断する際は各行の保存範囲を参照する。
+- Cline・Gemini CLIなどの外部モデル連携、OpenHandsのエージェント実行、RustDeskの遠隔接続、ComfyUIとPaddleOCRのモデルを使った処理は未確認。macOS版は上流DMGのURL・サイズ・SHA-256を固定した。QGISとOpenHandsの実行ファイル名は上流ビルド設定から取得した。
+- CLI 0.9.5でstaging APIを明示してコンテンツを公開した。アプリ、API、PWA、CLIの製品コードの配備・migration・feature flag変更は行っていない。
+
+CLIの根拠は[OCIのVOLUME検査](../../extensions/adapters/oci/src/lib.rs)、[サービスとstateの検証](../../lib/formation/src/capsule_toml_v2.rs)、[macOS DMGの展開処理](../../apps/portable-application/src/native_desktop/dmg.rs)を参照。実行したCLIのコミットは `8ee783ba3`。staging系列のAPIは `8fee5cbfa` の `src/routes/hub_capsules.ts`、PWAは `20edcd247` の `src/components/capsule-hub/CapsuleHubPage.tsx` で、検証回数の集計と検索対象を確認した。
+
+## 同日の起動・主要操作の追試
+
+対象は初回公開時に凍結した同じ58件。stgの `capsules/koh0920/` から配信digestとDを指定してMac上で実行した。Docker Desktop 29.1.3のデーモンを復旧し、Apple Silicon上でlinux/amd64の実行も確認した。アプリごとの配信digest、D、試行結果、主要操作は[追試一覧](evidence/capsule-hub-p0-20261119/runtime.csv)、観測結果と実行方式は[receipt抜粋](evidence/capsule-hub-p0-20261119/runtime-receipts.json)に記録した。各Runに独立した作業領域を割り当てた。
+
+| アプリ | 実際に確認した操作 |
+|---|---|
+| Excalidraw | 矩形を描いてブラウザーに保存し、再読み込み後に書き出したJSONから矩形を復元できた。 |
+| LibreOffice | 起動したWriterのプロセスIDに検証用のFlat ODTを開き、段落を編集・保存した。保存されたXMLから編集後の段落を読み出した。ARM Macの署名済みアプリと、Run専用のUnixソケットを使用した。 |
+| Super Productivity | 上流v20.0.0の署名済みパッケージに含まれるWeb版をPython 3.12で配信し、日本語のタスクを追加した。再読み込み後に件名を照合した。日本語と英語を収録している。 |
+| Gitea | 初期化した管理者で非公開リポジトリとIssueを作り、Issueを番号指定で読み出して件名を確認した。 |
+| Homepage | 公式サンプル設定からサービス一覧を読み込み、ダッシュボードのリンク先を設定と照合した。 |
+| SiYuan | アクセスコードで認証し、ノートブックとMarkdown文書を作成した。ブロックAPIから保存された本文を取得し照合した。初回に表示する画面を上流の認証ページに合わせた。 |
+| Grafana | 管理者でダッシュボードとテキストパネルを作成し、保存されたパネルの本文をAPIで照合した。既存のstg配信digestとDで動作した。 |
+| Redmine | 管理者で非公開プロジェクトとチケットを作成し、保存された件名とプロジェクトIDを取得した。 |
+| code-server | 認証後に検証用ファイルをブラウザーのVS Codeで開いて編集・保存した。ディスク上の内容と、ページ再読み込み後のエディターの表示を照合した。[再読み込み後の画面](evidence/capsule-hub-p0-20261119/code-server-saved.png) |
+| PostgreSQL | stgからLinux/arm64のDを選び、Adminer上で一時テーブルを作成した。7と11を挿入し、SQLの集計結果が18であることを確認した。 |
+| Uptime Kuma | 初回管理者でログインし、Run内部のHTTPサービスを監視対象に登録した。登録IDから再取得して名前とURLを照合した。 |
+| WordPress | stgの配信版で初期化後、管理者でログインし、下書きを作成・再取得して本文と下書き状態を照合した。 |
+| Trilium Notes | 空のノートブックに子ノートを作成し、日本語のタイトルと本文を保存した。ページの再読み込み後、ツリーと編集画面に同じ内容が表示された。 |
+| Mermaid | Python 3.12のDで二つのラベルを描画し、SVGをダウンロードして両方のラベルを照合した。 |
+| Memos | 一時環境の利用者でサインインし、非公開メモを作成してAPIから同じ本文を読み出した。 |
+| Pandoc | stgのOCI経路へMarkdownを送り、見出しを含むHTMLを取得した。 |
+| Beszel | 初回管理者を作成し、監視対象を登録して名前を再取得した。エージェントからの計測値受信は未確認。 |
+
+Mermaidの現行配信は `sha256:b6d9d279c723bc68c21a7bf4b0bafa56894d012ce50964a462c46c9c9e3b4e27`。契約と従来のOCI Dを保ったまま `sha256:d4e7d04a43e19ab1a1694c6f907aab73040193edad81128d499ed2e2850985a6` を追加した。利用者は次のようにDocker不要のDを選択できる。
+
+```sh
+ato run --api-url https://staging.api.ato.run --derivation sha256:d4e7d04a43e19ab1a1694c6f907aab73040193edad81128d499ed2e2850985a6 capsules/koh0920/mermaid
+```
+
+### 起動を妨げた不具合と操作上の問題
+
+| 箇所 | 実測 | 対応・改善点 |
+|---|---|---|
+| CLIのOCI経路選択 | Docker Desktopでは実行可能と表示された単一コンテナを、Run開始時にrelay未対応として拒否した。 | 単一OCIにもRun専用の内部ネットワークと既存relayを割り当てた。MemosとPandocで配信済みのDをそのまま選択し、実操作とreceiptを確認した。 |
+| OCIグループの起動失敗 | PostgreSQLの初期化サーバーは `/tmp` で待ち受け、上流エントリーポイントの `psql` は `/run/postgresql` を探して終了コード2になった。 | 初期化クライアントとサーバーのソケットを合わせたLinux/arm64のDを追加した。元のContractとamd64のDを含むバンドルをstgに公開し、arm64でSQLを実行した。 |
+| Uptime Kumaの起動観測 | 上流の `/` はダッシュボードへの転送を返し、HTTP 200を要求した初版のContractは成立しなかった。DB設定だけを表示する初期画面にも到達し得た。 | SQLiteを明示し、起動時は `/setup-database-info` の `runningSetup: false` を待つ。監視対象の登録に使うSurfaceは `/dashboard`。初版とは異なるContractRefの新版をstgに公開した。 |
+| WordPressの初期化 | 配信初版は全コアファイルのコピーで待受が間に合わず、コピーを短縮した版は未設定サイトからのHTTP 302でContractに失敗した。 | イメージ内のライブラリを参照し、既存サイトを検出して初回だけ管理者を作成する構成に更新した。stg版の配信SHA-256は `921881c75c511725a156b87fcb34b3c739226be280500d6f79fa495f4d5503cd`。初期パスワードと署名用の鍵を別々のbindingで渡す。 |
+| FormbricksとPlaneの保存先 | 取得したイメージを調べると、DBの `/var/lib/postgresql/data` に加えて、FormbricksはWeb側でSAML設定とアップロードの2か所、Planeはキュー側で `/var/lib/rabbitmq`、Web側で `/app/data` と `/app/logs` を要求した。現行のstg版はどちらもDB初期化が終了コード2で先に止まった。 | それぞれのサービスが必要とする保存先の一覧を起動前に示す。配信中のDはDBにだけ保存領域を割り当てている。 |
+| SiYuanの起動完了判定 | 純粋なDで宣言した `bootProgress` への観測だけで追加の実行権限を求められた。 | 選択したDのポートへの開始観測と、ネットワーク・権限付与を分けた。配布イメージの初期化条件は別途確認する。 |
+| macOSのDMG | 署名済みアプリのFramework内にある相対リンクを展開時に一律拒否した。 | アプリ内で解決できるリンクを復元し、対象の表記もツリーダイジェストに含めた。RustDeskは展開後に終了コード255、LibreOfficeはウインドウ観測前に終了コード0となった。 |
+| AppFlowyの表示 | macOSのウインドウ観測は成功したが初期画面は黒く、文書を編集できなかった。初回はFlutterが実ユーザーのLibraryへの書き込みを拒否された。 | FoundationのホームをRunの保存領域に指定するとプライベートDBの初期化まで進んだ。再起動後も黒画面を再現し、ログにセッション未作成が記録された。 |
+| Hubの環境名エラー | PostgreSQLの公開時に実行platformと同じ `linux/arm64` を環境ラベルに渡すと、stgは `invalid_metadata` だけを返した。`linux-arm64` で成功した。 | CLIで該当する引数名・許可文字・入力例を表示し、転送前に修正できるようにする。 |
+| QGISのDMG | stgのDに固定された1,592,197,571バイトを取得し、SHA-256が一致した。CLIは展開中に2 GiBの上限で停止した。 | ダウンロード時のバイト数と展開後の上限を区別して表示し、どちらの制約で失敗したかを案内する。 |
+| 大きな配信物・取得状況 | Pandoc 3.14の公式WebAssemblyでローカル変換できた。OCIとの併載版は約22.7 MBとなり、stgの1件8 MiBの上限で拒否された。OCI取得失敗時に原因が空のCLIメッセージも確認した。 | publish前に実サイズと上限を表示する。取得中の対象と進捗、タイムアウトと実プロセスの終了状態を区別して表示する。 |
+
+
+### ワークスペース整理後の追試
+
+LibreOfficeは共通の一時ディレクトリが書き込み不可のとき、ソケット名をルート直下に組み立てていた。WriterのDでソケットをRun専用の領域へ向け、CLIのローカルウィンドウAdapterではこの領域のUnixソケットを利用できるようにした。新しいDは元のContract・Dと同じバンドルに収録した。確認には本PRのCLIを使用した。[上流のソケット実装](https://github.com/LibreOffice/core/blob/master/sal/osl/unx/pipe.cxx)
+
+HomepageのHost検証はポート番号も照合するため、固定設定の初版はRunごとに異なる公開ポートを拒否した。新版はループバックのHostと同一Originを確認した要求を、固定ポートで待ち受ける上流に渡す。GiteaとRedmineでは初回DBの初期化と管理者パスワードのbindingを追加した。RedmineのDB・添付ファイルは保存領域に置き、同梱のアプリ本体は起動時の一時領域に展開している。[HomepageのHost検証](https://github.com/gethomepage/homepage/blob/main/src/utils/auth.js)
+
+Super Productivityは旧版のネイティブ画面の観測から、Web画面を実際に配信する新しいContractに更新した。ブラウザーのオリジン単位で保存するため、別のRunへの移動はアプリのエクスポートを使う。タスク追加と同一オリジンの再読み込みを確認した。
+
+### 初回に起動できなかったアプリの切り分け
+
+| アプリ | 追試で分かったこと |
+|---|---|
+| LibreOffice | 修正したCLIとstgの署名済みバンドルからWriterを起動し、編集・保存・読み戻しに成功した。 |
+| Formbricks | 修正候補でPostgreSQLとキャッシュが待受を開始し、Webプロセスが起動した。WebイメージはCube・HubのURLと認証を要求し、環境検査で終了した。上流v3.17.1のWebとpgvectorに固定した別候補をpackした。[上流の版別Compose](https://github.com/formbricks/formbricks/blob/v3.17.1/docker/docker-compose.yml) |
+| Plane | PostgreSQLとキャッシュを起動。RabbitMQの専用一時領域を構成した後も、AMD64版Erlangの起動時に `prim_tty:isatty` で終了した。 |
+| GitLab CE・ONLYOFFICE Docs | 固定digestのイメージ取得でストリームの途中終了を観測した。部分取得と再開を試行。主要操作の証跡は未取得。 |
+| RustDesk | macOS版の署名済みアプリは起動中に終了コード255で停止。許可された使い捨て端末間での接続・入力転送は未確認。[LinuxServerの検証用クライアントイメージ](https://github.com/linuxserver/docker-rustdesk) |
+
+Stirling-PDFのmacOS版はウィンドウのContractを満たした後、JavaバックエンドがJettyの一時ディレクトリを作れず終了した。AppFlowyのウィンドウと同様、文書操作は未確認。AFFiNEとOpenCodeのmacOS版は署名済みパッケージから起動を試し、いずれもElectronからIOKitを呼ぶ箇所で終了した。AFFiNEのパッケージ内のWeb画面も単独ではデスクトップ側の `nbstore` を必要とした。
+
+## 2026年11月20日の再照合と実行環境の状況
+
+前回の58件を引き継ぎ、stagingの現在の配信版を再取得して台帳と照合した。あわせて、配布CLI 0.9.6-stg で全58件の実行可否を測った。
+
+### staging配信版の再照合
+
+- Hub全体は65件、`koh0920` 名前空間は60件（P0の58件と `hello-static`、`interop-static`）。
+- 台帳の「latestのSHA256」と現在の配信digestが一致したのは48件。**10件は別のdigestに更新されている**（Gitea、Uptime Kuma、SiYuan、Homepage、Super Productivity、Redmine、WordPress、PostgreSQL、LibreOffice、Mermaid）。台帳の実測は更新前の版に対するものであり、現在の配信版では再確認が必要になる。
+- 台帳の確定値と現在値の対応は[配信digestの再照合](evidence/capsule-hub-p0-20261119/stg-redigest-20261120.tsv)に記録した。
+- 各アプリの必須Binding、永続state、Port、Contract観測は[Bundleから読み取った事実](evidence/capsule-hub-p0-20261119/bundle-facts-20261120.tsv)に整理した。これは配信BundleのDerivationとContractを読んだ結果であり、実行結果ではない。
+
+### 検証状態の表示と実測の不一致
+
+stagingの一覧APIが返す検証状態は、いまも「一度でも成功Runがあれば verified」である。Contractだけ成立して主要操作に失敗したアプリも verified と表示される。
+
+| アプリ | 実測 | Hubの表示 |
+|---|---|---|
+| Stirling-PDF | macOSのウィンドウは開いたが、Javaバックエンドが一時ディレクトリを作れず終了。文書操作は未確認 | verified（成功Run 1） |
+| AppFlowy | ウィンドウ観測は成功。初期画面が黒く、文書を作成できない | verified（成功Run 4） |
+| Grafana | 既存の配信digestでダッシュボード作成まで確認済み | experimental（成功Run 0。digestが変わった後は成功履歴が無い） |
+
+同じ「verified」でも、選択中のBundle digestに対する成功なのか、過去の別の版に対する成功なのかを画面から区別できない。この点はCapsule HubのAPIとUIで扱う。
+
+### 配布CLI 0.9.6-stg の実行可否
+
+`ato run --api-url https://staging.api.ato.run --list-derivations --json` を全58件に実行し、選択可能なDerivationとadmissionの理由を記録した。結果は3件だけ実行可能で、55件はホスト側の制約で拒否された。
+
+| 実行方式 | 件数 | admissionの理由 |
+|---|---:|---|
+| OCI（linux/amd64） | 48 | `docker_daemon_unreachable`。Docker Desktopのエンジンが停止しており、コンテナを起動できない |
+| process（Python 3.12） | 3 | Excalidraw、Mermaid、Super Productivityの3件。admissionは通るが、起動時に `the Run did not start: portable process sandbox admission failed. This machine cannot apply the macOS process sandbox. Start Ato outside any parent sandbox or use a supported Linux host.` で停止 |
+| native_pixel（macOS） | 8 | `native_sandbox_unavailable`。親プロセスが既にサンドボックス内にあるため `sandbox-exec` を適用できない |
+
+この実行環境（作業用サンドボックス内）では、OCI・process・nativeのいずれもRunを開始できない。したがって本日の主要操作確認の増分は0件で、前回の17件の記録を維持する。**未検証のものを確認済みにはしていない。**
+
+### 0.9.6-stg に含まれない修正
+
+PR #1912 が扱う単一コンテナOCIのDocker Desktop relay対応、署名済みmacOS frameworkの復元、ウィンドウIPCソケット、宣言済みscratch volumeの実体化、起動観測のadmissionは、タグ `v0.9.6-stg`（`b299d63a4`）の祖先に含まれていない。配布CLIだけで単一コンテナのOCIアプリを起動すると `oci_container_relay_unsupported` で拒否される。修正版のCLIと配布CLIの結果は区別して記録する。
+
+### 次に実行する手順
+
+実行環境を用意できた時点で、1件ずつ次を繰り返す。1件ごとにRunを停止し、コンテナ・ボリューム・キャッシュを回収してから次へ進む。
+
+1. 対象の配信digestを固定する（`--list-derivations --json` の `bundle_sha256`）。
+2. 必須Bindingを確認して使い捨ての値を渡す。
+3. Runを開始し、Contractのreceiptを保存する。
+4. そのアプリの主要操作（保存・再読み込みを含む）を実行し、結果を残す。
+5. Runを停止し、残存プロセス・コンテナ・ボリューム・一時ファイルを確認する。
+6. 台帳の該当行を実測で更新する。
+

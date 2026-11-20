@@ -1,0 +1,710 @@
+{
+  "gitea": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/4",
+      "bundle_sha256": "sha256:a8aad608f83d89794630a8e885715867f3afda220f167ed81341617bf32d4a85",
+      "contract_ref": "sha256:e7da417e35b814598f75c0fb9a1efa36bbd714c17af5f48d375b81af6b5165b8",
+      "derivation_ref": "sha256:5807ffe3e6695a0b0a99fd9c0a971b5c0243210fcc8dd950f6b2279a85000f9b",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "oci",
+        "runtime_executable": "docker",
+        "image": "docker.io/gitea/gitea@sha256:1565a01ff935d56156285149acfce48ecc19c5d4e8ed278bebcf06f44e148295",
+        "platform": "linux/amd64",
+        "platform_emulated": true,
+        "connector": "relay",
+        "relay_image_digest": "sha256:3e66ad944f585ee3a547dfd6db569e2c05383cbca66b1ba1639e10fa1620f0cd",
+        "attempt_id": "run-91989-1795073258469040000"
+      },
+      "observations": [
+        {
+          "id": "gitea-http",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/api/healthz",
+            "status": 200,
+            "body_sha256": "sha256:d23c60325fdabc6523692679516db6dfda7200118dc405e5b41ffe8c5c8f2616"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "create private repository, create and read issue",
+      "issue": 1
+    }
+  },
+  "stirling-pdf": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/5",
+      "bundle_sha256": "sha256:c93dea6aa315be31253f690e1de348959887f1b0a99d48b93668e07bcd6a6eaa",
+      "contract_ref": "sha256:d4248fefc073c7a81333238d2c8a8e4803ed9bc4128b22ddc8acd11ca89e8fa5",
+      "derivation_ref": "sha256:97ffd329168d5fc45d63fd1a38d82fc8810f42433780b4b74bb46408ee928542",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "native_desktop",
+        "attempt_id": "run-97830-1795073963016557000",
+        "runtime_name": "Stirling-PDF",
+        "native": {
+          "artifact_ref": "sha256:e5f5a8e26aead0846f8f419683030f254665d014f89e76452ac247925eac96ec",
+          "codesign_verify": "valid",
+          "signature_kind": "developer_id",
+          "local_override": false,
+          "entry": "Stirling PDF.app/Contents/MacOS/Stirling-PDF"
+        }
+      },
+      "observations": [
+        {
+          "id": "gui-window",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/ready",
+            "status": 200,
+            "body_sha256": "sha256:f770ef86d1833460dbf0a2f1d327f94c1f4d83246ebc4ea52fcd89b9dbe10a30"
+          }
+        }
+      ]
+    }
+  },
+  "uptime-kuma": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/4",
+      "bundle_sha256": "sha256:4c6ce8965e044038b82de81f397e66cbfbdf7885712bf2af009c56865124b7ef",
+      "contract_ref": "sha256:15e1b550d3df8ff93f65ede384bba4b7306e5b78b89ad866ff958017029e944a",
+      "derivation_ref": "sha256:246040cd78fb4dfbb7b2e384b08760c566042154a4a393bb1f8e9d21b04a6865",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "oci",
+        "runtime_executable": "docker",
+        "image": "docker.io/louislam/uptime-kuma@sha256:bc81e600a1b18824e7eaecbb0167c2a1c732475fc499c1e3253752b965946036",
+        "platform": "linux/amd64",
+        "platform_emulated": true,
+        "connector": "relay",
+        "relay_image_digest": "sha256:3e66ad944f585ee3a547dfd6db569e2c05383cbca66b1ba1639e10fa1620f0cd",
+        "attempt_id": "run-31893-1795066473589706000"
+      },
+      "observations": [
+        {
+          "id": "uptime-kuma-http",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/setup-database-info",
+            "status": 200,
+            "body_sha256": "sha256:fb74a2222c389a7c850248aedd98546feffc71b083587869e56c1afc3a0db38a"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "create and retrieve a local HTTP monitor",
+      "id": 1
+    }
+  },
+  "beszel": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/4",
+      "bundle_sha256": "sha256:1ad4e05171e394481bdab5618ae1f4abd3adfa3e4fdedeacede50414ab51a785",
+      "contract_ref": "sha256:5a95bdecf63e754b6a3647860d8d6cf075cf5209c6e5fcffa9dc354949171961",
+      "derivation_ref": "sha256:5b829317495aebe1c561c476e92595f30c38b88056adabc3256273a839ae40cb",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "oci",
+        "runtime_executable": "docker",
+        "image": "docker.io/henrygd/beszel@sha256:d436e1a3fd53cb781df5e06aed6647242ce3fb57b95665cd1ee6923ca45c58a2",
+        "platform": "linux/amd64",
+        "platform_emulated": true,
+        "connector": "relay",
+        "relay_image_digest": "sha256:3e66ad944f585ee3a547dfd6db569e2c05383cbca66b1ba1639e10fa1620f0cd",
+        "attempt_id": "run-75076-1795061531965861000"
+      },
+      "observations": [
+        {
+          "id": "beszel-http",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/api/health",
+            "status": 200,
+            "body_sha256": "sha256:7866fe68a1da660cb4b513219bb95ff18ba9e1402aa9d0043b05832a18da2004"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "create and retrieve a monitored system configuration",
+      "agentMetricsVerified": false
+    }
+  },
+  "grafana": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/4",
+      "bundle_sha256": "sha256:9b9aca078e5d399f3b4cb2f902aeac4816620f8ade9642c848f47de163864d03",
+      "contract_ref": "sha256:01e12515a2d1ad8025759e044a81df403d4143ad46a7776be759cb733dbbbd96",
+      "derivation_ref": "sha256:54f6b45921e55f18ccc52d224aec4980eb1273a1766ed196ad4181f8f4c434c7",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "oci",
+        "runtime_executable": "docker",
+        "image": "docker.io/grafana/grafana@sha256:1c88285f1dd391a62232c010e6c224846e6a73bdc583b3365be2eba614b7919e",
+        "platform": "linux/amd64",
+        "platform_emulated": true,
+        "connector": "relay",
+        "relay_image_digest": "sha256:3e66ad944f585ee3a547dfd6db569e2c05383cbca66b1ba1639e10fa1620f0cd",
+        "attempt_id": "run-63209-1795076439315334000"
+      },
+      "observations": [
+        {
+          "id": "grafana-http",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/api/health",
+            "status": 200,
+            "body_sha256": "sha256:00e65159c0229d20bfa71a7092943af86ba5c07fe6c292c4c53cc08424c78399"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "create and retrieve a dashboard and its text panel",
+      "panels": 1
+    }
+  },
+  "memos": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/4",
+      "bundle_sha256": "sha256:660245c30911a4bf4de07e05f786290c047cd7201c98409f140c2e21d9f1ef4e",
+      "contract_ref": "sha256:64368f746f00ed7be9c5e6846c99639d19d402bdc4e96b022407dc3f8863908b",
+      "derivation_ref": "sha256:25fffed8e727f6716513f3846ff988ff0291fbca17e8725712a2a2684cb2d61d",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "oci",
+        "runtime_executable": "docker",
+        "image": "docker.io/neosmemo/memos@sha256:51a4cef418b1f173ac37139ad99de08da5b8662136007231d3ac8a0498a3095a",
+        "platform": "linux/amd64",
+        "platform_emulated": true,
+        "connector": "relay",
+        "relay_image_digest": "sha256:3e66ad944f585ee3a547dfd6db569e2c05383cbca66b1ba1639e10fa1620f0cd",
+        "attempt_id": "run-19922-1795060394932950000"
+      },
+      "observations": [
+        {
+          "id": "app-ready",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/",
+            "status": 200,
+            "body_sha256": "sha256:e63d98baffb2a1557668483aad3b0b5675a3319540bfc1e75cd9171c1c607b75"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "create and read a private memo",
+      "saved": true
+    }
+  },
+  "siyuan": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/4",
+      "bundle_sha256": "sha256:bbd36d2104d31a74c73474ab05a63195f98c945f6b9eb50bb447119a880b7df9",
+      "contract_ref": "sha256:f3146d364c3ad9bb61115fdc93318489ea4eafadd948b9c2dd8b2c7412f12787",
+      "derivation_ref": "sha256:1e6cc1c2283d52252b4a47aa72637bec664b98939a94b88407dcd965463daa56",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "oci",
+        "runtime_executable": "docker",
+        "image": "docker.io/b3log/siyuan@sha256:61bef308dd8ebb54249e10f335cf3d1d3b221047bd4a9614d44534d37078fc55",
+        "platform": "linux/amd64",
+        "platform_emulated": true,
+        "connector": "relay",
+        "relay_image_digest": "sha256:3e66ad944f585ee3a547dfd6db569e2c05383cbca66b1ba1639e10fa1620f0cd",
+        "attempt_id": "run-62279-1795076279147753000"
+      },
+      "observations": [
+        {
+          "id": "siyuan-serves",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/check-auth",
+            "status": 200,
+            "body_sha256": "sha256:c8bca2ff80c5e04d53ff08be330e7950bbdcc4732859c93e5676aa46e1cab33d"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "create notebook, create and read Markdown note",
+      "verified": true
+    }
+  },
+  "homepage": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/4",
+      "bundle_sha256": "sha256:63dd11bf38215a54ed49010b00132a15daa0ffaa7f7be677626e3c1e86e789d4",
+      "contract_ref": "sha256:36454f44edbf024f87531ff259c15640b2669bc217d3367caae417f4f0c6f880",
+      "derivation_ref": "sha256:766b71882c65cde810b9df956cd4e653cec5d85478416f20f4ad1b6826189c4f",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "oci",
+        "runtime_executable": "docker",
+        "image": "ghcr.io/gethomepage/homepage@sha256:74c768ebc15c78f16f5b7b0d3fcab2176659a5ef0e387b47bc678c8d146a3c04",
+        "platform": "linux/arm64",
+        "platform_emulated": false,
+        "connector": "relay",
+        "relay_image_digest": "sha256:3e66ad944f585ee3a547dfd6db569e2c05383cbca66b1ba1639e10fa1620f0cd",
+        "attempt_id": "run-91231-1795073179967854000"
+      },
+      "observations": [
+        {
+          "id": "homepage-http",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/api/healthcheck",
+            "status": 200,
+            "body_sha256": "sha256:75a288c0d6898c5f7b054590845978a82a3ad79fcce3d43ff68a7501e5a91ee9"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "load the dashboard and match a visible service link to its configured destination",
+      "service": "My First Service"
+    }
+  },
+  "super-productivity": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/1",
+      "bundle_sha256": "sha256:b1b716d1fd5b3d15bf11cb3ce4b08fb27c7accab2e63c457d6dfdebaacf0b235",
+      "contract_ref": "sha256:1849c6ad22f42ddd0ac3c568d2f6b461ae03c8c3b166c05ba9ef0e196d5f1825",
+      "derivation_ref": "sha256:4ac04481604fdf89a40b73915f08f1c50488e3e8bd790068f0cbc1160707ea08",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "process",
+        "attempt_id": "run-88817-1795072783883109000",
+        "runtime_name": "python3.12"
+      },
+      "observations": [
+        {
+          "id": "super-productivity-web",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/",
+            "status": 200,
+            "body_sha256": "sha256:8709ecd66188ae253cb57848184441b882869c1d1287f87e66fedbe54274941d"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "タスクを追加し、ページを再読み込みして保存された日本語の件名を確認",
+      "title": "Capsule Hub 検証タスク"
+    }
+  },
+  "appflowy": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/5",
+      "bundle_sha256": "sha256:f83ef3ab32605c5b8ba0a03172ac8b28b4a6d5ba7a4abe0aea403d5a642c23ea",
+      "contract_ref": "sha256:d4248fefc073c7a81333238d2c8a8e4803ed9bc4128b22ddc8acd11ca89e8fa5",
+      "derivation_ref": "sha256:1fec30707264d4659c0059ca55a0baa1c982fa48357933f235b7f151cd70278d",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "native_desktop",
+        "attempt_id": "run-2250-1795074466626607000",
+        "runtime_name": "AppFlowy",
+        "native": {
+          "artifact_ref": "sha256:132641eb6c28c0399137b058e93cdc748f4416a7b1e012f6a3073850a8786070",
+          "codesign_verify": "valid",
+          "signature_kind": "developer_id",
+          "local_override": false,
+          "entry": "AppFlowy.app/Contents/MacOS/AppFlowy"
+        }
+      },
+      "observations": [
+        {
+          "id": "gui-window",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/ready",
+            "status": 200,
+            "body_sha256": "sha256:f770ef86d1833460dbf0a2f1d327f94c1f4d83246ebc4ea52fcd89b9dbe10a30"
+          }
+        }
+      ]
+    }
+  },
+  "trilium": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/4",
+      "bundle_sha256": "sha256:94f947d451338f4359d11c0575f20c06f40e65a4ff176674ff141507b1bd4806",
+      "contract_ref": "sha256:f806dcfd5180561f1636706a853af0a54141270caaa72856c9735d2bc3d7b063",
+      "derivation_ref": "sha256:e9ca1c781fbbe039fb8064717b5d76db21096b6e92b15c93e91be727cdb15ef8",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "oci",
+        "runtime_executable": "docker",
+        "image": "docker.io/triliumnext/trilium@sha256:1d8492b82e461f9d8cba1acab2bf89d0182821318a1fc1277656e688a6fb4ee4",
+        "platform": "linux/amd64",
+        "platform_emulated": true,
+        "connector": "relay",
+        "relay_image_digest": "sha256:3e66ad944f585ee3a547dfd6db569e2c05383cbca66b1ba1639e10fa1620f0cd",
+        "attempt_id": "run-3804-1795065450947852000"
+      },
+      "observations": [
+        {
+          "id": "trilium-serves",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/",
+            "status": 200,
+            "body_sha256": "sha256:da354046f9f1bf2aeb27ca4bc9a3c973522333af764061998af4c45faed59e47"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "Create a child note, edit its Japanese title and body, reload and compare both",
+      "title": "Capsule Hub 検証ノート",
+      "body": "ステージングの配信版からノート本文を保存しました。",
+      "sameRunReload": true
+    }
+  },
+  "redmine": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/4",
+      "bundle_sha256": "sha256:858c5f4da756bdd934e9a99db36fd23bdce6464485515d03d46b0beb4e7b3fed",
+      "contract_ref": "sha256:154598e63d6882777b59ea686969cff14f18bfb5ac9c6b38c5bc888e31d7bb89",
+      "derivation_ref": "sha256:af5232abbc5786532102f9fe8d37f5bc096466f7b4a4ca72e42e584d8df9405c",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "oci",
+        "runtime_executable": "docker",
+        "image": "docker.io/library/redmine@sha256:3f0de822aa4eb7c350da928b41f287f068852296ce041708fcbd0e71e75f4f90",
+        "platform": "linux/amd64",
+        "platform_emulated": true,
+        "connector": "relay",
+        "relay_image_digest": "sha256:3e66ad944f585ee3a547dfd6db569e2c05383cbca66b1ba1639e10fa1620f0cd",
+        "attempt_id": "run-99575-1795074190666945000"
+      },
+      "observations": [
+        {
+          "id": "redmine-http",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/login",
+            "status": 200,
+            "body_sha256": "sha256:c790a97d4cf31316c89bc5221126b5fe04e667bee6045e092e465ace5cd29592"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "非公開プロジェクトとチケットを作成し、チケットの件名と所属を再取得して照合した",
+      "issue": 1
+    }
+  },
+  "wordpress": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/4",
+      "bundle_sha256": "sha256:921881c75c511725a156b87fcb34b3c739226be280500d6f79fa495f4d5503cd",
+      "contract_ref": "sha256:ef31a8791e8af540440b75f58d0138d6b31a7e104693fe862c02e89f0931253b",
+      "derivation_ref": "sha256:0f7ce8851a84a8ab31d24d5dec8101211d1250977e999aff6350b6a29a9ad37f",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "oci",
+        "runtime_executable": "docker",
+        "image": "docker.io/library/wordpress@sha256:6f9ba86dd587f89d4095996df1eb698593b9edcceb9df28e55d0029008cc2fb4",
+        "platform": "linux/amd64",
+        "platform_emulated": true,
+        "connector": "relay",
+        "relay_image_digest": "sha256:3e66ad944f585ee3a547dfd6db569e2c05383cbca66b1ba1639e10fa1620f0cd",
+        "attempt_id": "run-4207-1795065479338977000"
+      },
+      "observations": [
+        {
+          "id": "wordpress-http",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/wp-login.php",
+            "status": 200,
+            "body_sha256": "sha256:ca045139d58b4c71872cadc5a267d49a9ede422d11993a77361702293b87d478"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "initialize site, sign in, create and read a draft post",
+      "id": 6
+    }
+  },
+  "postgresql": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/4",
+      "bundle_sha256": "sha256:d84920b3abacbd46b55773f65577e968285f33c4dd3561864b0c1465e34a2a66",
+      "contract_ref": "sha256:10a126d6359eb17d0dfae2eb6dd439ea14947c6ba0bc4ab8392c5a4040d1d40a",
+      "derivation_ref": "sha256:f1abe5aac4f2c6f16318c283b43b25ef5eb2881859c02fa3aa4d24f05d2fbe3f",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "oci_service_group",
+        "runtime_executable": "docker",
+        "image": "docker.io/library/adminer@sha256:e3fa100aaf0e0b7d8c9bf06fa46e5bbd16f9fff0aa0e3bed5376a0fe1d7d107f",
+        "platform": "linux/arm64",
+        "platform_emulated": false,
+        "connector": "relay",
+        "relay_image_digest": "sha256:3e66ad944f585ee3a547dfd6db569e2c05383cbca66b1ba1639e10fa1620f0cd",
+        "attempt_id": "run-41797-1795067111627672000"
+      },
+      "observations": [
+        {
+          "id": "postgresql-http",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/",
+            "status": 200,
+            "body_sha256": "sha256:ca57234586a2702dcdb420b6ec4a0595caf55b522a0a93373ac3f4fb51d29e28"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "SQL through Adminer: create temporary table, insert two rows, select sum",
+      "sum": 18
+    }
+  },
+  "excalidraw": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/1",
+      "bundle_sha256": "sha256:0ca740a85f88577d1c8f4e5b9fadb614c916975296b94dac035742cb0b830fab",
+      "contract_ref": "sha256:c1b0214838a26aed029b6cab17eae8619945e829cd9643d01a9cce5bd9c6d238",
+      "derivation_ref": "sha256:7df44dd6762cd3426eea92306a8045d686551d0966f295cdeb6d3cf94bc729d3",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "process",
+        "attempt_id": "run-12983-1795060116062540000",
+        "runtime_name": "python3.12"
+      },
+      "observations": [
+        {
+          "id": "root",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/",
+            "status": 200,
+            "body_sha256": "sha256:23e4875c3c66509a91b9e5e59f45d03137e471fa965e4a4a3db4cc3fdfa25eb1"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "draw, save, reload, export rectangle",
+      "elements": 1
+    }
+  },
+  "pandoc": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/4",
+      "bundle_sha256": "sha256:a6e9b28d536556f0b807b42b63969659d427215b9b0a4d2e2de14bc8c3b501ab",
+      "contract_ref": "sha256:f3ff0b7353d8b1229d9226087a585da3f8288d915d2a010ff8d468665fba5212",
+      "derivation_ref": "sha256:f1f7d7909e789bd6cdc1786944c5aae4a8ea0bf984a6e14ebd378f86340d7dc1",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "oci",
+        "runtime_executable": "docker",
+        "image": "docker.io/pandoc/core@sha256:df62c5d5f50fea35a6552ae2eba8f184fc10332352de7e392bf4904ae04e992e",
+        "platform": "linux/amd64",
+        "platform_emulated": true,
+        "connector": "relay",
+        "relay_image_digest": "sha256:3e66ad944f585ee3a547dfd6db569e2c05383cbca66b1ba1639e10fa1620f0cd",
+        "attempt_id": "run-22556-1795060531577194000"
+      },
+      "observations": [
+        {
+          "id": "pandoc-http",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/version",
+            "status": 200,
+            "body_sha256": "sha256:2efff1261c25d94dd6698ea1047f5c0a7107ca98b0a6c2427ee6614143500215"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "Markdown heading converted to HTML",
+      "html": "<h1 id=\"capsule-hub\">Capsule Hub</h1>"
+    }
+  },
+  "libreoffice": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/5",
+      "bundle_sha256": "sha256:c8ac826d123d1da10a2ce41ae434081b6b3952083d4dc5ff420436004ac276d7",
+      "contract_ref": "sha256:d4248fefc073c7a81333238d2c8a8e4803ed9bc4128b22ddc8acd11ca89e8fa5",
+      "derivation_ref": "sha256:17c1b764693ba25b9039fc2410030d38dca3f9432d5f9af6c574ae278db95c2b",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "native_desktop",
+        "attempt_id": "run-91490-1795073203493873000",
+        "runtime_name": "soffice",
+        "native": {
+          "artifact_ref": "sha256:de943203795e5057785f65515063e2db5eb60b0bb6d8e2534fec59e5cc5fb988",
+          "codesign_verify": "valid",
+          "signature_kind": "developer_id",
+          "local_override": false,
+          "entry": "LibreOffice.app/Contents/MacOS/soffice"
+        }
+      },
+      "observations": [
+        {
+          "id": "gui-window",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/ready",
+            "status": 200,
+            "body_sha256": "sha256:f770ef86d1833460dbf0a2f1d327f94c1f4d83246ebc4ea52fcd89b9dbe10a30"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "Writerで検証用文書を開いて本文を編集・保存し、保存したOpenDocumentの段落を照合した",
+      "saved_format": "OpenDocument Flat XML",
+      "text": "Capsule Hub Writer verified"
+    }
+  },
+  "mermaid": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/1",
+      "bundle_sha256": "sha256:b6d9d279c723bc68c21a7bf4b0bafa56894d012ce50964a462c46c9c9e3b4e27",
+      "contract_ref": "sha256:0652940d8c5f7fd1e852c33c3c50e193de6a2d64f35566a1ebbfd453dcf94a71",
+      "derivation_ref": "sha256:d4e7d04a43e19ab1a1694c6f907aab73040193edad81128d499ed2e2850985a6",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "process",
+        "attempt_id": "run-20069-1795060417590742000",
+        "runtime_name": "python3.12"
+      },
+      "observations": [
+        {
+          "id": "mermaid-http",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/",
+            "status": 200,
+            "body_sha256": "sha256:be6b3e8574e78b33b2ee17303685b02c17ac61858fad6c8756c6e3765700aa42"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "diagram render and SVG export",
+      "size": 11088
+    }
+  },
+  "code-server": {
+    "receipt_excerpt": {
+      "schema": "ato.contract-verification-receipt/4",
+      "bundle_sha256": "sha256:b465282253caad892bc575e4bb0cded66d7471cfa2b458f11a7773d118e4f6f5",
+      "contract_ref": "sha256:d0226549c3f6bff642e201963e16967004988a0db2855b45a7f496165ecb6f5f",
+      "derivation_ref": "sha256:d7c3a60824c553a518ffb05dada2de030d95b71600d4f499da1a356d69c1a5b2",
+      "fully_satisfied": true,
+      "target": {
+        "kind": "cli-local"
+      },
+      "execution": {
+        "realization": "oci",
+        "runtime_executable": "docker",
+        "image": "docker.io/codercom/code-server@sha256:aaad9c5f5ecb70713188e8466060f186b08bd328cd3e1bcffc4a2a2dca33c14b",
+        "platform": "linux/amd64",
+        "platform_emulated": true,
+        "connector": "relay",
+        "relay_image_digest": "sha256:3e66ad944f585ee3a547dfd6db569e2c05383cbca66b1ba1639e10fa1620f0cd",
+        "attempt_id": "run-47988-1795067626941902000"
+      },
+      "observations": [
+        {
+          "id": "code-server-http",
+          "outcome": "satisfied",
+          "evidence": {
+            "method": "GET",
+            "path": "/healthz",
+            "status": 200,
+            "body_sha256": "sha256:d9f3d9f0503b1bc34b7faeaced9c83ec0519ec428aafa019bfdf47f3df862b5c"
+          }
+        }
+      ]
+    },
+    "operations": {
+      "operation": "sign in, open a seeded file, edit and save its text in VS Code, reload and verify the saved text",
+      "file": "hub-proof.txt"
+    }
+  }
+}
