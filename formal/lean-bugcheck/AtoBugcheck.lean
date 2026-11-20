@@ -3338,3 +3338,232 @@ theorem checkpoint_after_stop_is_exportable (w : World) :
   simp [exportCheckFirst, checkpoint, stopRun, checkpointCurrent]
 
 end VolumeExportGate
+
+/-! ## ato-api (cross-repo) :: the owner's Stop, Start and Keep-running controls
+
+`src/routes/compute_instances.ts` (`POST /stop`, `POST /start`, `PATCH /runtime-policy`)
+with `src/services/always_on.ts` and `src/services/execution_authorization.ts`. Found
+on production on 2026-11-20: Stop then Start left an always-on Instance serving with
+`desired_state: stopped`, and restoring the policy stopped the Run again.
+
+This extends `AlwaysOnRecovery` with the owner's controls. A Run is renewable when it
+was launched while the policy wanted it (`reserveExecutionAuthorization`); a Run
+launched under a hard deadline cannot be upgraded in place. A Run of an Instance whose
+intent is `stopped` is not restarted when it ends and is put to sleep when idle. -/
+namespace AlwaysOnOwnerControls
+
+inductive Desired where
+  | running | stopped
+  deriving DecidableEq, Repr
+
+inductive Status where
+  | idle | waiting | running
+  deriving DecidableEq, Repr
+
+structure Run where
+  id : Nat
+  renewable : Bool
+  deriving DecidableEq, Repr
+
+/-- An always-on Instance. -/
+structure World where
+  desired : Desired
+  status : Status
+  lastRun : Option Nat
+  live : Option Run
+  /-- How many times an owner control stopped a serving Run. -/
+  outages : Nat
+  deriving DecidableEq, Repr
+
+/-- `stopInstanceRuntime`. -/
+def stopRuntime (w : World) : World :=
+  match w.live with
+  | some _ => { w with live := none, outages := w.outages + 1 }
+  | none => w
+
+/-- `setRuntimePolicy` to a different intent: new generation, nothing bound. -/
+def setPolicy (w : World) (d : Desired) : World :=
+  { w with desired := d, status := if d == .running then .waiting else .idle, lastRun := none }
+
+/-- `POST /stop`. -/
+def stop (w : World) : World := setPolicy (stopRuntime w) .stopped
+
+/-- `POST /start`: join the serving Run or launch `fresh`. With the fix the intent goes
+    back to `running` first, so the Run is renewable and bound to the policy. -/
+def start (fixed : Bool) (w : World) (fresh : Nat) : World :=
+  if fixed && w.desired == .stopped then
+    match w.live with
+    | some r => { w with desired := .running, status := .running, lastRun := some r.id }
+    | none => { w with desired := .running, status := .running, lastRun := some fresh,
+                       live := some ⟨fresh, true⟩ }
+  else
+    match w.live with
+    | some _ => w
+    | none => { w with live := some ⟨fresh, w.desired == .running⟩ }
+
+/-- `PATCH /runtime-policy` within always-on. -/
+def patch (fixed : Bool) (w : World) (d : Desired) : World :=
+  if !fixed then
+    let w := stopRuntime w
+    if w.desired == d then w else setPolicy w d
+  else if w.desired == d then w
+  else
+    match d, w.live with
+    | .running, some r =>
+      if r.renewable then { w with desired := .running, status := .running, lastRun := some r.id }
+      else setPolicy (stopRuntime w) d
+    | _, _ => setPolicy (stopRuntime w) d
+
+/-- The Run ends by itself (crash, host restart, hard deadline). Only an Instance
+    whose intent is `running` is queued for a restart (`scheduleInstanceRestart`). -/
+def runEnds (w : World) : World :=
+  match w.live with
+  | none => w
+  | some r =>
+    if w.desired == .running && (w.lastRun == some r.id || w.lastRun == none) then
+      { w with live := none, status := .waiting }
+    else { w with live := none }
+
+/-- `reconcileAlwaysOnInstances`: adopt the serving Run or launch `fresh`. -/
+def sweep (w : World) (fresh : Nat) : World :=
+  if w.desired == .running && w.status == .waiting then
+    match w.live with
+    | some r => { w with status := .running, lastRun := some r.id }
+    | none => { w with status := .running, lastRun := some fresh, live := some ⟨fresh, true⟩ }
+  else w
+
+/-- Resident: whatever ends the serving Run, the reconciler brings a Run back. -/
+def resident (w : World) : Bool :=
+  w.desired == .running && (sweep (runEnds w) 99).live.isSome
+
+/-- An always-on Instance serving normally. -/
+def serving : World := ⟨.running, .running, some 1, some ⟨1, true⟩, 0⟩
+
+/-- BUG: Stop then Start leaves the Instance serving but not resident: the intent
+    still says `stopped`, so the Run is not renewable and nothing restarts it. -/
+theorem stop_start_is_not_resident_BUG :
+    let w := start false (stop serving) 2
+    w.live = some ⟨2, false⟩ ∧ w.desired = .stopped ∧ resident w = false ∧
+      (sweep (runEnds w) 3).live = none := by
+  decide
+
+/-- BUG: restoring the intent afterwards stops the Run that is serving. -/
+theorem restoring_policy_stops_the_run_BUG :
+    let before := start false (stop serving) 2
+    (patch false before .running).live = none ∧
+      (patch false before .running).outages = before.outages + 1 := by
+  decide
+
+/-- BUG: a policy request that changes nothing stops the resident Run. -/
+theorem unchanged_policy_request_stops_the_run_BUG :
+    (patch false serving .running).live = none ∧ (patch false serving .running).outages = 1 := by
+  decide
+
+/-- HOLDS (the fix): Stop then Start is resident again, with a renewable Run bound to
+    the policy, and it comes back after the Run ends. -/
+theorem fixed_stop_start_is_resident (w : World) (fresh : Nat) :
+    let after := start true (stop w) fresh
+    after.live = some ⟨fresh, true⟩ ∧ after.desired = .running ∧
+      after.lastRun = some fresh ∧ resident after = true := by
+  cases w with
+  | mk desired status lastRun live outages =>
+    cases live <;> simp [start, stop, stopRuntime, setPolicy, resident, runEnds, sweep]
+
+/-- HOLDS: a policy request that changes nothing changes nothing. -/
+theorem fixed_unchanged_policy_is_a_noop (w : World) : patch true w w.desired = w := by
+  simp [patch]
+
+/-- HOLDS: returning to `running` keeps a Run that already holds renewable authority
+    and binds the policy to it, without an outage. -/
+theorem fixed_keep_running_adopts_renewable_run (w : World) (r : Run)
+    (hd : w.desired = .stopped) (hl : w.live = some r) (hr : r.renewable = true) :
+    let after := patch true w .running
+    after.live = some r ∧ after.outages = w.outages ∧ after.lastRun = some r.id ∧
+      resident after = true := by
+  cases w with
+  | mk desired status lastRun live outages =>
+    simp only at hd hl
+    subst hd hl
+    simp [patch, hr, resident, runEnds, sweep]
+
+/-- HOLDS (negative case): a Run launched under a hard deadline is not adopted. It is
+    drained, and the reconciler replaces it with a renewable one. -/
+theorem fixed_keep_running_replaces_hard_deadline_run (w : World) (r : Run) (fresh : Nat)
+    (hd : w.desired = .stopped) (hl : w.live = some r) (hr : r.renewable = false) :
+    let after := patch true w .running
+    after.live = none ∧ after.status = .waiting ∧
+      (sweep after fresh).live = some ⟨fresh, true⟩ := by
+  cases w with
+  | mk desired status lastRun live outages =>
+    simp only at hd hl
+    subst hd hl
+    simp [patch, hr, stopRuntime, setPolicy, sweep]
+
+/-- HOLDS: Stop still stops, and a stopped Instance is not restarted. -/
+theorem fixed_stop_is_not_resident (w : World) (fresh : Nat) :
+    (stop w).live = none ∧ (sweep (stop w) fresh).live = none := by
+  cases w with
+  | mk desired status lastRun live outages =>
+    cases live <;> simp [stop, stopRuntime, setPolicy, sweep]
+
+inductive Control where
+  | stop | start | keepRunning | keepStopped | runEnds | sweep
+  deriving DecidableEq, Repr
+
+def apply (w : World) (fresh : Nat) : Control → World
+  | .stop => stop w
+  | .start => start true w fresh
+  | .keepRunning => patch true w .running
+  | .keepStopped => patch true w .stopped
+  | .runEnds => runEnds w
+  | .sweep => sweep w fresh
+
+/-- What the owner's controls and the reconciler preserve. A serving Run always belongs
+    to an Instance whose intent is `running`, is renewable, and is either bound to the
+    policy or adopted by the next sweep; an Instance that wants a Run and has none is
+    queued for one. -/
+def supervised (w : World) : Bool :=
+  match w.live with
+  | none => w.desired == .stopped || w.status == .waiting
+  | some r =>
+    w.desired == .running && r.renewable &&
+      (w.lastRun == some r.id || w.status == .waiting)
+
+theorem fixed_control_keeps_supervision (w : World) (fresh : Nat) (c : Control)
+    (h : supervised w = true) : supervised (apply w fresh c) = true := by
+  cases w with
+  | mk desired status lastRun live outages =>
+    cases live with
+    | none =>
+      cases c <;> cases desired <;> cases status <;>
+        simp [apply, stop, start, patch, runEnds, sweep, stopRuntime, setPolicy, supervised] at h ⊢
+    | some run =>
+      cases run with
+      | mk id renewable =>
+        cases desired with
+        | stopped => simp [supervised] at h
+        | running =>
+          cases renewable with
+          | false => simp [supervised] at h
+          | true =>
+            cases c <;> cases status <;>
+              simp [apply, stop, start, patch, runEnds, sweep, stopRuntime, setPolicy, supervised] at h ⊢ <;>
+              (try split) <;> simp_all
+
+/-- HOLDS (the fix): no sequence of Stop, Start, Keep running, Run endings and sweeps
+    reaches "serving but not resident". -/
+theorem fixed_controls_keep_supervision (controls : List (Control × Nat)) :
+    ∀ w, supervised w = true →
+      supervised (controls.foldl (fun w c => apply w c.2 c.1) w) = true := by
+  induction controls with
+  | nil => intro w h; exact h
+  | cons c rest ih =>
+    intro w h
+    exact ih _ (fixed_control_keeps_supervision w c.2 c.1 h)
+
+/-- The unfixed Start breaks that invariant from a supervised state. -/
+theorem unfixed_start_breaks_supervision_BUG :
+    supervised (stop serving) = true ∧ supervised (start false (stop serving) 2) = false := by
+  decide
+
+end AlwaysOnOwnerControls
