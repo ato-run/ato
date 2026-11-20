@@ -6,5 +6,11 @@ unset ATO_VALIDATOR_REV
 # shellcheck disable=SC1091
 . "$site/versions.env"
 ATO_VALIDATOR_REV=${ATO_VALIDATOR_REV:-$ATO_RUNNER_REV}
-export ATO_API_REV ATO_PWA_REV ATO_RUNNER_REV ATO_VALIDATOR_REV
+# An operator-supplied certificate replaces Caddy's internal CA for every site.
+if [ -s "$site/.tmp/tls/fullchain.pem" ] && [ -s "$site/.tmp/tls/privkey.pem" ]; then
+  ATO_TLS='/run/ato-tls/fullchain.pem /run/ato-tls/privkey.pem'
+else
+  ATO_TLS=internal
+fi
+export ATO_API_REV ATO_PWA_REV ATO_RUNNER_REV ATO_VALIDATOR_REV ATO_TLS
 exec docker compose --project-directory "$site" --env-file "$site/.env" -f "$site/compose.yaml" "$@"

@@ -6,7 +6,7 @@
 }
 
 https://{$ATO_HOST} {
-	tls internal
+	tls {$ATO_TLS:internal}
 	header {
 		X-Content-Type-Options nosniff
 		Referrer-Policy same-origin
@@ -28,12 +28,12 @@ https://{$ATO_HOST} {
 }
 
 https://*.{$ATO_APPS_HOST} {
-	tls internal
+	tls {$ATO_TLS:internal}
 	reverse_proxy api:8787
 }
 
 https://runner.{$ATO_HOST} {
-	tls internal
+	tls {$ATO_TLS:internal}
 	@asserted header X-Ato-Run-Assertion *
 	handle @asserted {
 		reverse_proxy unix//run/ato-runner-ingress/surface.sock

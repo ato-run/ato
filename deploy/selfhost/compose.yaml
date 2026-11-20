@@ -58,8 +58,10 @@ services:
     environment:
       ATO_HOST: ${ATO_HOST}
       ATO_APPS_HOST: ${ATO_APPS_HOST:-apps.${ATO_HOST}}
+      ATO_TLS: ${ATO_TLS:-internal}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./.tmp/tls:/run/ato-tls:ro
       - type: bind
         source: ${ATO_RUNNER_INGRESS_DIR:-./.tmp/runner-ingress}
         target: /run/ato-runner-ingress

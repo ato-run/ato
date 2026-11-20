@@ -30,6 +30,8 @@ Linux、Docker Engine/Compose v2、Git、OpenSSL、Bashが必要です。Runner�
 
 3. `.env` の `ATO_HOST` に所有者用DNS名、`ATO_BIND_IP` に専用ゲストのLANアドレスを設定します。管理用ホスト名と `*.apps.<管理ホスト>` を同じIPに解決するローカルDNSを設定します。既定の内部ingress名はComposeのDNS aliasに登録されます。既定のbindはloopbackです。標準443を使えない場合は `ATO_HTTPS_PORT` を変更し、URLにも同じポートを付けます。
 
+   公開CAの証明書を使う場合は、管理用ホスト名、`*.<管理ホスト>`、`*.apps.<管理ホスト>` を含む証明書を `.tmp/tls/fullchain.pem`、秘密鍵を `.tmp/tls/privkey.pem` に置きます。秘密鍵はUID 1000だけが読めるようにします。両方がある場合、Caddyは内部CAの代わりにこの証明書を全サイトで使い、クライアントとRunnerへのCA配布（下の `selfhost-root.crt` と `ATO_RUNNER_API_CA_FILE`）は不要です。VPN内のアドレスだけを公開DNSに登録する構成では、DNS-01で発行して更新のたびに置き換え、`./stack restart web` で読み直します。
+
    ```sh
    ./start.sh
    ./stack ps

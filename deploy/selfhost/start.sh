@@ -3,6 +3,12 @@ set -eu
 site=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 "$site/init-runtime.sh"
 "$site/stack" up -d --no-build --pull never web
+if [ -s "$site/.tmp/tls/fullchain.pem" ] && [ -s "$site/.tmp/tls/privkey.pem" ]; then
+  # Publicly trusted certificate: there is no internal CA to distribute.
+  rm -f -- "$site/.tmp/trust/root.crt"
+  "$site/stack" up -d --wait --wait-timeout 90 --no-build --pull never api validator
+  exit 0
+fi
 # Install only the public CA for the API's TLS connection to the Runner gate.
 # Keep the CA private key inside Caddy's own volume.
 incoming=$(mktemp "$site/.tmp/trust/.root.XXXXXXXX")
