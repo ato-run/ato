@@ -409,7 +409,10 @@ fn q4_claim_and_open_requests_are_signed_and_verified() {
     );
     let api = api_for(&server, Some(key));
 
-    assert!(api.claim_next().unwrap().lease.is_none());
+    assert!(matches!(
+        api.claim_next().unwrap(),
+        ClaimDelivery::Empty { .. }
+    ));
     assert!(api.open_leases().unwrap().is_empty());
 
     let requests = server.requests();

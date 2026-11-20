@@ -2,9 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
-use ato_portable_application::validator_agent::{
-    ValidatorAgent, ValidatorAgentConfig, ValidatorRunOutcome,
-};
+use ato_portable_application::validator_agent::{ValidatorAgent, ValidatorAgentConfig};
 use clap::Parser;
 
 #[derive(Debug, Parser)]
@@ -34,32 +32,7 @@ fn main() -> Result<()> {
         poll_interval: Duration::from_millis(args.poll_interval_ms),
     })?;
     if args.once {
-        match agent.run_once()? {
-            ValidatorRunOutcome::Idle => println!("idle"),
-            ValidatorRunOutcome::Verified { bundle_id } => {
-                println!("verified bundle={bundle_id}")
-            }
-            ValidatorRunOutcome::Rejected {
-                bundle_id,
-                rejection_code,
-            } => println!("rejected bundle={bundle_id} code={rejection_code}"),
-            ValidatorRunOutcome::HostedVerified {
-                bundle_id,
-                fully_satisfied,
-            } => println!("hosted-verified bundle={bundle_id} fully_satisfied={fully_satisfied}"),
-            ValidatorRunOutcome::HostedAbandoned {
-                bundle_id,
-                failure_code,
-            } => println!("hosted-abandoned bundle={bundle_id} code={failure_code}"),
-            ValidatorRunOutcome::Exported {
-                export_id,
-                bundle_sha256,
-            } => println!("exported export={export_id} bundle_sha256={bundle_sha256}"),
-            ValidatorRunOutcome::ExportFailed {
-                export_id,
-                failure_code,
-            } => println!("export-failed export={export_id} code={failure_code}"),
-        }
+        println!("{}", agent.run_once()?.summary());
         return Ok(());
     }
     agent.run_forever()

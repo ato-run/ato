@@ -17,7 +17,8 @@ use ato_materializer_static_web::{
 use ato_objects::{PortableDependencyProfile, PortableOciArchive};
 use ato_runtime_attempt::verification::{
     HTTP_OBSERVATION_METHOD, ReceiptContext, probe_tls_start, required_http_observations,
-    required_tls_observations, runtime_tls_observation, verify_observed_candidate,
+    required_tls_observations, runtime_tls_observation, runtime_tls_probe_failure,
+    verify_observed_candidate,
 };
 use base64::Engine;
 use reqwest::blocking::{Client, RequestBuilder, Response};
@@ -74,6 +75,36 @@ pub enum ValidatorRunOutcome {
         export_id: String,
         failure_code: String,
     },
+}
+
+impl ValidatorRunOutcome {
+    /// One line naming what a pass did. Ids and codes only.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Idle => "idle".to_owned(),
+            Self::Verified { bundle_id } => format!("verified bundle={bundle_id}"),
+            Self::Rejected {
+                bundle_id,
+                rejection_code,
+            } => format!("rejected bundle={bundle_id} code={rejection_code}"),
+            Self::HostedVerified {
+                bundle_id,
+                fully_satisfied,
+            } => format!("hosted-verified bundle={bundle_id} fully_satisfied={fully_satisfied}"),
+            Self::HostedAbandoned {
+                bundle_id,
+                failure_code,
+            } => format!("hosted-abandoned bundle={bundle_id} code={failure_code}"),
+            Self::Exported {
+                export_id,
+                bundle_sha256,
+            } => format!("exported export={export_id} bundle_sha256={bundle_sha256}"),
+            Self::ExportFailed {
+                export_id,
+                failure_code,
+            } => format!("export-failed export={export_id} code={failure_code}"),
+        }
+    }
 }
 
 pub struct ValidatorAgent {
@@ -272,36 +303,31 @@ impl ValidatorAgent {
             let Some(address) = endpoint_address(&endpoint.address) else {
                 continue;
             };
-            let observed = match with_retry(deadline, || {
-                ato_tls_observe::observe_tls(
-                    address,
-                    &required.server_name,
-                    probe_tls_start(required.start),
-                    Duration::from_secs(10),
-                    ato_tls_observe::TrustAnchors::PublicRoots,
-                )
-                .map(|facts| runtime_tls_observation(&required, facts))
-                .map_err(|error| RetryableFailure::retryable(error.to_string(), None))
-            }) {
-                Ok(observed) => observed,
-                Err(failure) => {
-                    let code = if failure.retryable {
-                        "observation_unreachable"
-                    } else {
-                        "observation_rejected"
-                    };
-                    if let Err(report_error) =
-                        self.api.report_runtime_failure(&job, code, &failure.reason)
-                    {
-                        eprintln!(
-                            "[validator] could not report abandonment for {}: {report_error:#}",
-                            job.job_id
-                        );
-                    }
-                    return Ok(ValidatorRunOutcome::HostedAbandoned {
-                        bundle_id: job.bundle_id.clone(),
-                        failure_code: code.to_owned(),
-                    });
+            // A certificate endpoint is decided on its own, inside its own
+            // budget: an address this agent cannot reach is that observation's
+            // failure, not a reason to hold the job until its deadline.
+            let observed = match observe_tls_within(
+                deadline.min(Instant::now() + TLS_OBSERVATION_BUDGET),
+                |timeout| {
+                    ato_tls_observe::observe_tls(
+                        address,
+                        &required.server_name,
+                        probe_tls_start(required.start),
+                        timeout,
+                        ato_tls_observe::TrustAnchors::PublicRoots,
+                    )
+                },
+            ) {
+                Ok(facts) => runtime_tls_observation(&required, facts),
+                Err(error) => {
+                    eprintln!(
+                        "[validator] job {} TLS observation {} failed: {}: {}",
+                        job.job_id,
+                        required.requirement_id,
+                        error.class().as_str(),
+                        error.reason()
+                    );
+                    runtime_tls_probe_failure(&required, &error)
                 }
             };
             tls.push(observed);
@@ -481,7 +507,7 @@ impl ValidatorAgent {
             // interrupted minutes later. Log, back off, keep serving.
             match self.run_once() {
                 Ok(ValidatorRunOutcome::Idle) => thread::sleep(self.poll_interval),
-                Ok(_) => {}
+                Ok(outcome) => eprintln!("[validator] job outcome: {}", outcome.summary()),
                 Err(error) => {
                     eprintln!("[validator] job failed, continuing: {error:#}");
                     thread::sleep(self.poll_interval);
@@ -1883,6 +1909,43 @@ fn with_retry<T>(
     }
 }
 
+/// One attempt at a certificate endpoint, and the whole budget one TLS
+/// observation may spend before it is decided as failed.
+const TLS_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const TLS_OBSERVATION_BUDGET: Duration = Duration::from_secs(30);
+
+/// Probe a certificate endpoint until it answers or its budget is spent.
+///
+/// Only a failure that waiting can change is asked again: a listener that is
+/// still coming up refuses or presents nothing. No route to the address and a
+/// spent attempt timeout are answers about where this agent runs; repeating
+/// them only delays every other observation of the job.
+fn observe_tls_within(
+    deadline: Instant,
+    mut probe: impl FnMut(Duration) -> Result<ato_tls_observe::TlsFacts, ato_tls_observe::TlsProbeError>,
+) -> Result<ato_tls_observe::TlsFacts, ato_tls_observe::TlsProbeError> {
+    use ato_tls_observe::TlsProbeFailureClass as Class;
+    let mut backoff = Duration::from_millis(250);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        // The probe rejects a zero budget; the last attempt still runs.
+        let timeout = TLS_PROBE_TIMEOUT.min(remaining.max(Duration::from_millis(1)));
+        let error = match probe(timeout) {
+            Ok(facts) => return Ok(facts),
+            Err(error) => error,
+        };
+        let may_change = matches!(
+            error.class(),
+            Class::Refused | Class::ConnectFailed | Class::NoCertificate
+        );
+        if !may_change || Instant::now() + backoff >= deadline {
+            return Err(error);
+        }
+        thread::sleep(backoff);
+        backoff = (backoff * 2).min(Duration::from_secs(5));
+    }
+}
+
 struct HostedObservation {
     port: String,
     method: String,
@@ -1969,6 +2032,98 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    fn probe_error(address: std::net::SocketAddr) -> ato_tls_observe::TlsProbeError {
+        ato_tls_observe::observe_tls(
+            address,
+            "mail.example",
+            ato_tls_observe::TlsStart::Implicit,
+            Duration::from_millis(500),
+            ato_tls_observe::TrustAnchors::PublicRoots,
+        )
+        .expect_err("the fixture address presents no certificate")
+    }
+
+    fn refused() -> ato_tls_observe::TlsProbeError {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        probe_error(address)
+    }
+
+    /// Accepts and never speaks: the probe spends its attempt timeout.
+    fn timed_out() -> ato_tls_observe::TlsProbeError {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let error = probe_error(address);
+        drop(listener);
+        error
+    }
+
+    /// The selfhost incident: every probe failure used to be retried until
+    /// the job's deadline. A failure that asking again cannot change is
+    /// decided after one attempt.
+    #[test]
+    fn a_tls_failure_that_waiting_cannot_change_is_decided_after_one_attempt() {
+        let error = timed_out();
+        assert_eq!(error.class().as_str(), "timeout");
+        let mut attempts = 0;
+        let mut failure = Some(error);
+        let started = Instant::now();
+        let result = observe_tls_within(started + Duration::from_secs(600), |_| {
+            attempts += 1;
+            Err(failure.take().expect("asked again"))
+        });
+        assert_eq!(result.unwrap_err().class().as_str(), "timeout");
+        assert_eq!(attempts, 1);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_refused_tls_endpoint_is_retried_only_inside_its_own_budget() {
+        let mut attempts = 0;
+        let started = Instant::now();
+        let result = observe_tls_within(started + Duration::from_millis(700), |timeout| {
+            attempts += 1;
+            assert!(timeout <= TLS_PROBE_TIMEOUT && !timeout.is_zero());
+            Err(refused())
+        });
+        assert_eq!(result.unwrap_err().class().as_str(), "refused");
+        assert!(attempts >= 2, "a listener still coming up is asked again");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn an_elapsed_budget_still_makes_one_bounded_attempt() {
+        let mut attempts = 0;
+        let result = observe_tls_within(Instant::now(), |timeout| {
+            attempts += 1;
+            assert!(!timeout.is_zero());
+            Err(refused())
+        });
+        assert!(result.is_err());
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn every_job_outcome_has_a_one_line_summary() {
+        assert_eq!(
+            ValidatorRunOutcome::HostedVerified {
+                bundle_id: "bnd_1".to_owned(),
+                fully_satisfied: false,
+            }
+            .summary(),
+            "hosted-verified bundle=bnd_1 fully_satisfied=false"
+        );
+        assert_eq!(
+            ValidatorRunOutcome::HostedAbandoned {
+                bundle_id: "bnd_1".to_owned(),
+                failure_code: "observation_unreachable".to_owned(),
+            }
+            .summary(),
+            "hosted-abandoned bundle=bnd_1 code=observation_unreachable"
+        );
+    }
     use crate::instance_snapshot::{
         DATA_JSON_PROTOCOL, INSTANCE_SNAPSHOT_SCHEMA, InstanceSnapshotAssetV1,
         InstanceSnapshotResourceV1, attach_instance_snapshot,
