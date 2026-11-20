@@ -314,6 +314,7 @@ fn the_pinned_images_have_recorded_build_inputs() {
         "Dockerfile.missive",
         "missive-nondefault-port.patch",
         "missive-identity-submission-capability.patch",
+        "missive-offline-assets.patch",
         "images.lock",
         "README.md",
     ] {
