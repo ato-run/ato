@@ -1228,6 +1228,21 @@ mod tests {
     #[test]
     fn readonly_workspace_modes_stop_at_the_mount_root() {
         use std::os::unix::fs::PermissionsExt as _;
+        // A umask applies to the whole process. Run this case alone so other
+        // parallel libtest cases keep their own process's umask.
+        const CHILD: &str = "ATO_TEST_READONLY_WORKSPACE_UMASK";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new("sh")
+                .args(["-c", "umask 077; exec \"$@\"", "sh"])
+                .arg(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg(std::thread::current().name().unwrap())
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
         let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
         let private = tempfile::tempdir().unwrap();
         std::fs::set_permissions(private.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -1239,6 +1254,7 @@ mod tests {
         // Unlike an explicit directory entry, this tar implicitly creates
         // both ancestors of the CA file using the Runner's process umask.
         let bytes = archive_with_entry("ca/nested/root.pem");
+        unpack_state_tree(&bytes, &state_artifact_digest(&bytes), &state).unwrap();
         unpack_workspace_tree(&bytes, &state_artifact_digest(&bytes), &target).unwrap();
         for directory in [target.clone(), target.join("ca"), target.join("ca/nested")] {
             assert_eq!(mode(&directory), 0o755);
@@ -1246,6 +1262,7 @@ mod tests {
         assert_eq!(mode(&target.join("ca/nested/root.pem")), 0o644);
         assert_eq!(mode(private.path()), 0o700);
         assert_eq!(mode(&state), 0o700);
+        assert_eq!(mode(&state.join("ca/nested")), 0o700);
 
         let source = tempfile::tempdir().unwrap();
         std::fs::create_dir(source.path().join("empty")).unwrap();
