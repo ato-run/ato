@@ -547,6 +547,29 @@ Computation として訪れた時点で skip される。その computation は�
   `canonicalizeOrigin` は path/query/hash/userinfo/`null`/`*` を拒否し、完全一致比較。
 - PWA: README の escape-first レンダラと auth 群の既存テスト 178 件が成功（`npx vitest run src/auth src/lib/repoSource`）。
 - Desktop: IPC は 7 command に限定、capability は `main` window のみ、navigation は fail-closed の純粋関数で unit test されている（読解）。
+## 第4回 セルフホスト実機で見つけた常駐再開の不具合（ato-api、2026-11-20）
+
+専用ゲストで Mail を常駐（`always_on`）させ、ゲストを再起動したところ、API・Caddy・Runner は復帰したが Mail が再開しなかった。
+原因は ato-api の 3 箇所で、いずれも修正済み（ato-api `feat/oss-selfhost-node`）。対象は別 repo だが、Runner の復旧報告と対になる判定なのでここでモデル化した。
+
+| ID | 場所（ato-api） | 挙動 | Lean | 修正 commit・回帰テスト |
+|---|---|---|---|---|
+| A1 | `src/routes/runner_lease_state.ts` `POST /:id/recovery` | Runner が旧 Run の停止を報告しても常駐ポリシーが `running` のまま残る。再調整は `waiting` しか拾わないため再起動されない | `AlwaysOnRecovery.recovery_strands_running_BUG` | `5d8619578`、`runner-lease-state-authz.test.ts`「returns a resident Instance to the restart queue…」 |
+| A2 | `src/services/always_on.ts` `scheduleInstanceRestart` | ready になる前に終了した Run の終了報告を重複とみなして捨てる。ポリシーが `starting` のまま残る | `AlwaysOnRecovery.unready_run_end_ignored_BUG` | `2094897c2`、`always-on-policy.test.ts`「requeues a Run that ends before it ever became ready」 |
+| A3 | 同 recovery 経路と `src/services/network_authorization.ts` | 停止確認済みの Run の固定 TCP 束縛を解放しない。以後の起動が `fixed_tcp_allocation_busy` で拒否され続ける | `AlwaysOnRecovery.socket_blocks_first_relaunch_BUG`、`held_socket_never_relaunches` | `f662bd5c6`、同テストで束縛が `detached` になること、未確認の停止では `active` のまま残ることを確認 |
+
+A2 と A3 は実機の症状からではなく、A1 のモデルを書くためにコードを読み直した段階と、修正後の再試験で見つけた。A2 は実機では発生させていない（テストでの再現のみ）。
+
+証明した性質:
+
+- `fixed_recovery_relaunches` — 3 つの修正が入った構成では、停止確認済みの復旧報告の次の再調整で必ず新しい Run が起動する（失敗回数によらない）。
+- `fixed_recovery_keeps_failures` — ホスト再起動による再開はアプリの失敗回数に数えない。
+- `only_the_fixed_combination_is_live` — 3 つの挙動の 8 通りの組み合わせのうち、常に再開するのは修正後の 1 通りだけ。どの修正を 1 つ外しても反例が出るので、仕様が緩すぎないことの確認（mutation）を定理として持つ。[h5i](https://github.com/h5i-dev/h5i) の `h5i app mutate` と同じ狙いを手書きモデルに適用した。h5i の `extract`・`prove` は h5i-app で書いた Rust を Aeneas で Lean に変換する前提で、TypeScript の API と既存の手書きモデルには使っていない。
+
+実機での確認: 修正後の API を配備し、Mail 稼働中にゲストを正常停止 → 起動。操作なしで約 1 分後に Runner が旧 Run の停止を報告し、新しい Run が ready になった。保存済みと未保存の 2 通の下書きを IMAPS で読み戻した。暗号化コールドバックアップを別ディスクイメージへ復元して起動した場合も同じ結果。
+
+限界: バックオフの遅延と、健全期間による失敗回数のリセットは抽象化した（起動の有無ではなく時刻だけを変えるため）。未確認（`unconfirmed`）の復旧は writer の隔離と合わせて別の検証が必要で、ここでは固定 TCP を解放しないことをテストで確認したのみ。複数 Instance が同じ Runner の枠を争う場合と、再調整の同時実行は対象外。
+
 ## 引き継ぎ後の修正
 
 対象は `feat/lean-bugcheck` @ `bbeea6f` を起点とする worktree。下の5件を修正し、Lean 4.36.0 で修正版のモデルを検査した。`run.sh` は失敗時に非ゼロ終了し、ソースを書き換えずに回帰検証する。Lean は `$LEAN` または `~/.elan/bin/lean` から指定する。

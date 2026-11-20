@@ -2778,3 +2778,162 @@ theorem per_part_limits_are_not_jointly_attainable :
     maxArchiveBase64 < maxBundleBytes := by decide
 
 end BundleBounds
+
+/-! ## ato-api (cross-repo) :: resident Instance restart after a Runner recovery report
+
+`src/services/always_on.ts` (`scheduleInstanceRestart`, `reconcileAlwaysOnInstances`),
+`src/routes/runner_lease_state.ts` (`POST /v1/runner-leases/:id/recovery`) and
+`src/services/network_authorization.ts` (fixed TCP bindings). Found on the self-hosted
+Mail guest on 2026-11-20: after a host restart the resident Instance never came back.
+
+The model keeps only what decides whether a new Run is launched: the policy row, the
+live Run and who holds the fixed socket. Backoff delays and the healthy-interval reset
+of the failure counter are abstracted away; they change when a launch happens, not
+whether one happens. -/
+namespace AlwaysOnRecovery
+
+inductive Status where
+  | idle | waiting | launching | starting | running | degraded
+  deriving DecidableEq, Repr
+
+structure World where
+  status : Status
+  lastRun : Option Nat
+  healthy : Bool
+  failures : Nat
+  liveRun : Option Nat
+  socket : Option Nat
+  deriving DecidableEq, Repr
+
+def maxFailures : Nat := 5
+
+/-- The statuses in which a terminal report for `lastRun` counts as already scheduled. -/
+def alreadyScheduled (includeStarting : Bool) : Status → Bool
+  | .waiting | .launching | .degraded => true
+  | .starting => includeStarting
+  | _ => false
+
+/-- `scheduleInstanceRestart`. `run = none` is the launch-failure call from the sweep. -/
+def schedule (includeStarting : Bool) (w : World) (run : Option Nat) (count : Bool) : World :=
+  let foreign := match run, w.lastRun with
+    | some r, some l => r != l
+    | _, _ => false
+  let duplicate := match run with
+    | some r => w.lastRun == some r && !w.healthy && alreadyScheduled includeStarting w.status
+    | none => false
+  if foreign || duplicate then w
+  else if count && w.failures + 1 > maxFailures then
+    { w with status := .degraded, failures := w.failures + 1, healthy := false }
+  else
+    { w with status := .waiting, failures := if count then w.failures + 1 else w.failures,
+             healthy := false }
+
+/-- The recovery report for a Run the Runner confirmed stopped. The three flags are the
+    three behaviours that were missing: requeue the policy, treat `starting` as not yet
+    scheduled, release the fixed socket. -/
+def recover (requeue includeStarting release : Bool) (w : World) (r : Nat) : World :=
+  let w := { w with liveRun := none }
+  let w := if release && w.socket == some r then { w with socket := none } else w
+  if requeue then schedule includeStarting w (some r) false else w
+
+/-- One `reconcileAlwaysOnInstances` pass that would start Run `fresh`. -/
+def sweep (includeStarting : Bool) (w : World) (fresh : Nat) : World :=
+  if w.status != .waiting then w
+  else if w.socket.isSome then schedule includeStarting w none true
+  else { w with status := .starting, lastRun := some fresh, liveRun := some fresh }
+
+/-- What the Coordinator knows just before a host restart: a Run that is starting or
+    running, bound to the policy, holding the fixed socket or none. -/
+def beforeRestart (w : World) (r : Nat) : Prop :=
+  w.liveRun = some r ∧ w.lastRun = some r ∧
+  (w.status = .running ∨ w.status = .starting) ∧
+  (w.socket = none ∨ w.socket = some r)
+
+instance (w : World) (r : Nat) : Decidable (beforeRestart w r) := by
+  unfold beforeRestart; infer_instance
+
+def relaunches (requeue includeStarting release : Bool) (w : World) (r fresh : Nat) : Bool :=
+  (sweep includeStarting (recover requeue includeStarting release w r) fresh).liveRun.isSome
+
+/-- BUG 1 (fixed in ato-api 5d8619578): the recovery report left the policy `running`
+    with no Run, and the sweep only looks at `waiting`. -/
+theorem recovery_strands_running_BUG :
+    ∃ w r, beforeRestart w r ∧ relaunches false true true w r (r + 1) = false :=
+  ⟨⟨.running, some 1, true, 0, some 1, none⟩, 1, by decide, by decide⟩
+
+/-- BUG 2 (fixed in ato-api 2094897c2): a Run that ends before it was ever ready is
+    read as a duplicate report, so the policy stays `starting` forever. -/
+theorem unready_run_end_ignored_BUG :
+    ∃ w r, beforeRestart w r ∧ relaunches true true true w r (r + 1) = false :=
+  ⟨⟨.starting, some 1, false, 0, some 1, none⟩, 1, by decide, by decide⟩
+
+/-- BUG 3 (fixed in ato-api f662bd5c6): the confirmed stop did not release the fixed
+    socket, so every later launch is refused as `fixed_tcp_allocation_busy`. -/
+theorem socket_blocks_first_relaunch_BUG :
+    ∃ w r, beforeRestart w r ∧ relaunches true false false w r (r + 1) = false :=
+  ⟨⟨.running, some 1, true, 0, some 1, some 1⟩, 1, by decide, by decide⟩
+
+/-- BUG 3 is permanent, not a delay: while the socket stays held no number of sweeps
+    ever starts a Run. -/
+theorem held_socket_never_relaunches (includeStarting : Bool) (fresh : Nat) :
+    ∀ (n : Nat) (w : World), w.liveRun = none → w.socket.isSome = true →
+      (Nat.repeat (fun w => sweep includeStarting w fresh) n w).liveRun = none ∧
+      (Nat.repeat (fun w => sweep includeStarting w fresh) n w).socket.isSome = true := by
+  intro n
+  induction n with
+  | zero => intro w h1 h2; exact ⟨h1, h2⟩
+  | succ n ih =>
+    intro w h1 h2
+    have := ih w h1 h2
+    simp only [Nat.repeat]
+    obtain ⟨a, b⟩ := this
+    generalize Nat.repeat (fun w => sweep includeStarting w fresh) n w = v at a b
+    unfold sweep schedule
+    simp only [b]
+    split
+    · exact ⟨a, b⟩
+    · simp only [Bool.false_or, ite_true]
+      split
+      · exact ⟨a, b⟩
+      · split <;> exact ⟨a, b⟩
+
+/-- HOLDS (the fix): with all three behaviours, the first sweep after a confirmed
+    recovery starts a new Run, whatever the failure history. -/
+theorem fixed_recovery_relaunches (w : World) (r fresh : Nat) (h : beforeRestart w r) :
+    relaunches true false true w r fresh = true := by
+  obtain ⟨hl, hr, hs, hk⟩ := h
+  cases w with
+  | mk status lastRun healthy failures liveRun socket =>
+    simp only at hl hr hs hk
+    subst hl hr
+    rcases hs with hs | hs <;> rcases hk with hk | hk <;> subst hs hk <;>
+      simp [relaunches, recover, schedule, sweep, alreadyScheduled]
+
+/-- HOLDS: the restart caused by a host restart is not charged to the app. -/
+theorem fixed_recovery_keeps_failures (w : World) (r : Nat) (h : beforeRestart w r) :
+    (recover true false true w r).failures = w.failures := by
+  obtain ⟨hl, hr, hs, hk⟩ := h
+  cases w with
+  | mk status lastRun healthy failures liveRun socket =>
+    simp only at hl hr hs hk
+    subst hl hr
+    rcases hs with hs | hs <;> rcases hk with hk | hk <;> subst hs hk <;>
+      simp [recover, schedule, alreadyScheduled]
+
+/-- Mutation check of the specification: of the eight combinations of the three
+    behaviours, exactly the fixed one restarts every resident Instance. Dropping any
+    single fix is caught by this theorem, so none of the three is redundant. -/
+theorem only_the_fixed_combination_is_live (requeue includeStarting release : Bool) :
+    (∀ w r, beforeRestart w r → relaunches requeue includeStarting release w r (r + 1) = true) ↔
+      (requeue = true ∧ includeStarting = false ∧ release = true) := by
+  constructor
+  · intro h
+    have h1 := h ⟨.running, some 1, true, 0, some 1, none⟩ 1 (by decide)
+    have h2 := h ⟨.starting, some 1, false, 0, some 1, none⟩ 1 (by decide)
+    have h3 := h ⟨.running, some 1, true, 0, some 1, some 1⟩ 1 (by decide)
+    revert h1 h2 h3
+    cases requeue <;> cases includeStarting <;> cases release <;> decide
+  · rintro ⟨rfl, rfl, rfl⟩ w r hw
+    exact fixed_recovery_relaunches w r (r + 1) hw
+
+end AlwaysOnRecovery

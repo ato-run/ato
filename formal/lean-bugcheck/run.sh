@@ -107,6 +107,10 @@ ATO_CLI="$ATO_CLI" "$HERE/repro/cli_resume.sh"
 echo '== CLI lifecycle ordering, symlink escape and stale lease'
 mkdir -p "$OUT/lifecycle"
 OUT="$OUT/lifecycle" ATO_CLI="$ATO_CLI" "$HERE/repro/cli_lifecycle_order.sh"
+if [ -n "${ATO_API_DIR:-}" ]; then
+  echo '== ato-api resident restart after Runner recovery (AlwaysOnRecovery)'
+  (cd "$ATO_API_DIR" && ./node_modules/.bin/vitest run src/tests/always-on-policy.test.ts src/tests/runner-lease-state-authz.test.ts)
+fi
 if [ "${RUN_CHECK:-0}" = 1 ] && [ -z "${CHECK_JSON:-}" ]; then
   CHECK_JSON="$OUT/check.json"
   echo '== cargo check'
