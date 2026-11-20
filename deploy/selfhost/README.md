@@ -125,7 +125,25 @@ Runnerの同じユーザー・権限でデータと資格情報を戻し、元�
 
 管理者は、検証済みの同じRustリビジョンから `ato-egress-firewall-status` をビルドし、rootだけが変更できる `/usr/local/libexec/ato-egress-firewall-status` に配置します。配布の `ato-egress-firewall.service`、`ato-egress-firewall-status.socket`、`ato-egress-firewall-status@.service` をroot所有のsystem unitとして配置します。前者は管理者が有効化するboot時の設定で、ato専用bridgeの先頭2ルール（1080/TCPを許可、そのほかを拒否）を設定します。後者は引数や要求本文を受け付けず、起動時点のINPUTルールの検査結果だけを返します。Runner起動前に管理者は設定unitとstatus socketを有効化・起動します。Runnerユーザーとワークロードにsudo権限は必要ありません。Runner設定の `ATO_RUNNER_EGRESS_FIREWALL_MODE=verify-only` はこの読み取り専用socketで検査し、規則の欠落・順序違い・検査不能ならネットワーク実行を開始しません。
 
+Composeと1枠のMail Runnerが同一Docker Engineを使う構成では、Composeの2ネットワークとRunの2ネットワークにそれぞれ1サブネットを確保します。以下はデフォルトbridgeが `172.17.0.0/16`、Composeが `172.18.0.0/16` と `172.19.0.0/16` を使う専用ゲストの例です。空のゲストで、LAN・VPN・既存ネットワークとの重複を確認し、Composeを初めて起動する前に管理者が対象Engineの `daemon.json` に設定を組み込みます。既存ネットワークは再作成するまで割り当てを保持します。[Dockerのサブネット割り当て](https://docs.docker.com/engine/network/#subnet-allocation)
+
+```json
+{
+  "bip": "172.17.0.1/16",
+  "default-address-pools": [
+    {"base": "172.18.0.0/16", "size": 16},
+    {"base": "172.19.0.0/16", "size": 16},
+    {"base": "172.20.0.0/16", "size": 16},
+    {"base": "172.21.0.0/16", "size": 16}
+  ]
+}
+```
+
+管理者がEngineに設定を反映した後、`docker network inspect` でComposeの使用サブネットを照合します。例では残り2サブネットが各Runの内部bridgeに割り当てられます。RunnerがStalwartにTCPを転送するとき、カーネルは接続先bridgeのgatewayを送信元に選びます。Stalwartの `STALWART_TRUSTED_PROXY_NETWORKS` には、Run用に予約したgatewayだけを単一アドレスのCIDRで設定します。この例では `172.20.0.1/32,172.21.0.1/32` です。
+
 Mailの固定TCP listenerを割り当てる場合は、他サービスで使用していないゲスト側のIP・ポートを確認します。同居構成のvalidatorから到達できるcontrol bridgeのゲスト側アドレスを使用できます。Runnerの `runner.env` に `ATO_RUNTIME_NETWORK_CONTROLS=true` と `ATO_RUNTIME_FIXED_TCP_ALLOWLIST=<IP>:<port>,...` を指定し、heartbeatの固定TCP・egress能力を確認します。
+
+起動後、`docker inspect "$stalwart_container"` の `NetworkSettings.Networks` でStalwartの実アドレスとネットワークを調べます。Runnerと同じネットワーク名前空間で `ip route get "$stalwart_ip"` の `src` が信頼済みgatewayであることを確認してください。ゲスト管理者は `nsenter -t "$(docker inspect -f '{{.State.Pid}}' "$stalwart_container")" -n ip route get "$gateway"` でコンテナからの戻り経路を確認できます。その後、固定listenerを通してTLSハンドシェイクと実際のIMAPログインを確認します。
 
 所有者は対象Runnerを明示してInstanceを停止状態で作成します。運用者は `./stack run --rm --no-deps -T api configure-network INSTANCE_ID RUNNER_ID /run/policy.json` に、読み取り専用でマウントしたポリシーを渡します。ファイルをマウントする実行例です。
 
