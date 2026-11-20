@@ -581,8 +581,9 @@ A2 と A3 は実機の症状からではなく、A1 のモデルを書くため�
 | `ControlPlaneClaimReclaim.lean` | 応答が失われた lease の claim と、クライアントが離れた poll | ファイル内の `_BUG` 定理 | 同ファイル | ato-api `feat/oss-selfhost-node` で修正済み |
 | `FixedTcpBindReachability.lean` | validator が届かないアドレスへの固定 TCP の割当 | 同上 | 同上 | 同上 |
 | `RecoveredLeaseRepair.lean` | 復旧報告が lease のエラーより先に書いた行の修復 | 同上 | 同上 | 同上 |
+| `TrustedProxyIngress.lean` | `trusted_proxy`（`tailscale_whois`）で、配布パッチの PROXY protocol をゲートウェイのアドレスで許可すると、ゲスト上の任意のプロセス（Runner の利用者を含む）が所有者の tailnet アドレスを名乗ってサインインできる | `local_process_becomes_owner_BUG` | `fixed_no_non_proxy_actor_becomes_owner`、`fixed_owner_device_still_signs_in`、`fixed_public_listener_ignores_proxy`、`fixed_dedicated_listener_only_proxy` | 決定のみ（ato-project-docs `docs/rfcs/draft/independent-selfhost.md` の認証の節）。配布と API は未修正 |
 
-限界: `ValidatorNamespaceFollow` は配布の 3 つの追従手段（`./stack` の照合、Compose の `depends_on.restart`、validator の自己終了）をまとめて 1 つの「追従する」として扱う。Docker と Compose の実際の挙動はモデルの外で、実機では未確認。API がクラッシュを繰り返す間に validator が再起動に失敗した場合は、次の `./stack up` まで回復しない。`FirstRunResidency` は時間を分単位にし、実行許可の更新拒否と、オンデマンドの HTTP 要求による再起動を対象外とした。
+限界: `ValidatorNamespaceFollow` は配布の 3 つの追従手段（`./stack` の照合、Compose の `depends_on.restart`、validator の自己終了）をまとめて 1 つの「追従する」として扱う。Docker と Compose の実際の挙動はモデルの外で、実機では未確認。API がクラッシュを繰り返す間に validator が再起動に失敗した場合は、次の `./stack up` まで回復しない。`FirstRunResidency` は時間を分単位にし、実行許可の更新拒否と、オンデマンドの HTTP 要求による再起動を対象外とした。`TrustedProxyIngress` は Docker・Caddy・Tailscale の実際の挙動と `web` 名前空間の分離を前提としており、それらはモデルの外である。
 
 ## 引き継ぎ後の修正
 
