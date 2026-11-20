@@ -19,8 +19,8 @@
 //! before each SMTP line read and each handshake step, so a peer that
 //! trickles bytes just under the timeout cannot extend the call.
 //!
-//! Trust anchors are public roots in production (webpki-roots, the Mozilla
-//! set); TestOnly injects a private anchor for tests. The observation does not
+//! The Contract selects the Mozilla public roots or a single fingerprinted
+//! DER trust anchor supplied by the operator. Test fixtures may inject anchors. The observation does not
 //! depend on a process-wide crypto provider: it installs the ring provider on
 //! the ClientConfig it builds.
 
@@ -29,7 +29,7 @@
 mod der;
 mod smtp;
 
-use std::io;
+use std::io::{self, Read};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -67,14 +67,62 @@ impl TlsStart {
 pub enum TrustAnchors {
     /// The Mozilla public root set (webpki-roots).
     PublicRoots,
+    /// A DER root verified against the SHA-256 fingerprint in the Contract.
+    Pinned(PinnedRoot),
     /// Exactly these certificates, for tests with private material.
     TestOnly(Vec<CertificateDer<'static>>),
 }
 
+#[derive(Debug, Clone)]
+pub struct PinnedRoot {
+    certificate: CertificateDer<'static>,
+    digest: String,
+}
+
 impl TrustAnchors {
-    fn label(&self) -> &'static str {
+    /// Local and hosted verification resolve the same operator-managed root.
+    /// Only canonical SHA-256 filenames may be read from the trusted directory.
+    pub fn for_contract(pin: Option<&str>) -> Result<Self, TlsProbeError> {
+        let Some(pin) = pin else {
+            return Ok(Self::PublicRoots);
+        };
+        let dir = std::env::var_os("ATO_TLS_ROOT_DIR")
+            .ok_or_else(|| TlsProbeError::new("a pinned TLS root requires ATO_TLS_ROOT_DIR"))?;
+        Self::from_pinned_directory(std::path::Path::new(&dir), pin)
+    }
+
+    pub fn from_pinned_directory(dir: &std::path::Path, pin: &str) -> Result<Self, TlsProbeError> {
+        use sha2::{Digest, Sha256};
+        let hex = pin
+            .strip_prefix("sha256:")
+            .filter(|hex| {
+                hex.len() == 64
+                    && hex
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+            .ok_or_else(|| TlsProbeError::new("invalid TLS CA digest"))?;
+        let mut der = Vec::new();
+        let file = std::fs::File::open(dir.join(format!("{hex}.der")))
+            .map_err(|_| TlsProbeError::new(format!("pinned TLS CA {pin} is unavailable")))?;
+        file.take(65537)
+            .read_to_end(&mut der)
+            .map_err(|_| TlsProbeError::new("could not read TLS CA DER"))?;
+        if der.len() > 65536 || format!("{:x}", Sha256::digest(&der)) != hex {
+            return Err(TlsProbeError::new(
+                "TLS CA DER does not match the Contract fingerprint",
+            ));
+        }
+        Ok(Self::Pinned(PinnedRoot {
+            certificate: CertificateDer::from(der),
+            digest: pin.to_owned(),
+        }))
+    }
+
+    fn label(&self) -> &str {
         match self {
             Self::PublicRoots => "public-roots",
+            Self::Pinned(root) => &root.digest,
             Self::TestOnly(_) => "test-only",
         }
     }
@@ -99,7 +147,7 @@ pub struct TlsFacts {
     pub days_remaining: i64,
     /// Presented leaf plus intermediates.
     pub chain_length: usize,
-    /// public-roots or test-only.
+    /// Public root set, the verified DER digest, or a test fixture label.
     pub trust_anchor: String,
     /// Whether the chain validated against the anchors at observation time.
     pub trusted: bool,
@@ -366,7 +414,7 @@ fn build_facts(
     presented: PresentedCertificate,
     server_name: &str,
     start: TlsStart,
-    trust_anchor: &'static str,
+    trust_anchor: &str,
     now_epoch: i64,
     handshake_error: Option<String>,
 ) -> Result<TlsFacts, TlsProbeError> {
@@ -403,6 +451,11 @@ fn client_config(anchors: &TrustAnchors) -> Result<(ClientConfig, PresentedSlot)
     match anchors {
         TrustAnchors::PublicRoots => {
             roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        }
+        TrustAnchors::Pinned(root) => {
+            roots
+                .add(root.certificate.clone())
+                .map_err(|err| TlsProbeError::new(format!("invalid pinned TLS root: {err}")))?;
         }
         TrustAnchors::TestOnly(certificates) => {
             for certificate in certificates {

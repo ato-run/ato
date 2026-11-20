@@ -1,0 +1,4 @@
+.env
+.tmp/
+selfhost-root.crt
+compose.local.yaml

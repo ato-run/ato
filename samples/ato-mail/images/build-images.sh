@@ -23,7 +23,7 @@ done
 # The Dockerfile applies the patches itself, so the checkout must be the
 # unpatched pinned commit. A dry run catches an already-patched tree (the
 # Dockerfile would otherwise fail with a reversed patch).
-for patch in missive-nondefault-port.patch missive-identity-submission-capability.patch; do
+for patch in missive-nondefault-port.patch missive-identity-submission-capability.patch missive-offline-assets.patch; do
   if ! ( cd "${missive_src}" && patch -p1 --dry-run --forward < "${here}/${patch}" >/dev/null 2>&1 ); then
     echo "error: ${patch} does not apply cleanly to ${missive_src}." >&2
     echo "       Use a clean checkout at 7716106b6c4638426169dac264657437914bbe7f." >&2
@@ -34,6 +34,7 @@ done
 mkdir -p "${missive_src}/ato-patches"
 cp "${here}/missive-nondefault-port.patch" \
    "${here}/missive-identity-submission-capability.patch" \
+   "${here}/missive-offline-assets.patch" \
    "${missive_src}/ato-patches/"
 
 build_image() {

@@ -85,6 +85,11 @@ ato-connected-realization-worker \
 ```
 
 Use the API origin shown by the current PWA, including staging when applicable.
+For an API using a private certificate authority, set `ATO_RUNNER_API_CA_FILE`
+to the verified public CA certificate in PEM format for both enrollment and
+supervision. The client validates the server certificate and host name; a missing
+or unreadable configured certificate prevents the connection.
+
 The first successful enrollment writes device credentials with POSIX mode 0600,
 removes the one-time token and reexecutes. Restart the same command without the
 enrollment environment variable: the saved device identity is reused. Do not

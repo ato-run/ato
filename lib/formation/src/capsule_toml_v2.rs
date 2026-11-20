@@ -13,8 +13,8 @@ use serde::Deserialize;
 use crate::authoring::{
     BROWSER_PROTOCOL, ClientAddressTransport, EffectClass, PROCESS_PROTOCOL,
     SCENARIO_CONTRACT_VERIFIER, STATE_FILESYSTEM_PROTOCOL, StateSaveDeclaration,
-    TCP_EGRESS_PROTOCOL, TERMINAL_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER, TlsStart,
-    WORKSPACE_PROTOCOL, validate_tls_server_name,
+    TCP_EGRESS_PROTOCOL, TERMINAL_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER,
+    TLS_PINNED_ROOT_CONTRACT_VERIFIER, TlsStart, WORKSPACE_PROTOCOL, validate_tls_server_name,
 };
 use crate::model_set::MODEL_SET_PROTOCOL;
 use crate::native_desktop::{
@@ -93,6 +93,7 @@ pub struct PortableTerminalObservationDraftV2 {
 /// expected certificate: the serial is evidence of a run, not identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortableTlsObservationDraftV2 {
+    pub root_ca_digest: Option<String>,
     pub id: String,
     pub port: String,
     pub server_name: String,
@@ -315,6 +316,8 @@ struct Observation {
     /// `ato.contract.tls@1` only: the host name the certificate must cover.
     #[serde(default)]
     server_name: Option<String>,
+    #[serde(default)]
+    root_ca_digest: Option<String>,
     /// `ato.contract.tls@1` only: `implicit` or `smtp-starttls`.
     #[serde(default)]
     start: Option<String>,
@@ -813,6 +816,14 @@ fn parse_capsule_toml_v2_impl(
                         format!("duplicate id {:?}", observation.id),
                     ));
                 }
+                if observation.root_ca_digest.is_some()
+                    && observation.verifier != TLS_PINNED_ROOT_CONTRACT_VERIFIER
+                {
+                    return Err(invalid(
+                        "contract.observation.root_ca_digest",
+                        "only a pinned-root TLS observation accepts a CA fingerprint",
+                    ));
+                }
                 match observation.verifier.as_str() {
                     "ato.contract.http@1" => {
                         if observation.scenario.is_some() {
@@ -901,7 +912,18 @@ fn parse_capsule_toml_v2_impl(
                             scenario_path,
                         });
                     }
-                    TLS_CONTRACT_VERIFIER => {
+                    TLS_CONTRACT_VERIFIER | TLS_PINNED_ROOT_CONTRACT_VERIFIER => {
+                        if crate::authoring::required_tls_anchor(
+                            &observation.verifier,
+                            observation.root_ca_digest.as_deref(),
+                        )
+                        .is_none()
+                        {
+                            return Err(invalid(
+                                "contract.observation.root_ca_digest",
+                                "expected a lowercase sha256 DER fingerprint",
+                            ));
+                        }
                         if observation.method.is_some()
                             || observation.path.is_some()
                             || observation.status.is_some()
@@ -936,6 +958,7 @@ fn parse_capsule_toml_v2_impl(
                             }
                         };
                         tls_observations.push(PortableTlsObservationDraftV2 {
+                            root_ca_digest: observation.root_ca_digest,
                             id: observation.id,
                             port: observation.port,
                             server_name,

@@ -1,0 +1,14 @@
+[Unit]
+Description=Ato self-hosted Connected Runner
+After=network-online.target
+
+[Service]
+Environment=ATO_RUNNER_EGRESS_FIREWALL_MODE=verify-only
+EnvironmentFile=%h/.config/ato-selfhost/runner.env
+ExecStart=%h/.cargo/bin/ato-connected-realization-worker --work-root %h/.local/share/ato-selfhost/work --state-volume-root %h/.local/share/ato-selfhost/volumes --runner-credentials-file %h/.local/share/ato-selfhost/identity/runner.json --require-explicit-runtime-placement --surface-target 127.0.0.1:18421
+UMask=0077
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=default.target

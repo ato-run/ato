@@ -1,0 +1,90 @@
+#!/bin/sh
+set -eu
+site=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+# Release inputs are checked into this copy of the distribution.
+unset ATO_VALIDATOR_REV
+# shellcheck disable=SC1091
+. "$site/versions.env"
+ATO_VALIDATOR_REV=${ATO_VALIDATOR_REV:-$ATO_RUNNER_REV}
+# An operator-supplied certificate replaces Caddy's internal CA for every site.
+if [ -s "$site/.tmp/tls/fullchain.pem" ] && [ -s "$site/.tmp/tls/privkey.pem" ]; then
+  ATO_TLS='/run/ato-tls/fullchain.pem /run/ato-tls/privkey.pem'
+else
+  ATO_TLS=internal
+fi
+export ATO_API_REV ATO_PWA_REV ATO_RUNNER_REV ATO_VALIDATOR_REV ATO_TLS
+
+# compose.local.yaml holds this host's own additions and is never replaced by
+# an update of the distribution.
+compose() {
+  if [ -f "$site/compose.local.yaml" ]; then
+    docker compose --project-directory "$site" --env-file "$site/.env" \
+      -f "$site/compose.yaml" -f "$site/compose.local.yaml" "$@"
+  else
+    docker compose --project-directory "$site" --env-file "$site/.env" \
+      -f "$site/compose.yaml" "$@"
+  fi
+}
+
+# A namespaced service must be inside the network namespace of the leader
+# container that is running now. A follower that is stopped, joined to a
+# replaced leader, or older than the leader's last start cannot reach the
+# leader's loopback listeners, and Docker reports it as running all the same.
+follow_namespace() {
+  follow_service=$1
+  follow_leader=$2
+  leader_id=$(compose ps -q "$follow_leader") || return 0
+  [ -n "$leader_id" ] || return 0
+  leader_state=$(docker inspect -f '{{.State.Running}} {{.State.StartedAt}}' "$leader_id") || return 0
+  [ "${leader_state%% *}" = true ] || return 0
+  leader_started=${leader_state#* }
+  follower=$(compose ps -aq "$follow_service")
+  if [ -n "$follower" ]; then
+    state=$(docker inspect -f '{{.State.Running}} {{.HostConfig.NetworkMode}} {{.State.StartedAt}}' "$follower")
+    running=${state%% *}
+    rest=${state#* }
+    joined=${rest%% *}
+    started=${rest#* }
+    if [ "$running" = true ] && [ "$joined" = "container:$leader_id" ] &&
+      LC_ALL=C expr "x$started" \> "x$leader_started" >/dev/null; then
+      return 0
+    fi
+  fi
+  if [ "$follow_service" = validator ]; then
+    echo 'Recreating the validator inside the current API network namespace.' >&2
+  else
+    echo "Recreating the $follow_service inside the current $follow_leader network namespace." >&2
+  fi
+  compose up -d --no-deps --force-recreate --no-build --pull never "$follow_service"
+}
+
+# The Tailscale sidecar shares the web network namespace. Do nothing when its
+# profile is off and it has no container left from an earlier run.
+tailscale_in_scope() {
+  tailscale_container=$(compose ps -aq tailscale 2>/dev/null) || tailscale_container=
+  if [ -n "$tailscale_container" ]; then
+    return 0
+  fi
+  configured_services=$(compose config --services 2>/dev/null) || return 1
+  while IFS= read -r configured_service; do
+    if [ "$configured_service" = tailscale ]; then
+      return 0
+    fi
+  done <<SERVICES_EOF
+$configured_services
+SERVICES_EOF
+  return 1
+}
+
+case "${1:-}" in
+  up | start | restart)
+    status=0
+    compose "$@" || status=$?
+    follow_namespace validator api
+    if tailscale_in_scope; then
+      follow_namespace tailscale web
+    fi
+    exit "$status"
+    ;;
+esac
+compose "$@"

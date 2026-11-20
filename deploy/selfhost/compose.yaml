@@ -1,0 +1,182 @@
+name: ato-selfhost
+services:
+  api:
+    image: ato-selfhost-api:${ATO_API_REV:?use ./stack}
+    build:
+      context: ./.tmp/src/${ATO_API_REV}
+      dockerfile: ../../../Dockerfile.api
+    environment:
+      ATO_PUBLIC_ORIGIN: https://${ATO_HOST:?set ATO_HOST in .env}:${ATO_HTTPS_PORT:-443}
+      ATO_DATA_DIR: /var/lib/ato-api
+      ATO_APPS_HOST: ${ATO_APPS_HOST:-apps.${ATO_HOST}}
+      ATO_RUNNER_INGRESS_ORIGIN: ${ATO_RUNNER_INGRESS_ORIGIN:-https://runner.${ATO_HOST}:8443}
+      NODE_EXTRA_CA_CERTS: /run/ato-ca/root.crt
+      CAPSULE_VALIDATOR_AGENT_TOKEN_FILE: /run/secrets/validator_token
+      HOST: 0.0.0.0
+      PORT: 8787
+      # Operator settings: each is passed through from .env only when set there.
+      # Extra Runner ingress origins (Runner 1..3), comma-separated; see README.
+      ATO_RUNNER_INGRESS_ORIGINS:
+      # "on" runs DataResource operations in a local isolated executor (see README).
+      ATO_DATA_RESOURCES:
+      ATO_AUTH_METHODS:
+      ATO_AUTH_AUTO_METHODS:
+      # Requests on this socket come from Caddy's management site and carry
+      # the client address it observed. The TCP port above never does.
+      ATO_TRUSTED_PROXY_SOCKET: /run/ato-api/proxy.sock
+      ATO_TRUSTED_PROXY_CLIENT_ADDRESS_HEADER: X-Ato-Client-Address
+      ATO_TRUSTED_PROXY_PROVIDER:
+      ATO_TRUSTED_PROXY_VERIFY:
+      ATO_TRUSTED_PROXY_TAILSCALE_SOCKET:
+      ATO_MAIL:
+      ATO_MAIL_SMTP_HOST:
+      ATO_MAIL_SMTP_PORT:
+      ATO_MAIL_SMTP_TLS:
+      ATO_MAIL_SMTP_USERNAME:
+      ATO_MAIL_SMTP_PASSWORD_FILE:
+      ATO_MAIL_SMTP_CA_FILE:
+      ATO_MAIL_FROM:
+      ATO_FIXED_TCP_BIND_ADDRESSES:
+    volumes:
+      - api-data:/var/lib/ato-api
+      - api-proxy:/run/ato-api
+      - whois:/run/ato-whois:ro
+      - ./.tmp/trust:/run/ato-ca:ro
+    secrets: [validator_token]
+    tmpfs:
+      - /tmp:mode=1777,size=128m
+    networks:
+      control: {}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+  # Holds the Tailscale daemon's socket so the API does not. It answers only
+  # "who is behind this tailnet address" on a socket shared with the API.
+  # COMPOSE_PROFILES=tailscale in .env starts it with ./start.sh.
+  whois:
+    profiles: [tailscale]
+    image: ato-selfhost-api:${ATO_API_REV:?use ./stack}
+    entrypoint: ["node", "dist/selfhost/whois-proxy.mjs"]
+    # Neither root nor the daemon's operator, so the daemon grants this user
+    # read-only local API access. Group 1000 is the API's group.
+    user: "64198:1000"
+    environment:
+      ATO_WHOIS_LISTEN_SOCKET: /run/ato-whois/whois.sock
+      ATO_WHOIS_TAILSCALE_SOCKET: /run/tailscale/tailscaled.sock
+    volumes:
+      - whois:/run/ato-whois
+      - tailscale-socket:/run/tailscale:ro
+    network_mode: none
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  # The sidecar shares web's network namespace. It owns the only listener
+  # that accepts PROXY protocol and forwards tailnet TCP/443 there with a v2
+  # header naming the tailnet client. Nothing on the host can reach 8444.
+  tailscale:
+    profiles: [tailscale]
+    image: tailscale/tailscale:v1.104.7@sha256:72c1e19e0aedca96b8533bbb0b4368564410ff20b17e53b804eb6c1f04a31be4
+    network_mode: service:web
+    environment:
+      TS_USERSPACE: "true"
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SOCKET: /run/tailscale/tailscaled.sock
+      TS_AUTH_ONCE: "true"
+      TS_SERVE_CONFIG: /config/serve.json
+      TS_HOSTNAME: ${ATO_TAILSCALE_HOSTNAME:-ato-selfhost}
+      TS_AUTHKEY:
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+      - tailscale-socket:/run/tailscale
+      - ./tailscale-serve.json:/config/serve.json:ro
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+  validator:
+    image: ato-selfhost-validator:${ATO_VALIDATOR_REV:?use ./stack}
+    build:
+      context: ./.tmp/src/${ATO_VALIDATOR_REV}
+      dockerfile: ../../../Dockerfile.validator
+    # The verification listener is on the API's loopback, so the validator
+    # lives in the API's network namespace. That namespace is replaced whenever
+    # the API container is restarted or recreated; the three settings below and
+    # ./stack keep the validator attached to the current one.
+    network_mode: service:api
+    depends_on:
+      api:
+        condition: service_healthy
+        restart: true
+    entrypoint: ["/bin/bash", "/usr/local/libexec/validator-run.sh"]
+    healthcheck:
+      test: ["CMD", "/bin/bash", "/usr/local/libexec/validator-run.sh", "probe"]
+      interval: 10s
+      timeout: 4s
+      retries: 3
+    environment:
+      CAPSULE_VALIDATOR_API_URL: http://localhost:8788
+      CAPSULE_VALIDATOR_AGENT_ID: selfhost-validator
+      CAPSULE_VALIDATOR_WORK_ROOT: /tmp/validator
+      ATO_TLS_ROOT_DIR: /run/ato-mail-ca
+    volumes:
+      - ./.tmp/mail-ca:/run/ato-mail-ca:ro
+      - ./validator-run.sh:/usr/local/libexec/validator-run.sh:ro
+    secrets: [validator_token]
+    tmpfs:
+      - /tmp:mode=1777,size=128m
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  web:
+    image: ato-selfhost-web:${ATO_PWA_REV:?use ./stack}
+    build:
+      context: ./.tmp/src/${ATO_PWA_REV}
+      dockerfile: ../../../Dockerfile.pwa
+    environment:
+      ATO_HOST: ${ATO_HOST}
+      ATO_APPS_HOST: ${ATO_APPS_HOST:-apps.${ATO_HOST}}
+      ATO_TLS: ${ATO_TLS:-internal}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - api-proxy:/run/ato-api
+      - ./.tmp/tls:/run/ato-tls:ro
+      - type: bind
+        source: ${ATO_RUNNER_INGRESS_DIR:-./.tmp/runner-ingress}
+        target: /run/ato-runner-ingress
+        read_only: true
+        bind:
+          create_host_path: false
+      - tls-data:/data
+      - tls-config:/config
+    ports:
+      - "${ATO_BIND_IP:-127.0.0.1}:${ATO_HTTPS_PORT:-443}:8443"
+    networks:
+      control:
+        aliases: ["runner.${ATO_HOST}"]
+      ingress: {}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+volumes:
+  api-data:
+  api-proxy:
+  whois:
+  tls-data:
+  tls-config:
+  tailscale-state:
+  tailscale-socket:
+networks:
+  control:
+    internal: true
+  ingress: {}
+secrets:
+  validator_token:
+    file: ./.tmp/secrets/validator_token

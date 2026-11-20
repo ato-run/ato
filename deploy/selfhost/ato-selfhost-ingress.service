@@ -1,0 +1,6 @@
+[Unit]
+Description=Forward the local Ato ingress socket to the Runner
+
+[Service]
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:8420
+NoNewPrivileges=yes

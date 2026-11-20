@@ -26,7 +26,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use ato_formation::authoring::{
-    HTTP_CONTRACT_VERIFIER, SCENARIO_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER, TlsStart,
+    HTTP_CONTRACT_VERIFIER, SCENARIO_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER,
+    TLS_PINNED_ROOT_CONTRACT_VERIFIER, TlsStart,
 };
 use ato_formation::capsule_toml::{CAPSULE_FILE_NAME, declared_schema};
 use ato_formation::capsule_toml_v2::{
@@ -448,6 +449,7 @@ fn verify_semantics(
                 observation.port.as_str(),
                 observation.server_name.as_str(),
                 observation.start.as_str(),
+                observation.root_ca_digest.as_deref(),
             )
         })
         .collect::<BTreeSet<_>>();
@@ -455,13 +457,19 @@ fn verify_semantics(
         .contract
         .requirements
         .iter()
-        .filter(|requirement| requirement.verifier == TLS_CONTRACT_VERIFIER)
+        .filter(|requirement| {
+            matches!(
+                requirement.verifier.as_str(),
+                TLS_CONTRACT_VERIFIER | TLS_PINNED_ROOT_CONTRACT_VERIFIER
+            )
+        })
         .map(|requirement| {
             (
                 requirement.id.as_str(),
                 requirement.port.as_deref().unwrap_or_default(),
                 requirement.server_name.as_deref().unwrap_or_default(),
                 requirement.start.map(TlsStart::as_str).unwrap_or_default(),
+                requirement.digest.as_deref(),
             )
         })
         .collect::<BTreeSet<_>>();

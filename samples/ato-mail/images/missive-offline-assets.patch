@@ -1,0 +1,125 @@
+--- a/templates/base.html
++++ b/templates/base.html
+@@ -77,11 +77,8 @@
+     document.addEventListener('DOMContentLoaded', updateNotificationLabel);
+     </script>
+     <title>{% block title %}Missive{% endblock %}</title>
+-    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+-    <script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js"></script>
+-    <script src="https://cdn.jsdelivr.net/npm/@tailwindplus/elements@1" type="module"></script>
+-    <link rel="preconnect" href="https://rsms.me">
+-    <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
++    <script src="/static/vendor/htmx-2.0.4/htmx.min.js"></script>
++    <script src="/static/vendor/htmx-sse-2.2.2/sse.js"></script>
+     <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
+     <link rel="manifest" href="/static/manifest.json">
+     <meta name="theme-color" content="#082f49">
+--- a/templates/partials/app_nav.html
++++ b/templates/partials/app_nav.html
+@@ -1,10 +1,9 @@
+ <!-- Mobile sidebar drawer -->
+-<el-dialog>
+     <dialog id="sidebar" class="backdrop:bg-transparent lg:hidden">
+-        <el-dialog-backdrop class="fixed inset-0 bg-on-surface/80 transition-opacity duration-300 ease-linear data-closed:opacity-0"></el-dialog-backdrop>
++        <div class="fixed inset-0 bg-on-surface/80 transition-opacity duration-300 ease-linear data-closed:opacity-0"></div>
+-
++
+         <div tabindex="0" class="fixed inset-0 flex focus:outline-none">
+-            <el-dialog-panel class="group/dialog-panel relative mr-16 flex w-full max-w-xs flex-1 transform transition duration-300 ease-in-out data-closed:-translate-x-full">
++            <div class="group/dialog-panel relative mr-16 flex w-full max-w-xs flex-1 transform transition duration-300 ease-in-out data-closed:-translate-x-full">
+                 <div class="absolute top-0 left-full flex w-16 justify-center pt-5 duration-300 ease-in-out group-data-closed/dialog-panel:opacity-0">
+                     <button type="button" command="close" commandfor="sidebar" class="-m-2.5 p-2.5">
+                         <span class="sr-only">Close sidebar</span>
+@@ -81,11 +80,9 @@
+                         </ul>
+                     </nav>
+                 </div>
+-            </el-dialog-panel>
++            </div>
+         </div>
+     </dialog>
+-</el-dialog>
+-
+ <!-- Static sidebar for desktop -->
+ <div id="desktop-sidebar" class="desktop-sidebar hidden lg:fixed lg:inset-y-0 lg:z-50 lg:flex lg:flex-col">
+     <div class="sidebar-inner flex grow flex-col gap-y-5 overflow-y-auto border-r border-border bg-sky-950 px-6">
+@@ -139,8 +136,8 @@
+                     </ul>
+                 </li>
+                 <li class="-mx-6 mt-auto">
+-                    <el-dropdown class="relative block">
+-                        <button class="sidebar-user flex w-full items-center gap-x-4 px-6 py-3 text-sm/6 font-semibold text-sky-50 hover:bg-sky-50/10 transition-colors">
++                    <details class="relative block">
++                        <summary class="sidebar-user flex w-full items-center gap-x-4 px-6 py-3 text-sm/6 font-semibold text-sky-50 hover:bg-sky-50/10 transition-colors">
+                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" class="size-8 shrink-0 rounded-full bg-sky-900 p-1 text-sky-300">
+                                 <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
+                             </svg>
+@@ -148,8 +145,8 @@
+                             <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" class="sidebar-user-details size-5 text-sky-400">
+                                 <path d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd" fill-rule="evenodd" />
+                             </svg>
+-                        </button>
+-                        <el-menu anchor="top start" popover class="w-56 origin-bottom-left rounded-md bg-surface py-2 shadow-lg outline outline-on-surface/5 transition transition-discrete [--anchor-gap:--spacing(2.5)] data-closed:scale-95 data-closed:transform data-closed:opacity-0 data-enter:duration-100 data-enter:ease-out data-leave:duration-75 data-leave:ease-in">
++                        </summary>
++                        <div class="absolute z-50 bottom-full start-0 w-56 origin-bottom-left rounded-md bg-surface py-2 shadow-lg outline outline-on-surface/5 transition transition-discrete [--anchor-gap:--spacing(2.5)] data-closed:scale-95 data-closed:transform data-closed:opacity-0 data-enter:duration-100 data-enter:ease-out data-leave:duration-75 data-leave:ease-in">
+                             <button type="button" command="show-modal" commandfor="shortcuts-dialog"
+                                     class="block w-full px-3 py-1 text-left text-sm/6 text-on-surface hover:bg-surface-hover">
+                                 Keyboard shortcuts
+@@ -166,8 +163,8 @@
+                                 <button type="submit" class="block w-full px-3 py-1 text-left text-sm/6 text-on-surface hover:bg-surface-hover">Sign out</button>
+                             </form>
+                             <div class="border-t border-border mt-1 pt-1 px-3 py-1 text-xs text-on-surface-faint">v{{ version }}</div>
+-                        </el-menu>
+-                    </el-dropdown>
++                        </div>
++                    </details>
+                 </li>
+             </ul>
+         </nav>
+--- a/templates/partials/app_header.html
++++ b/templates/partials/app_header.html
+@@ -15,8 +15,8 @@
+         <div class="flex-1"></div>
+         <div class="flex shrink-0 items-center gap-x-4 lg:gap-x-6">
+             <!-- Profile dropdown -->
+-            <el-dropdown class="relative">
+-                <button class="relative flex items-center -m-1.5 p-1.5">
++            <details class="relative">
++                <summary class="relative flex items-center -m-1.5 p-1.5">
+                     <span class="absolute -inset-1.5"></span>
+                     <span class="sr-only">Open user menu</span>
+                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" class="size-8 rounded-full bg-surface-raised p-1 text-on-surface-faint">
+@@ -28,8 +28,8 @@
+                             <path d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd" fill-rule="evenodd" />
+                         </svg>
+                     </span>
+-                </button>
+-                <el-menu anchor="bottom end" popover class="w-44 origin-top-right rounded-md bg-surface py-2 shadow-lg outline outline-on-surface/5 transition transition-discrete [--anchor-gap:--spacing(2.5)] data-closed:scale-95 data-closed:transform data-closed:opacity-0 data-enter:duration-100 data-enter:ease-out data-leave:duration-75 data-leave:ease-in">
++                </summary>
++                <div class="absolute z-50 top-full end-0 w-44 origin-top-right rounded-md bg-surface py-2 shadow-lg outline outline-on-surface/5 transition transition-discrete [--anchor-gap:--spacing(2.5)] data-closed:scale-95 data-closed:transform data-closed:opacity-0 data-enter:duration-100 data-enter:ease-out data-leave:duration-75 data-leave:ease-in">
+                     <button type="button" command="show-modal" commandfor="shortcuts-dialog"
+                             class="block w-full px-3 py-1 text-left text-sm/6 text-on-surface hover:bg-surface-hover">
+                         Keyboard shortcuts
+@@ -41,8 +41,8 @@
+                     <form action="/logout" method="POST">
+                         <button type="submit" class="block w-full px-3 py-1 text-left text-sm/6 text-on-surface hover:bg-surface-hover">Sign out</button>
+                     </form>
+-                </el-menu>
+-            </el-dropdown>
++                </div>
++            </details>
+         </div>
+     </div>
+ </div>
+--- a/templates/partials/shortcuts_modal.html
++++ b/templates/partials/shortcuts_modal.html
+@@ -1,4 +1,3 @@
+-<el-dialog>
+     <dialog id="shortcuts-dialog" class="backdrop:bg-neutral-900/80 bg-transparent fixed inset-0 m-auto w-full max-w-lg">
+         <div class="relative transform overflow-hidden rounded-lg bg-surface px-4 pt-5 pb-4 text-left shadow-xl transition-all sm:p-6">
+             <div class="flex items-center justify-between mb-4">
+@@ -114,4 +113,3 @@
+             </div>
+         </div>
+     </dialog>
+-</el-dialog>

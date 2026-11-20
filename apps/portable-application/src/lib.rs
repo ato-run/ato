@@ -17,8 +17,9 @@ use ato_formation::authoring::{
     BoundRequirement, BoundStep, ClientAddressTransport, DerivationDraft, EffectClass,
     HTTP_CONTRACT_VERIFIER, HTTP_PROTOCOL, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER, PROCESS_PROTOCOL,
     PortDraft, SCENARIO_CONTRACT_VERIFIER, STATE_FILESYSTEM_PROTOCOL, StateAccess, StepDraft,
-    TCP_EGRESS_PROTOCOL, TCP_PROTOCOL, TERMINAL_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER, TlsStart,
-    WORKSPACE_CONTRACT_VERIFIER, WORKSPACE_PROTOCOL, bind, validate_tls_server_name,
+    TCP_EGRESS_PROTOCOL, TCP_PROTOCOL, TERMINAL_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER,
+    TLS_PINNED_ROOT_CONTRACT_VERIFIER, TlsStart, WORKSPACE_CONTRACT_VERIFIER, WORKSPACE_PROTOCOL,
+    bind, validate_tls_server_name,
 };
 use ato_formation::capsule_toml::{CAPSULE_FILE_NAME, parse_capsule_toml};
 use ato_formation::capsule_toml_v2::{
@@ -433,6 +434,7 @@ pub struct PortableHttpRequirementSpec {
 /// name the presented certificate must cover, and how TLS starts there.
 #[derive(Debug, Clone)]
 pub struct PortableTlsRequirementSpec {
+    pub root_ca_digest: Option<String>,
     pub id: String,
     pub port: String,
     pub server_name: String,
@@ -1602,14 +1604,15 @@ pub(crate) fn contract_from_spec(
             .map_err(|detail| profile(format!("TLS requirement server_name: {detail}")))?;
         bound.push(BoundRequirement {
             id: requirement.id.clone(),
-            verifier: TLS_CONTRACT_VERIFIER.to_owned(),
+            verifier: ato_formation::authoring::tls_verifier(requirement.root_ca_digest.as_deref())
+                .to_owned(),
             port: Some(requirement.port.clone()),
             method: None,
             path: None,
             status: None,
             body_digest: None,
             input: None,
-            digest: None,
+            digest: requirement.root_ca_digest.clone(),
             server_name: Some(requirement.server_name.clone()),
             start: Some(requirement.start),
         });
@@ -1810,6 +1813,7 @@ fn authored_bundle_spec_v2(
             .tls_observations
             .into_iter()
             .map(|observation| PortableTlsRequirementSpec {
+                root_ca_digest: observation.root_ca_digest,
                 id: observation.id,
                 port: observation.port,
                 server_name: observation.server_name,
@@ -3014,7 +3018,10 @@ fn validate_native_desktop_route(
         if contract.requirements.iter().any(|requirement| {
             matches!(
                 requirement.verifier.as_str(),
-                HTTP_CONTRACT_VERIFIER | TLS_CONTRACT_VERIFIER | SCENARIO_CONTRACT_VERIFIER
+                HTTP_CONTRACT_VERIFIER
+                    | TLS_CONTRACT_VERIFIER
+                    | TLS_PINNED_ROOT_CONTRACT_VERIFIER
+                    | SCENARIO_CONTRACT_VERIFIER
             )
         }) {
             return Err(profile(
@@ -3447,7 +3454,7 @@ fn validate_route_requirements(
                     ));
                 }
             }
-            TLS_CONTRACT_VERIFIER => {
+            TLS_CONTRACT_VERIFIER | TLS_PINNED_ROOT_CONTRACT_VERIFIER => {
                 if !requirement
                     .port
                     .as_deref()
@@ -3468,7 +3475,11 @@ fn validate_route_requirements(
                     || requirement.status.is_some()
                     || requirement.body_digest.is_some()
                     || requirement.input.is_some()
-                    || requirement.digest.is_some()
+                    || ato_formation::authoring::required_tls_anchor(
+                        &requirement.verifier,
+                        requirement.digest.as_deref(),
+                    )
+                    .is_none()
                 {
                     return Err(profile(
                         "TLS requirement contains unrelated observation fields",
