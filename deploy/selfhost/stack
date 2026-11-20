@@ -13,4 +13,43 @@ else
   ATO_TLS=internal
 fi
 export ATO_API_REV ATO_PWA_REV ATO_RUNNER_REV ATO_VALIDATOR_REV ATO_TLS
-exec docker compose --project-directory "$site" --env-file "$site/.env" -f "$site/compose.yaml" "$@"
+
+compose() {
+  docker compose --project-directory "$site" --env-file "$site/.env" -f "$site/compose.yaml" "$@"
+}
+
+# The validator must be inside the network namespace of the API container that
+# is running now. A validator that is stopped, joined to a replaced API
+# container, or older than the API's last start cannot reach the verification
+# listener, and Docker reports it as running all the same.
+validator_follows_api() {
+  api=$(compose ps -q api) || return 0
+  [ -n "$api" ] || return 0
+  api_state=$(docker inspect -f '{{.State.Running}} {{.State.StartedAt}}' "$api") || return 0
+  [ "${api_state%% *}" = true ] || return 0
+  api_started=${api_state#* }
+  validator=$(compose ps -aq validator)
+  if [ -n "$validator" ]; then
+    state=$(docker inspect -f '{{.State.Running}} {{.HostConfig.NetworkMode}} {{.State.StartedAt}}' "$validator")
+    running=${state%% *}
+    rest=${state#* }
+    joined=${rest%% *}
+    started=${rest#* }
+    if [ "$running" = true ] && [ "$joined" = "container:$api" ] &&
+      LC_ALL=C expr "x$started" \> "x$api_started" >/dev/null; then
+      return 0
+    fi
+  fi
+  echo 'Recreating the validator inside the current API network namespace.' >&2
+  compose up -d --no-deps --force-recreate --no-build --pull never validator
+}
+
+case "${1:-}" in
+  up | start | restart)
+    status=0
+    compose "$@" || status=$?
+    validator_follows_api
+    exit "$status"
+    ;;
+esac
+compose "$@"

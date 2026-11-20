@@ -6,14 +6,14 @@
 |---|---|
 | `web` | CaddyがHTTPSで静的PWAを配信し、同じオリジンの `/api/*`、`/v1/*`、`/health` をAPIへ転送。CA、証明書と鍵は `tls-data` に保存 |
 | `api` | Node.js/Hono。SQLite・ローカルオブジェクト・認証用秘密は `api-data` に保存。LinuxゲストにAPIの生ポートを公開しない |
-| `validator` | APIとネットワーク名前空間を共有する独立したRustプロセス。専用トークンでローカル検証用listenerに接続 |
+| `validator` | APIコンテナのネットワーク名前空間を共有する独立したRustプロセス。専用トークンでAPIのloopback上の検証用listenerに接続。APIコンテナの再起動・置き換えに追従する（[更新](#更新)） |
 | Connected Runner | 専用のLinuxユーザーで実行するsystemd user service。デバイス資格情報・回復ジャーナル・Instance Volumeはゲスト側に永続化 |
 
 WebとAPIは、Runnerの登録前、またはRunnerを止めた状態でも起動できます。利用者はDesktopを必要としません。Caddyは管理用ホストとアプリ用ワイルドカードホストを分離します。アプリ用ホストではAPIが対象Instanceのアクセスを検証し、明示したRunner ingressに短命の署名付き要求を送ります。既定の内部ingressは `https://runner.<管理ホスト>:8443` です。Caddyは署名ヘッダーを保持し、ゲスト側のRunnerが署名を検証します。
 
 ## ビルドと初回起動
 
-Linux、Docker Engine/Compose v2、Git、OpenSSL、Bashが必要です。Runnerを動かすユーザーにはRustのリポジトリ指定toolchain、Linuxユーザー名前空間・bubblewrap、必要なOCI実行環境を用意します。API/PWAの現在のソースを取得するにはそれぞれのリポジトリへのアクセス権が必要です。
+Linux、Docker Engine、Docker Compose v2.17.0以上（`depends_on` の `restart`）、Git、OpenSSL、Bashが必要です。Composeの操作は必ず `./stack` を通します。Runnerを動かすユーザーにはRustのリポジトリ指定toolchain、Linuxユーザー名前空間・bubblewrap、必要なOCI実行環境を用意します。API/PWAの現在のソースを取得するにはそれぞれのリポジトリへのアクセス権が必要です。
 
 1. `ato`、`ato-api`、`ato-pwa` を同じ親ディレクトリにクローンします。各クローンが、この配布に同梱された [versions.env](versions.env) のコミットを保持していることを確認してください。Runnerとvalidatorはどちらも `ato` からビルドし、実機で検証する組み合わせのコミットを個別に固定します。以前のmanifestで `ATO_VALIDATOR_REV` を省略した場合はRunnerと同じコミットを使用します。
 2. `ato/deploy/selfhost/` で次を実行します。ソースの場所が異なる場合は `./prepare.sh /path/to/ato-api /path/to/ato-pwa` と指定します。
@@ -52,6 +52,27 @@ Linux、Docker Engine/Compose v2、Git、OpenSSL、Bashが必要です。Runner�
    ```
 
    別端末のブラウザで `https://ato.home.arpa` を開き、所有者としてログインします。
+
+## 更新
+
+配布ディレクトリのファイルと `versions.env` を新しいものに置き換え、次を実行します。`.env` と `.tmp/` は置き換えません。
+
+```sh
+./prepare.sh
+./stack build
+./start.sh
+./stack ps
+```
+
+`./stack ps` で `api` と `validator` が `healthy` であることを確認します。イメージが変わったサービスだけが作り直されます。APIを作り直してもRunnerと実行中のRunは止まりません。
+
+validatorはAPIコンテナのネットワーク名前空間に入って動作します。APIコンテナが再起動または作り直されると、その名前空間は新しいものに替わります。古い名前空間に残ったvalidatorは `running` と表示されたまま検証用listenerに到達できず、検証ジョブを取得しません。配布は次の3つでvalidatorを追従させます。
+
+| 契機 | 追従の仕組み |
+|---|---|
+| `./stack up`・`start`・`restart`（`./start.sh` を含む） | 実行後に `./stack` がvalidatorの接続先コンテナと起動時刻をAPIと照合し、一致しなければvalidatorを作り直す。Composeの `depends_on.restart` も同じ操作でvalidatorを再起動する |
+| APIプロセスの異常終了によるDockerの自動再起動 | validatorが検証用listenerに30秒到達できなければ終了し、Dockerの再起動でAPIの現在の名前空間に入り直す |
+| 上記以外（`docker restart`、`docker compose` の直接実行） | 追従しない。`./stack ps` のvalidatorが `unhealthy` になるので `./stack up -d` を実行する |
 
 ## Runnerの登録と再接続
 

@@ -20,7 +20,8 @@ services:
     secrets: [validator_token]
     tmpfs:
       - /tmp:mode=1777,size=128m
-    networks: [control]
+    networks:
+      control: {}
     restart: unless-stopped
     read_only: true
     cap_drop: [ALL]
@@ -35,7 +36,21 @@ services:
     build:
       context: ./.tmp/src/${ATO_VALIDATOR_REV}
       dockerfile: ../../../Dockerfile.validator
+    # The verification listener is on the API's loopback, so the validator
+    # lives in the API's network namespace. That namespace is replaced whenever
+    # the API container is restarted or recreated; the three settings below and
+    # ./stack keep the validator attached to the current one.
     network_mode: service:api
+    depends_on:
+      api:
+        condition: service_healthy
+        restart: true
+    entrypoint: ["/bin/bash", "/usr/local/libexec/validator-run.sh"]
+    healthcheck:
+      test: ["CMD", "/bin/bash", "/usr/local/libexec/validator-run.sh", "probe"]
+      interval: 10s
+      timeout: 4s
+      retries: 3
     environment:
       CAPSULE_VALIDATOR_API_URL: http://localhost:8788
       CAPSULE_VALIDATOR_AGENT_ID: selfhost-validator
@@ -43,6 +58,7 @@ services:
       ATO_TLS_ROOT_DIR: /run/ato-mail-ca
     volumes:
       - ./.tmp/mail-ca:/run/ato-mail-ca:ro
+      - ./validator-run.sh:/usr/local/libexec/validator-run.sh:ro
     secrets: [validator_token]
     tmpfs:
       - /tmp:mode=1777,size=128m
