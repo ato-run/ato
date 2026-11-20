@@ -3798,16 +3798,9 @@ fn validate_service_group_structure<'a>(
             )));
         }
     }
-    if let Some(step) = derivation
-        .steps
-        .iter()
-        .find(|step| !derivation.ports.iter().any(|port| port.from == step.id))
-    {
-        return Err(profile(format!(
-            "service `{}` serves no Port and cannot report readiness",
-            step.id
-        )));
-    }
+    // A step with no Port is a background worker: it has no socket to prove
+    // ready, and the supervisor only requires that it is still running. The
+    // group still needs its Surface Port, which the loop above records.
     surface_port.ok_or_else(|| profile("no service serves the Application Surface Port"))
 }
 
@@ -4024,6 +4017,20 @@ fn validate_process_service_group(
         return Err(profile(
             "a native process service group does not yet model filesystem state",
         ));
+    }
+    // This Adapter proves a service started by connecting to a Port it serves.
+    // A step with none has nothing to observe, so it is refused here rather
+    // than admitted and failing at launch. A port-less background worker is a
+    // shape of the OCI service group, whose readiness is container liveness.
+    if let Some(step) = derivation
+        .steps
+        .iter()
+        .find(|step| !derivation.ports.iter().any(|port| port.from == step.id))
+    {
+        return Err(profile(format!(
+            "native process service `{}` serves no Port and this Adapter cannot report its readiness",
+            step.id
+        )));
     }
     for (index, step) in derivation.steps.iter().enumerate() {
         if step.protocol != PROCESS_PROTOCOL {
@@ -5767,9 +5774,6 @@ status = 200
             ("Port from an undeclared service", |d| {
                 d.ports[0].from = "ghost".to_owned()
             }),
-            ("service without a Port", |d| {
-                d.ports[0].from = "web".to_owned()
-            }),
             ("non-pure effects", |d| {
                 d.effects = EffectClass::NonRepeatable
             }),
@@ -5777,6 +5781,35 @@ status = 200
         for (name, mutate) in cases {
             assert!(revalidate(&route, mutate).is_err(), "{name} was admitted");
         }
+    }
+
+    /// A service that serves no Port is a background worker, not a second
+    /// route shape: it keeps its own image, state and Bindings, and the group
+    /// is still admitted because its sibling serves the Surface Port.
+    #[test]
+    fn an_oci_group_admits_a_worker_that_serves_no_port() {
+        let route = group_route();
+        let mut derivation = route.derivation.clone();
+        derivation.ports.retain(|port| port.from != "backend");
+        assert!(!derivation.ports.iter().any(|port| port.from == "backend"));
+        validate_initial_route(&route.contract, &route.application, &derivation)
+            .expect("a worker with no Port is admitted");
+        // Its state and Binding remain scoped to the worker, and the group
+        // keeps its one Surface Port.
+        let worker = derivation
+            .steps
+            .iter()
+            .find(|step| step.id == "backend")
+            .expect("the worker is a declared step");
+        assert_eq!(worker.state, ["data"]);
+        assert_eq!(worker.bindings, ["admin_secret"]);
+        let surface: Vec<_> = derivation
+            .ports
+            .iter()
+            .filter(|port| port.id == "app.http")
+            .collect();
+        assert_eq!(surface.len(), 1);
+        assert_eq!(surface[0].from, "web");
     }
 
     #[test]

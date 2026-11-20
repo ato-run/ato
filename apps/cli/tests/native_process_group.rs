@@ -204,3 +204,38 @@ fn a_backend_exit_fails_the_dependent_observation_and_the_group_is_reaped() {
     }
     assert_no_orphans(&home);
 }
+
+/// The native process Adapter proves a start by connecting to a Port, so a
+/// step without one is refused at validation rather than admitted and failing
+/// at launch. A port-less worker is the OCI service group's shape.
+#[test]
+fn a_native_process_worker_without_ports_is_refused_by_name() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let source = root.path().join("process-worker");
+    fs::create_dir_all(&source).unwrap();
+    for entry in fs::read_dir(sample()).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.is_file() {
+            fs::copy(&path, source.join(path.file_name().unwrap())).unwrap();
+        }
+    }
+    let manifest = fs::read_to_string(source.join("capsule.toml"))
+        .unwrap()
+        .replace(
+            "ports = [{ id = \"backend.http\", guest_port = 8081 }]\n",
+            "",
+        );
+    let manifest = manifest.replace("connect = [\"backend.http\"]\n", "");
+    fs::write(source.join("capsule.toml"), manifest).unwrap();
+
+    let bundle = root.path().join("process-worker.capsule");
+    let packed = pack(&home, &source, &bundle);
+    assert!(!packed.status.success());
+    let error = String::from_utf8_lossy(&packed.stderr);
+    assert!(error.contains("backend"), "{error}");
+    assert!(error.contains("serves no Port"), "{error}");
+    assert!(error.contains("cannot report its readiness"), "{error}");
+}

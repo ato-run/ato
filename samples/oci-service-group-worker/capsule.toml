@@ -1,0 +1,68 @@
+schema = "ato.capsule/2"
+
+# Web + DB + queue + worker: three services serve a Port and one serves
+# none. The worker is a background process of the same group — the manifest
+# has no "worker kind", only a service whose `ports` list is empty (or
+# omitted).
+
+[application]
+title = "OCI service group with a background worker"
+surface_path = "/"
+
+[[input]]
+id = "workspace"
+use = "ato.workspace@1"
+path = "."
+
+[[state]]
+id = "data"
+use = "ato.state.filesystem@1"
+mount = "/data"
+access = "read-write"
+
+[contract]
+mode = "all"
+
+[[contract.observation]]
+id = "surface-ready"
+use = "ato.contract.http@1"
+port = "app.http"
+path = "/healthz"
+status = 200
+
+[[derivation]]
+id = "oci-service-group-worker"
+use = "ato.oci@1"
+runtimes = { "oci.platform" = "linux/amd64" }
+
+[[derivation.service]]
+id = "web"
+runtimes = { "oci.image" = "docker.io/library/python@sha256:c4634f578a412db396771b61b064c6e546c9d6414c7fb5b1b05d5871f1885f7b", "oci.memory_bytes" = "268435456", "oci.cpu_limit_millis" = "500", "oci.pids_limit" = "64", "oci.entrypoint" = "/usr/local/bin/python3" }
+argv = ["/app/web.py", "8080"]
+ports = [{ id = "app.http", guest_port = 8080 }]
+
+[[derivation.service]]
+id = "db"
+runtimes = { "oci.image" = "docker.io/library/python@sha256:c4634f578a412db396771b61b064c6e546c9d6414c7fb5b1b05d5871f1885f7b", "oci.memory_bytes" = "268435456", "oci.cpu_limit_millis" = "500", "oci.pids_limit" = "64", "oci.entrypoint" = "/usr/local/bin/python3" }
+argv = ["/app/db.py", "5432", "/data/db.sqlite"]
+ports = [{ id = "db.tcp", guest_port = 5432 }]
+state = ["data"]
+
+[[derivation.service]]
+id = "queue"
+runtimes = { "oci.image" = "docker.io/library/python@sha256:c4634f578a412db396771b61b064c6e546c9d6414c7fb5b1b05d5871f1885f7b", "oci.memory_bytes" = "268435456", "oci.cpu_limit_millis" = "500", "oci.pids_limit" = "64", "oci.entrypoint" = "/usr/local/bin/python3" }
+argv = ["/app/queue.py", "6379"]
+ports = [{ id = "queue.tcp", guest_port = 6379 }]
+
+# No ports: a background worker. It starts after the services it consumes
+# ("depends_on" orders the existing serving-step sequence) and reports
+# readiness as `still running` rather than a listening socket.
+[[derivation.service]]
+id = "worker"
+depends_on = ["db", "queue"]
+runtimes = { "oci.image" = "docker.io/library/python@sha256:c4634f578a412db396771b61b064c6e546c9d6414c7fb5b1b05d5871f1885f7b", "oci.memory_bytes" = "268435456", "oci.cpu_limit_millis" = "500", "oci.pids_limit" = "64", "oci.entrypoint" = "/usr/local/bin/python3" }
+argv = ["/app/worker.py"]
+ports = []
+
+[effects]
+default = "pure"

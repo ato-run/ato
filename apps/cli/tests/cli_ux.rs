@@ -346,3 +346,63 @@ fn documented_specialist_entry_points_keep_their_existing_shape() {
         assert!(help.contains(required), "{help}");
     }
 }
+
+/// A serving step with no Ports is a background worker, not a second route
+/// shape: it packs in a Web+DB+queue+worker group, and its omitted `ports`
+/// field is the same declaration as an explicit empty list.
+#[test]
+fn a_worker_without_ports_packs_in_a_web_db_queue_worker_group() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let explicit = root.path().join("explicit.capsule");
+    let stdout = assert_success(
+        ato()
+            .env("ATO_HOME", home)
+            .args(["pack"])
+            .arg(sample("oci-service-group-worker"))
+            .arg("--output")
+            .arg(&explicit)
+            .output()
+            .unwrap(),
+    );
+    assert!(stdout.contains("Packed:"), "{stdout}");
+    let explicit_ref = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("contract_ref="))
+        .expect("pack reports the contract")
+        .to_owned();
+
+    // The same manifest with the worker's `ports = []` line removed packs to
+    // the same canonical contract: the field is optional, not a special case.
+    let source = root.path().join("omitted");
+    fs::create_dir(&source).unwrap();
+    for entry in fs::read_dir(sample("oci-service-group-worker")).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.is_file() {
+            fs::copy(&path, source.join(path.file_name().unwrap())).unwrap();
+        }
+    }
+    let manifest = fs::read_to_string(source.join("capsule.toml"))
+        .unwrap()
+        .replace("ports = []\n", "");
+    fs::write(source.join("capsule.toml"), manifest).unwrap();
+    let omitted = root.path().join("omitted.capsule");
+    let stdout = assert_success(
+        ato()
+            .env("ATO_HOME", home)
+            .args(["pack"])
+            .arg(&source)
+            .arg("--output")
+            .arg(&omitted)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("contract_ref="))
+            .expect("pack reports the contract"),
+        explicit_ref
+    );
+}

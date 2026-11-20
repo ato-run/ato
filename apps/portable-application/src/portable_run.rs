@@ -1790,13 +1790,20 @@ fn wait_until_service_accepts_tcp(
     group: &ato_adapter_oci::OciServiceGroup,
     bounded: Option<&BoundedOciRun>,
 ) -> Result<()> {
-    let guest_port = route
+    let Some(guest_port) = route
         .derivation
         .ports
         .iter()
         .find(|port| port.from == name)
         .and_then(|port| port.guest_port)
-        .context("OCI service serves no Port")?;
+    else {
+        // A background worker serves no Port: there is nothing to connect to,
+        // so readiness is only that it has not already exited.
+        if let Some((service, code)) = group.exited_service()? {
+            bail!("OCI service `{service}` exited before the group was ready: {code}");
+        }
+        return Ok(());
+    };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
         if let Some(run) = bounded {
