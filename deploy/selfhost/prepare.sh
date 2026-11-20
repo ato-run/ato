@@ -30,16 +30,5 @@ extract() {
 extract "${1:-$repo/../ato-api}" "$ATO_API_REV"
 extract "${2:-$repo/../ato-pwa}" "$ATO_PWA_REV"
 extract "$repo" "$ATO_RUNNER_REV"
-# Compose file-backed secrets are bind-mounted even in rootless installations.
-# The parent directory is private on the host; only these two containers mount
-# the file. A hard link publishes the complete key once, across concurrent runs.
-mkdir -p "$site/.tmp/secrets" "$site/.tmp/trust" "$site/.tmp/runner-ingress"
-chmod 0700 "$site/.tmp/secrets"
-chmod 0755 "$site/.tmp/trust"
-secret="$site/.tmp/secrets/validator_token"
-if [ ! -f "$secret" ]; then
-  openssl rand -hex 32 > "$stage/validator_token"
-  chmod 0444 "$stage/validator_token"
-  ln "$stage/validator_token" "$secret" || test -s "$secret"
-fi
+"$site/init-runtime.sh"
 echo "Prepared the pinned API, PWA and Runner sources in $site/.tmp/src"

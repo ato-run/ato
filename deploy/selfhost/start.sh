@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 site=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+"$site/init-runtime.sh"
 "$site/stack" up -d --no-build --pull never web
 # Install only the public CA for the API's TLS connection to the Runner gate.
 # Keep the CA private key inside Caddy's own volume.
