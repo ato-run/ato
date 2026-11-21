@@ -177,6 +177,12 @@ impl ValidatorAgent {
             }
             Err(error) => {
                 let rejection_code = classify_rejection(&error).to_owned();
+                // The code is all the uploader sees; the operator needs the
+                // reason. Bundle contents are never part of this message.
+                eprintln!(
+                    "[validator] rejected bundle {} as {rejection_code}: {error:#}",
+                    job.bundle_id
+                );
                 self.api.ack_rejected(&job, &rejection_code)?;
                 Ok(ValidatorRunOutcome::Rejected {
                     bundle_id: job.bundle_id,
@@ -273,12 +279,15 @@ impl ValidatorAgent {
                 continue;
             };
             let observed = match with_retry(deadline, || {
+                let anchors =
+                    ato_tls_observe::TrustAnchors::for_contract(required.root_ca_digest.as_deref())
+                        .map_err(|error| RetryableFailure::terminal(error.to_string()))?;
                 ato_tls_observe::observe_tls(
                     address,
                     &required.server_name,
                     probe_tls_start(required.start),
                     Duration::from_secs(10),
-                    ato_tls_observe::TrustAnchors::PublicRoots,
+                    anchors,
                 )
                 .map(|facts| runtime_tls_observation(&required, facts))
                 .map_err(|error| RetryableFailure::retryable(error.to_string(), None))
@@ -789,9 +798,12 @@ fn report_with_workspace_bytes(
             .entry
             .as_deref()
             .context("static surface omitted entry")?;
-        let spa_fallback = surface
-            .spa_fallback
-            .context("static surface omitted spa_fallback")?;
+        // A capsule/2 static route keeps `spa_fallback` on its Derivation and
+        // leaves the Surface's value unset. The realization reads a missing
+        // value as `false` (see the static-web listener in lib.rs), so the
+        // manifest the API serves from must agree instead of refusing the
+        // bundle.
+        let spa_fallback = surface.spa_fallback.unwrap_or(false);
         let files = validated
             .tree
             .entries

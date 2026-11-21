@@ -134,18 +134,26 @@ pub struct RuntimeLaunchLeaseCommand {
 impl RuntimeLaunchLeaseCommand {
     /// This routing restriction never replaces lease/execution authorization.
     pub fn validate_runner_assignment(&self, runner_id: &str, required: bool) -> Result<()> {
-        match self.explicit_runner_id.as_deref() {
-            Some(assigned) => ensure!(
-                !assigned.trim().is_empty() && assigned == runner_id,
-                "explicit_runner_assignment_mismatch: command must explicitly name this Runner"
-            ),
-            None => ensure!(
-                !required,
-                "explicit_runner_assignment_required: this Runner accepts explicit placement only"
-            ),
-        }
-        Ok(())
+        validate_runner_assignment(self.explicit_runner_id.as_deref(), runner_id, required)
     }
+}
+
+pub(super) fn validate_runner_assignment(
+    assigned_runner: Option<&str>,
+    runner_id: &str,
+    required: bool,
+) -> Result<()> {
+    match assigned_runner {
+        Some(assigned) => ensure!(
+            !assigned.trim().is_empty() && assigned == runner_id,
+            "explicit_runner_assignment_mismatch: command must explicitly name this Runner"
+        ),
+        None => ensure!(
+            !required,
+            "explicit_runner_assignment_required: this Runner accepts explicit placement only"
+        ),
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -155,6 +163,11 @@ pub struct NetworkAuthorization {
     pub fixed_tcp: Vec<FixedTcpAllocation>,
     #[serde(default)]
     pub managed_embeddings: Vec<super::managed_embedding_relay::ManagedEmbeddingGrant>,
+    /// OIDC apps whose server must reach the Coordinator's OpenID Provider
+    /// through a Runner-owned fixed-operation relay. Omitted by every legacy
+    /// lease, exactly like absent managed embeddings.
+    #[serde(default)]
+    pub oidc_issuers: Vec<super::oidc_issuer_relay::OidcIssuerGrant>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -667,6 +680,17 @@ fn validate_private_isolation(
     Ok(())
 }
 
+/// The shape every environment variable the Runner injects into a service
+/// must have. Shared by the TCP egress and OIDC issuer grants so one rule
+/// decides both authorities.
+pub(super) fn valid_environment_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
 fn verify_network_authorization(
     spec: &RuntimeLaunchSpec,
     authorization: Option<&NetworkAuthorization>,
@@ -677,7 +701,8 @@ fn verify_network_authorization(
     ensure!(
         !authorization.egress.is_empty()
             || !authorization.fixed_tcp.is_empty()
-            || !authorization.managed_embeddings.is_empty(),
+            || !authorization.managed_embeddings.is_empty()
+            || !authorization.oidc_issuers.is_empty(),
         "empty network authorization must be omitted"
     );
     ensure!(
@@ -690,6 +715,7 @@ fn verify_network_authorization(
         .context("network authorization requires an OCI service group")?
         .service_group();
     super::managed_embedding_relay::validate_grants(spec, authorization)?;
+    super::oidc_issuer_relay::validate_grants(spec, authorization)?;
     let mut grant_ids = BTreeSet::new();
     let mut binding_ids = BTreeSet::new();
     let mut environments = BTreeSet::new();
@@ -700,11 +726,7 @@ fn verify_network_authorization(
                 && !grant.binding_id.is_empty()
                 && grant.binding_id.len() <= 128
                 && grant.environment.starts_with("ATO_BINDING_")
-                && grant.environment.len() <= 128
-                && grant
-                    .environment
-                    .bytes()
-                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+                && valid_environment_name(&grant.environment)
                 && group
                     .services
                     .iter()
@@ -1552,6 +1574,7 @@ mod tests {
             egress: vec![],
             fixed_tcp: vec![],
             managed_embeddings: vec![],
+            oidc_issuers: vec![],
         });
         assert!(validate_private_isolation(&command, &spec, false, true).is_err());
         command.network_authorization = None;
@@ -1589,6 +1612,7 @@ mod tests {
             egress: vec![],
             fixed_tcp: vec![],
             managed_embeddings: vec![],
+            oidc_issuers: vec![],
         });
         assert!(validate_private_isolation(&command, &launch, false, true).is_err());
         command.network_authorization = None;

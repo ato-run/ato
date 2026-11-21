@@ -15,9 +15,10 @@ use ato_formation::authoring::{
     AuthoringDraft, AuthoringProvenance, BOUND_CONTRACT_SCHEMA, BOUND_DERIVATION_SCHEMA,
     BROWSER_PROTOCOL, BindingContext, BoundContract, BoundDerivation, BoundInput, BoundPort,
     BoundRequirement, BoundStep, ClientAddressTransport, DerivationDraft, EffectClass,
-    HTTP_CONTRACT_VERIFIER, HTTP_PROTOCOL, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER, PROCESS_PROTOCOL,
-    PortDraft, SCENARIO_CONTRACT_VERIFIER, STATE_FILESYSTEM_PROTOCOL, StateAccess, StepDraft,
-    TCP_EGRESS_PROTOCOL, TCP_PROTOCOL, TERMINAL_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER, TlsStart,
+    HTTP_CONTRACT_VERIFIER, HTTP_PROTOCOL, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER,
+    OIDC_ISSUER_PROTOCOL, PROCESS_PROTOCOL, PortDraft, SCENARIO_CONTRACT_VERIFIER,
+    STATE_FILESYSTEM_PROTOCOL, StateAccess, StepDraft, TCP_EGRESS_PROTOCOL, TCP_PROTOCOL,
+    TERMINAL_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER, TLS_PINNED_ROOT_CONTRACT_VERIFIER, TlsStart,
     WORKSPACE_CONTRACT_VERIFIER, WORKSPACE_PROTOCOL, bind, validate_tls_server_name,
 };
 use ato_formation::capsule_toml::{CAPSULE_FILE_NAME, parse_capsule_toml};
@@ -433,6 +434,7 @@ pub struct PortableHttpRequirementSpec {
 /// name the presented certificate must cover, and how TLS starts there.
 #[derive(Debug, Clone)]
 pub struct PortableTlsRequirementSpec {
+    pub root_ca_digest: Option<String>,
     pub id: String,
     pub port: String,
     pub server_name: String,
@@ -1602,14 +1604,15 @@ pub(crate) fn contract_from_spec(
             .map_err(|detail| profile(format!("TLS requirement server_name: {detail}")))?;
         bound.push(BoundRequirement {
             id: requirement.id.clone(),
-            verifier: TLS_CONTRACT_VERIFIER.to_owned(),
+            verifier: ato_formation::authoring::tls_verifier(requirement.root_ca_digest.as_deref())
+                .to_owned(),
             port: Some(requirement.port.clone()),
             method: None,
             path: None,
             status: None,
             body_digest: None,
             input: None,
-            digest: None,
+            digest: requirement.root_ca_digest.clone(),
             server_name: Some(requirement.server_name.clone()),
             start: Some(requirement.start),
         });
@@ -1810,6 +1813,7 @@ fn authored_bundle_spec_v2(
             .tls_observations
             .into_iter()
             .map(|observation| PortableTlsRequirementSpec {
+                root_ca_digest: observation.root_ca_digest,
                 id: observation.id,
                 port: observation.port,
                 server_name: observation.server_name,
@@ -3014,7 +3018,10 @@ fn validate_native_desktop_route(
         if contract.requirements.iter().any(|requirement| {
             matches!(
                 requirement.verifier.as_str(),
-                HTTP_CONTRACT_VERIFIER | TLS_CONTRACT_VERIFIER | SCENARIO_CONTRACT_VERIFIER
+                HTTP_CONTRACT_VERIFIER
+                    | TLS_CONTRACT_VERIFIER
+                    | TLS_PINNED_ROOT_CONTRACT_VERIFIER
+                    | SCENARIO_CONTRACT_VERIFIER
             )
         }) {
             return Err(profile(
@@ -3447,7 +3454,7 @@ fn validate_route_requirements(
                     ));
                 }
             }
-            TLS_CONTRACT_VERIFIER => {
+            TLS_CONTRACT_VERIFIER | TLS_PINNED_ROOT_CONTRACT_VERIFIER => {
                 if !requirement
                     .port
                     .as_deref()
@@ -3468,7 +3475,11 @@ fn validate_route_requirements(
                     || requirement.status.is_some()
                     || requirement.body_digest.is_some()
                     || requirement.input.is_some()
-                    || requirement.digest.is_some()
+                    || ato_formation::authoring::required_tls_anchor(
+                        &requirement.verifier,
+                        requirement.digest.as_deref(),
+                    )
+                    .is_none()
                 {
                     return Err(profile(
                         "TLS requirement contains unrelated observation fields",
@@ -3647,6 +3658,12 @@ fn validate_service_group_structure<'a>(
         .bindings
         .iter()
         .any(|binding| binding.protocol == TCP_EGRESS_PROTOCOL);
+    // ato.oidc-issuer@1 reaches only Ato's own public OpenID Provider through a
+    // Runner-owned fixed-operation relay, so it never demands an effect class.
+    let has_oidc_issuer = application
+        .bindings
+        .iter()
+        .any(|binding| binding.protocol == OIDC_ISSUER_PROTOCOL);
     let valid_effect = if has_tcp_egress {
         matches!(
             derivation.effects,
@@ -3658,6 +3675,8 @@ fn validate_service_group_structure<'a>(
     if !valid_effect {
         return Err(profile(if has_tcp_egress {
             "a service group with tcp-egress requires confirmation or is non-repeatable"
+        } else if has_oidc_issuer {
+            "a service group whose only network Binding is oidc-issuer stays pure"
         } else {
             "a service group without tcp-egress must be pure"
         }));
@@ -4008,13 +4027,14 @@ fn validate_process_service_group(
             "a native process service group does not yet deliver Model Set inputs",
         ));
     }
-    if application
-        .bindings
-        .iter()
-        .any(|binding| binding.protocol == TCP_EGRESS_PROTOCOL)
-    {
+    if application.bindings.iter().any(|binding| {
+        matches!(
+            binding.protocol.as_str(),
+            TCP_EGRESS_PROTOCOL | OIDC_ISSUER_PROTOCOL
+        )
+    }) {
         return Err(profile(
-            "a native process service group does not model tcp-egress Bindings",
+            "a native process service group does not model tcp-egress or oidc-issuer Bindings",
         ));
     }
     // Filesystem state on macOS needs the Linux bubblewrap path, and this
@@ -5666,6 +5686,57 @@ status = 200
                 ("backend.http", TCP_PROTOCOL, "backend"),
                 ("app.http", HTTP_PROTOCOL, "web"),
             ]
+        );
+    }
+
+    #[test]
+    fn a_capsule_v2_oidc_issuer_binding_validates_and_native_groups_refuse_it() {
+        let oidc = SERVICE_GROUP_TOML.replace(
+            "protocol = \"ato.secret@1\"",
+            &format!("protocol = \"{OIDC_ISSUER_PROTOCOL}\""),
+        );
+        let route = build_group(&oidc).unwrap().remove(0);
+        assert_eq!(route.realization, PortableRealizationKind::OciServiceGroup);
+        let binding = route
+            .application
+            .bindings
+            .iter()
+            .find(|binding| binding.protocol == OIDC_ISSUER_PROTOCOL)
+            .expect("the authored protocol survives into the canonical Application");
+        assert_eq!(binding.id, "admin_secret");
+        // The Runner supplies this Binding's environment from the Run's network
+        // authorization; the bundle itself carries no value for it.
+        assert!(binding.required);
+        let oidc_application = route.application.clone();
+        let oidc_derivation = route.derivation.clone();
+
+        // A near-miss protocol is an ordinary runtime Binding, not this authority.
+        let near_miss = SERVICE_GROUP_TOML.replace(
+            "protocol = \"ato.secret@1\"",
+            "protocol = \"ato.oidc-issuer@2\"",
+        );
+        let route = build_group(&near_miss).unwrap().remove(0);
+        let binding = &route.application.bindings[0];
+        assert_ne!(binding.protocol, OIDC_ISSUER_PROTOCOL);
+        assert_eq!(
+            application_binding_environment_name(binding),
+            "ATO_BINDING_ADMIN_SECRET"
+        );
+
+        // The native process supervisor has no fixed-operation relay, so it
+        // refuses the protocol instead of claiming to model it.
+        let mut probe = oidc_derivation;
+        probe.runtimes.clear();
+        for step in &mut probe.steps {
+            step.protocol = PROCESS_PROTOCOL.to_owned();
+            step.runtimes = BTreeMap::from([(PYTHON_RUNTIME.to_owned(), "3.12.7".to_owned())]);
+        }
+        let error = crate::validate_process_service_group(&oidc_application, &probe).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not model tcp-egress or oidc-issuer Bindings"),
+            "{error}"
         );
     }
 

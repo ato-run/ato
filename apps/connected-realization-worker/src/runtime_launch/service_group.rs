@@ -14,6 +14,7 @@ use ato_ipc::runtime_launch_v2::RuntimeLaunchSpecV2;
 use ato_runtime_attempt::launch::oci::{self as oci_launch, ServiceEgress};
 
 use super::managed_embedding_relay::{self, ManagedEmbeddingRelay};
+use super::oidc_issuer_relay::{self, OidcIssuerRelay};
 use super::process_executor::ReadinessProbe;
 use super::resolved::ResolvedRuntimeLaunchContext;
 use super::{lease::NetworkAuthorization, network_broker::TcpEgressBroker};
@@ -40,6 +41,9 @@ pub fn launch_service_group(
         })
         .transpose()?
         .unwrap_or_default();
+    if let Some(authorization) = network_authorization {
+        oidc_issuer_relay::validate_group_grants(spec, authorization)?;
+    }
     let mut egress = Vec::new();
     if let Some(authorization) = network_authorization {
         for grant in &authorization.egress {
@@ -74,6 +78,23 @@ pub fn launch_service_group(
                 environment_name: "OPENAI_BASE_URL".to_owned(),
                 environment_value: relay.binding_value(),
                 expected_secret_value: Some(original_base),
+                network,
+                guard: Box::new(relay),
+            });
+        }
+    }
+    if let Some(authorization) = network_authorization {
+        for grant in &authorization.oidc_issuers {
+            let network = OciNetwork::create_egress(
+                &format!("{}-oidc-{}", spec.context.run_id, grant.service_id),
+                &owner.labels(Some(&grant.service_id))?,
+            )?;
+            let relay = OidcIssuerRelay::start(network.gateway_address()?, grant)?;
+            egress.push(ServiceEgress {
+                service: grant.service_id.clone(),
+                environment_name: grant.environment.clone(),
+                environment_value: relay.binding_value(),
+                expected_secret_value: None,
                 network,
                 guard: Box::new(relay),
             });

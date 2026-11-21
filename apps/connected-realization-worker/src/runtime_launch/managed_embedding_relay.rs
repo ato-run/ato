@@ -429,6 +429,7 @@ mod tests {
             egress: vec![],
             fixed_tcp: vec![],
             managed_embeddings: vec![grant()],
+            oidc_issuers: vec![],
         }
     }
     fn spec() -> RuntimeLaunchSpec {

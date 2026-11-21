@@ -202,7 +202,9 @@ def ensure_listeners(registry: Registry, trusted_networks: list) -> list:
                 f"created  {port:>5}/{protocol} implicit={tls_implicit} proxy={trust_proxy}"
             )
         else:
-            registry.update("NetworkListener", str(matched["id"]), desired)
+            # The registry accepts a name at creation and keeps it read-only.
+            patch = {key: value for key, value in desired.items() if key != "name"}
+            registry.update("NetworkListener", str(matched["id"]), patch)
             summary.append(
                 f"updated  {port:>5}/{protocol} implicit={tls_implicit} proxy={trust_proxy} "
                 f"(was {matched.get('name')!r})"

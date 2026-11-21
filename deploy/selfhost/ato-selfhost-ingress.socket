@@ -1,0 +1,11 @@
+[Unit]
+Description=Local Caddy connection to the assertion-gated Ato Runner
+
+[Socket]
+ListenStream=%h/.local/share/ato-selfhost/ingress/surface.sock
+DirectoryMode=0711
+SocketMode=0666
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

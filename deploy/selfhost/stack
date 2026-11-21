@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+site=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+# Release inputs are checked into this copy of the distribution.
+unset ATO_VALIDATOR_REV
+# shellcheck disable=SC1091
+. "$site/versions.env"
+ATO_VALIDATOR_REV=${ATO_VALIDATOR_REV:-$ATO_RUNNER_REV}
+export ATO_API_REV ATO_PWA_REV ATO_RUNNER_REV ATO_VALIDATOR_REV
+exec docker compose --project-directory "$site" --env-file "$site/.env" -f "$site/compose.yaml" "$@"

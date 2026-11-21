@@ -1,5 +1,11 @@
 # Build context must be Govcraft/missive commit
 # 7716106b6c4638426169dac264657437914bbe7f.
+FROM docker.io/library/rust@sha256:3f6e6f8d8725a65a2db964bb828850f888d430c68784d661f753144e5d787207 AS offline-templates
+WORKDIR /src
+COPY templates ./templates
+COPY ato-patches/missive-offline-assets.patch /tmp/offline.patch
+RUN patch -p1 < /tmp/offline.patch
+
 FROM docker.io/library/node@sha256:43aeff40f4afc22e83f7589a2f37e111cff5ca84529571f1c8415bcc5fcc21b2 AS assets
 
 WORKDIR /src
@@ -7,15 +13,22 @@ COPY package.json pnpm-lock.yaml ./
 RUN corepack enable && corepack prepare pnpm@10.30.3 --activate \
     && pnpm install --frozen-lockfile
 COPY static ./static
-COPY templates ./templates
-RUN mkdir -p static/js static/css && pnpm run build
+COPY --from=offline-templates /src/templates ./templates
+ADD --checksum=sha256:a34988d1b9f005a458d593aa8d7486537cb878b8ac3b82703db1268983123ecc https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.4.tgz /tmp/htmx.tgz
+ADD --checksum=sha256:1eafcc930f9ef4e9ee10dac752d288c60ee848c7ab4987f48699686159ae3890 https://registry.npmjs.org/htmx-ext-sse/-/htmx-ext-sse-2.2.2.tgz /tmp/sse.tgz
+RUN mkdir -p static/js static/css static/vendor/htmx-2.0.4 static/vendor/htmx-sse-2.2.2 \
+    && tar -xOzf /tmp/htmx.tgz package/dist/htmx.min.js > static/vendor/htmx-2.0.4/htmx.min.js \
+    && tar -xOzf /tmp/htmx.tgz package/LICENSE > static/vendor/htmx-2.0.4/LICENSE \
+    && tar -xOzf /tmp/sse.tgz package/sse.js > static/vendor/htmx-sse-2.2.2/sse.js \
+    && tar -xOzf /tmp/sse.tgz package/LICENSE > static/vendor/htmx-sse-2.2.2/LICENSE \
+    && pnpm run build
 
 FROM docker.io/library/rust@sha256:3f6e6f8d8725a65a2db964bb828850f888d430c68784d661f753144e5d787207 AS builder
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-COPY templates ./templates
+COPY --from=assets /src/templates ./templates
 COPY ato-patches/missive-nondefault-port.patch /tmp/missive-nondefault-port.patch
 COPY ato-patches/missive-identity-submission-capability.patch /tmp/missive-identity-submission-capability.patch
 RUN patch -p1 < /tmp/missive-nondefault-port.patch \
@@ -29,10 +42,11 @@ COPY --from=builder /usr/lib/x86_64-linux-gnu/libssl.so.3 /usr/lib/x86_64-linux-
 COPY --from=builder /usr/lib/x86_64-linux-gnu/libcrypto.so.3 /usr/lib/x86_64-linux-gnu/libcrypto.so.3
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /src/target/release/missive /usr/local/bin/missive
+COPY LICENSE-MIT LICENSE-APACHE /usr/share/doc/missive/
 USER 65532:65532
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/missive"]
 CMD ["serve"]
 LABEL org.opencontainers.image.source="https://github.com/Govcraft/missive" \
       org.opencontainers.image.revision="7716106b6c4638426169dac264657437914bbe7f" \
-      run.ato.dev.patch="strip-nondefault-port-from-jmap-redirect-host,identity-get-submission-capability"
+      run.ato.dev.patch="strip-nondefault-port-from-jmap-redirect-host,identity-get-submission-capability,offline-browser-assets"
