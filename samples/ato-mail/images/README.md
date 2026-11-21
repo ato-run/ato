@@ -78,10 +78,41 @@ permissions
 The broker password is delivered per Run through the environment variable and is
 never stored in Missive's session.
 
+## Ato account provisioning and app passwords (`missive-ato-accounts.patch`)
+
+The fourth patch, applied after the identity patch, implements the mailbox side
+of Ato's account lifecycle. Only Ato's Coordinator calls it: the gateway never
+forwards a client request whose path starts with `/__ato/` to an OCI app. Every
+route answers JSON, and all of them are unregistered (404) unless
+`[ato_identity]` is configured.
+
+| Route | Result |
+|---|---|
+| `PUT /__ato/accounts/{account}` body `{"display_name": string\|null}` | 201 `{"account","created":true}` when created, 200 `{"account","created":false}` when the account already exists (idempotent), 403 `{"error":"domain_not_provisioned"}` unless the address domain is in `provision_domains`, 400 `{"error":"invalid_account"}` when the address does not have exactly one `@` or contains `%` |
+| `GET /__ato/accounts/{account}/app-passwords` | 200 `{"app_passwords":[{"id","description","created_at","expires_at"}]}`; never the secret |
+| `POST /__ato/accounts/{account}/app-passwords` body `{"description","expires_at"}` | 201 `{"id","description","created_at","expires_at","secret"}`; this is the only response that carries the secret |
+| `DELETE /__ato/accounts/{account}/app-passwords/{id}` | 204; an unknown id is also 204 so Ato can retry |
+| `DELETE /__ato/accounts/{account}/app-passwords` | 204 after revoking every app password (used when Ato suspends the account) |
+
+The provisioning PUT creates the Stalwart principal with a random 32-byte
+password from the OS CSPRNG; it is never logged, stored, or returned. The
+app-password routes run impersonated as `{account}` and require the account
+header to equal the `{account}` path segment (403
+`{"error":"account_mismatch"}` otherwise). Provider failures answer 502
+`{"error":"provider_error","detail":"<JMAP error type>"}`.
+
+The operator must give the impersonator principal Stalwart's **User role** plus
+the `impersonate` and `sysAccountCreate` permissions: the User role makes it a
+principal that may own accounts, and Stalwart refuses to create an account with
+more rights than its creator. If `x:Domain/get` is refused as `forbidden`, add
+`sysDomainGet` as well; the route then answers 502 with
+`"detail":"forbidden"` until it is granted.
+
 The image digests in `images.lock` (and the pins in `capsule.toml`) are **not
-yet rebuilt** for this patch: they still name the image built from the two
-compatibility patches, which does not accept the header. Rebuild with
-`build-images.sh`, verify, and update both pins before the sample relies on it.
+yet rebuilt** for the identity and account patches: they still name the image
+built from the two compatibility patches, which neither accepts the header nor
+serves `/__ato/`. Rebuild with `build-images.sh`, verify, and update both pins
+before the sample relies on them.
 
 ## Building
 

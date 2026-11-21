@@ -7,3 +7,12 @@ port = 8080
 
 [session]
 storage = "memory"
+
+# Ato identity forwarding. The impersonator's password is delivered per Run
+# through the environment variable; while it is unset or empty this section is
+# ignored and the app keeps its password login.
+[ato_identity]
+account_header = "x-ato-account"
+impersonator = "ato-webmail-broker@example.test"
+impersonator_password_env = "MISSIVE_ATO_IMPERSONATOR_PASSWORD"
+provision_domains = ["example.test"]
