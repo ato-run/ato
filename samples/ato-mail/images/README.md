@@ -71,12 +71,13 @@ no `%` (anything else answers 400), a JMAP connection failure answers 502, and
 the login form is never shown on the header path. If the environment variable is
 unset or empty, the section is ignored with one startup warning.
 
-The impersonator is a dedicated Stalwart principal that holds only the
-`authenticate` and `impersonate` permissions, created for example with enabled
-permissions
+The impersonator is a dedicated Stalwart principal that needs the
+`authenticate` and `impersonate` permissions for the header path, created for
+example with enabled permissions
 `{"@type":"Replace","enabledPermissions":{"authenticate":true,"impersonate":true}}`.
-The broker password is delivered per Run through the environment variable and is
-never stored in Missive's session.
+It needs more for account provisioning (see below). The broker password is
+delivered per Run through the environment variable and is never stored in
+Missive's session.
 
 ## Ato account provisioning and app passwords (`missive-ato-accounts.patch`)
 
@@ -108,11 +109,12 @@ header to equal the `{account}` path segment (403
 `{"error":"provider_error","detail":"<JMAP error type>"}`.
 
 The operator must give the impersonator principal Stalwart's **User role** plus
-the `impersonate` and `sysAccountCreate` permissions: the User role makes it a
-principal that may own accounts, and Stalwart refuses to create an account with
-more rights than its creator. If `x:Domain/get` is refused as `forbidden`, add
-`sysDomainGet` as well; the route then answers 502 with
-`"detail":"forbidden"` until it is granted.
+the `impersonate`, `sysAccountCreate` and `sysDomainGet` permissions: the User
+role makes it a principal that may own accounts, and Stalwart refuses to create
+an account with more rights than its creator. `sysDomainGet` is always needed:
+the provisioning PUT looks the address domain up with `x:Domain/get` before it
+creates the account. Without it Stalwart answers `forbidden` and the route
+answers 502 with `"detail":"forbidden"`.
 
 The image digests in `images.lock` (and the pins in `capsule.toml`) are **not
 yet rebuilt** for the identity and account patches: they still name the image
