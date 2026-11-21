@@ -383,6 +383,33 @@ fn q4_a_signed_status_report_carries_a_verified_signature() {
     assert!(key_verifies(root.path(), message.as_bytes(), request));
 }
 
+#[test]
+fn q4_a_service_replacement_report_is_signed() {
+    let root = tempfile::tempdir().unwrap();
+    let (key, _path) = registered_key(root.path());
+    let server = StubControlPlane::start(&key, true, false, vec![(200, "{}".to_owned())]);
+    let api = api_for(&server, Some(key));
+    let report = runtime_launch::service_replacement::ServiceReplacementReport {
+        status: "completed",
+        services: Vec::new(),
+        error: None,
+    };
+
+    api.report_service_replacement("lease_1", "srep_01", &report)
+        .unwrap();
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].path(),
+        "/v1/runner-leases/lease_1/service-replacements/srep_01"
+    );
+    assert!(
+        requests[0].signed(),
+        "a service replacement report is control-plane state and must be signed"
+    );
+}
+
 fn key_verifies(root: &Path, message: &[u8], request: &RecordedRequest) -> bool {
     let Some(signature) = request.header(device_key::SIGNATURE_HEADER) else {
         return false;

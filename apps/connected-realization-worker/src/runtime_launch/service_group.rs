@@ -9,9 +9,9 @@
 //! exactly its lifetime.
 
 use anyhow::Result;
-use ato_adapter_oci::{OciNetwork, OciOwner, OciServiceGroup};
+use ato_adapter_oci::{OciNetwork, OciOwner};
 use ato_ipc::runtime_launch_v2::RuntimeLaunchSpecV2;
-use ato_runtime_attempt::launch::oci::{self as oci_launch, ServiceEgress};
+use ato_runtime_attempt::launch::oci::{self as oci_launch, LaunchedServiceGroup, ServiceEgress};
 
 use super::managed_embedding_relay::{self, ManagedEmbeddingRelay};
 use super::oidc_issuer_relay::{self, OidcIssuerRelay};
@@ -28,7 +28,7 @@ pub fn launch_service_group(
     probe: &dyn ReadinessProbe,
     owner: &OciOwner,
     network_authorization: Option<&NetworkAuthorization>,
-) -> Result<OciServiceGroup> {
+) -> Result<LaunchedServiceGroup> {
     // Validate every scoped authority and redeemed pair before creating any resource.
     let managed_credentials = network_authorization
         .map(|authorization| {

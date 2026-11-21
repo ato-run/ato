@@ -516,7 +516,11 @@ pub fn is_signed_control_request(method: &str, path_and_query: &str) -> bool {
         "POST" => {
             (path.starts_with("/v1/runners/") && path.ends_with("/heartbeat"))
                 || (path.starts_with("/v1/runner-leases/")
-                    && (path.ends_with("/status") || path.ends_with("/stopped")))
+                    && (path.ends_with("/status")
+                        || path.ends_with("/stopped")
+                        // A replacement report is control-plane state: the
+                        // device signature covers it like the status reports.
+                        || path.contains("/service-replacements/")))
         }
         "GET" => {
             (path.starts_with("/v1/runners/")
