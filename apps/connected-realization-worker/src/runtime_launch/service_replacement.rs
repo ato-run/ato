@@ -220,6 +220,28 @@ fn validate(
             ),
         ));
     }
+    // The replacement starts the next definition against the live Run's
+    // resolved context, so the replaced service mounts the workspace this Run
+    // materialized. A directive built from another workspace would run it
+    // against stale files: refuse it before anything is stopped, naming both
+    // workspaces. Every running service carries the launch spec it started
+    // under, and an applied replacement only ever installs a spec with the
+    // same workspace, so each one still states the live Run's workspace.
+    for (name, live) in running {
+        if live.spec.workspace == spec.workspace {
+            continue;
+        }
+        return Err(Refusal::new(
+            "workspace_changed",
+            format!(
+                "the directive launch_spec names workspace {} (cwd {:?}) but service {name} is running workspace {} (cwd {:?})",
+                spec.workspace.materialization_ref,
+                spec.workspace.cwd_relative,
+                live.spec.workspace.materialization_ref,
+                live.spec.workspace.cwd_relative,
+            ),
+        ));
+    }
     if directive.services.is_empty() {
         return Err(Refusal::new(
             "invalid_directive",
@@ -983,6 +1005,93 @@ mod tests {
     }
 
     #[test]
+    fn service_replacement_validation_refuses_a_different_workspace() {
+        let current = parse(base_spec(RUN_ID));
+        let mut next = base_spec(RUN_ID);
+        next["workspace"]["materialization_ref"] = digest('9').into();
+        let directive =
+            ServiceReplacementDirective::parse(&directive(next, &["web"])).expect("directive");
+        let state = running(&current);
+        let live = state.clone();
+        let (_root, context) = context();
+        let Err(refusal) = validate(
+            RUN_ID,
+            &directive,
+            &state,
+            &running_group(&current),
+            &context,
+            &BTreeSet::new(),
+        ) else {
+            panic!("a directive from another workspace must be refused");
+        };
+        assert_eq!(refusal.code, "workspace_changed");
+        assert!(
+            refusal.message.contains(&digest('9')) && refusal.message.contains(&digest('3')),
+            "the refusal names both workspaces: {}",
+            refusal.message
+        );
+        // Validation only borrows the live group, so a refusal stopped and
+        // started nothing: every service still runs its definition under the
+        // spec it started with.
+        assert_eq!(state.len(), live.len());
+        for (name, service) in &live {
+            assert_eq!(state[name].service, service.service);
+            assert_eq!(state[name].spec, service.spec);
+        }
+    }
+
+    #[test]
+    fn service_replacement_validation_refuses_a_changed_workspace_cwd() {
+        // A group spec requires an empty cwd_relative, so a directive that
+        // names a cwd is refused at parse time and cannot reach the wire. The
+        // validation still compares the whole workspace, cwd included; build
+        // the internal form to prove the cwd half.
+        let current = parse(base_spec(RUN_ID));
+        let mut view = current.service_group_spec().expect("a group").clone();
+        view.workspace.cwd_relative = "sub".to_owned();
+        let directive = ServiceReplacementDirective {
+            launch_spec: RuntimeLaunchSpec::V2(view),
+            services: vec!["web".to_owned()],
+        };
+        let (_root, context) = context();
+        let Err(refusal) = validate(
+            RUN_ID,
+            &directive,
+            &running(&current),
+            &running_group(&current),
+            &context,
+            &BTreeSet::new(),
+        ) else {
+            panic!("a directive that names another cwd must be refused");
+        };
+        assert_eq!(refusal.code, "workspace_changed");
+        assert!(
+            refusal.message.contains("sub"),
+            "the refusal names the directive cwd: {}",
+            refusal.message
+        );
+    }
+
+    #[test]
+    fn service_replacement_validation_accepts_the_live_workspace() {
+        let current = parse(base_spec(RUN_ID));
+        let mut next = base_spec(RUN_ID);
+        next["realization"]["services"][1]["argv"] = serde_json::json!(["--port", "8001"]);
+        let directive =
+            ServiceReplacementDirective::parse(&directive(next, &["web"])).expect("directive");
+        let (_root, context) = context();
+        validate(
+            RUN_ID,
+            &directive,
+            &running(&current),
+            &running_group(&current),
+            &context,
+            &BTreeSet::new(),
+        )
+        .expect("a directive that names the live Run's workspace may replace a service");
+    }
+
+    #[test]
     fn service_replacement_validation_refuses_an_empty_service_list() {
         assert_eq!(
             refusal_code(base_spec(RUN_ID), base_spec(RUN_ID), &[]),
@@ -1066,8 +1175,7 @@ mod tests {
             "launch_spec": {"protocol": "ato.runtime-launch-spec.v2"},
             "services": ["web"],
         }))
-        .err()
-        .expect("a malformed spec must be refused at parse time");
+        .expect_err("a malformed spec must be refused at parse time");
         assert_eq!(directive.code, "invalid_launch_spec");
         let _ = current;
     }
