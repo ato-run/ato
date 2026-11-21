@@ -109,6 +109,12 @@ closed.
 - Scheduling requires `execution_abi=oci` and
   `runtime_feature=oci_service_group_v1`. Only Runners that can contain OCI
   workloads (native Linux with Docker) and understand v2 advertise the feature.
+- The launch-spec judge admits 1–4 services even though authoring still requires
+  2–4. A single-container app that declares a network Binding (for example
+  `ato.oidc-issuer@1`) is launched as a one-service group so it reaches the
+  same Runner-owned relay/egress path; the V1 single-step route still admits no
+  network authorization at all. Service replacement applies to the only service
+  of such a group when it holds no state and no fixed TCP allocation.
 - The group's summed CPU is reserved atomically on its one Run lease through
   the existing `runtime_cpu_request` path. Memory and pids are enforced as
   per-container hard limits only; this contract does not claim memory

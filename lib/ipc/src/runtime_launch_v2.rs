@@ -1,7 +1,8 @@
 //! Launch contract v2: an OCI service group.
 //!
-//! v2 exists for exactly one reason — a route whose steps run as several
-//! containers — and deliberately changes nothing else. It rides the SAME
+//! v2 exists for exactly one reason — an OCI route whose serving steps run as
+//! one group of containers (one or several) — and deliberately changes nothing
+//! else. It rides the SAME
 //! `runtime_launch` lease kind as v1; `protocol` tells the two apart. The v1
 //! type, bytes and digest are untouched, and a Runner build that does not know
 //! v2 refuses it by `protocol` before anything is materialized.
@@ -16,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::oci_service_group::{
-    OCI_SERVICE_GROUP_MAX_PORTS, OCI_SERVICE_GROUP_MAX_SERVICES, OCI_SERVICE_GROUP_MIN_SERVICES,
+    OCI_SERVICE_GROUP_MAX_PORTS, OCI_SERVICE_GROUP_MAX_SERVICES, RUNTIME_LAUNCH_SPEC_MIN_SERVICES,
     group_totals, is_service_name,
 };
 use crate::runtime_launch::{
@@ -213,7 +214,7 @@ impl RuntimeLaunchSpecV2 {
                 reference: group.platform.clone(),
             });
         }
-        if !(OCI_SERVICE_GROUP_MIN_SERVICES..=OCI_SERVICE_GROUP_MAX_SERVICES)
+        if !(RUNTIME_LAUNCH_SPEC_MIN_SERVICES..=OCI_SERVICE_GROUP_MAX_SERVICES)
             .contains(&group.services.len())
         {
             return Err(group_error("realization.services"));

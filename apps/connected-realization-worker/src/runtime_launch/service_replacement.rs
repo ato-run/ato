@@ -917,6 +917,54 @@ mod tests {
         assert_ne!(validated.services[0].previous, validated.services[0].next);
     }
 
+    /// A launch spec may carry one service. Replacing it is the same path: the
+    /// only service is named, nothing outside it changes, and state still
+    /// refuses because a replacement cannot carry it.
+    fn one_service_spec(run_id: &str) -> serde_json::Value {
+        let mut spec = base_spec(run_id);
+        let services = spec["realization"]["services"].as_array_mut().unwrap();
+        services.retain(|service| service["name"] == "web");
+        let limits = services[0]["resource_limits"].clone();
+        spec["realization"]["total_limits"] = limits;
+        spec["state_attachments"] = serde_json::json!([]);
+        spec
+    }
+
+    #[test]
+    fn a_one_service_group_replaces_its_only_service_and_refuses_state() {
+        let current = parse(one_service_spec(RUN_ID));
+        let mut next = one_service_spec(RUN_ID);
+        next["realization"]["services"][0]["argv"] =
+            serde_json::json!(["--port", "8000", "--verbose"]);
+        let directive =
+            ServiceReplacementDirective::parse(&directive(next, &["web"])).expect("directive");
+        let (_root, context) = context();
+        let validated = validate(
+            RUN_ID,
+            &directive,
+            &running(&current),
+            &running_group(&current),
+            &context,
+            &BTreeSet::new(),
+        )
+        .expect("the only service of a one-service group may be replaced");
+        assert_eq!(validated.services.len(), 1);
+        assert_eq!(validated.services[0].name, "web");
+
+        let mut stateful = one_service_spec(RUN_ID);
+        stateful["state_attachments"] = serde_json::json!([{
+            "state_key": "data",
+            "revision_ref": null,
+            "mount_target": "/data",
+            "access": "read_write",
+        }]);
+        stateful["realization"]["services"][0]["state_keys"] = serde_json::json!(["data"]);
+        assert_eq!(
+            refusal_code(stateful.clone(), stateful, &["web"]),
+            "stateful_service"
+        );
+    }
+
     #[test]
     fn service_replacement_validation_refuses_an_absent_service() {
         assert_eq!(
