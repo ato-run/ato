@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 
 use crate::authoring::{
-    BROWSER_PROTOCOL, ClientAddressTransport, EffectClass, PROCESS_PROTOCOL,
+    BROWSER_PROTOCOL, ClientAddressTransport, EffectClass, OIDC_ISSUER_PROTOCOL, PROCESS_PROTOCOL,
     SCENARIO_CONTRACT_VERIFIER, STATE_FILESYSTEM_PROTOCOL, StateSaveDeclaration,
     TCP_EGRESS_PROTOCOL, TERMINAL_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER,
     TLS_PINNED_ROOT_CONTRACT_VERIFIER, TlsStart, WORKSPACE_PROTOCOL, validate_tls_server_name,
@@ -697,6 +697,12 @@ fn parse_capsule_toml_v2_impl(
     let has_tcp_egress = bindings
         .iter()
         .any(|binding| binding.protocol == TCP_EGRESS_PROTOCOL);
+    // An ato.oidc-issuer@1 Binding reaches only Ato's own public OpenID
+    // Provider through a Runner-owned fixed-operation relay. It is not general
+    // network access, so it never demands an external-effect class of its own.
+    let has_oidc_issuer = bindings
+        .iter()
+        .any(|binding| binding.protocol == OIDC_ISSUER_PROTOCOL);
     if has_tcp_egress
         && !matches!(
             effects,
@@ -711,7 +717,11 @@ fn parse_capsule_toml_v2_impl(
     if !has_tcp_egress && effects != EffectClass::Pure {
         return Err(invalid(
             "effects.default",
-            "must be `pure` when no tcp-egress Binding is declared",
+            if has_oidc_issuer {
+                "must be `pure`: ato.oidc-issuer@1 reaches only Ato's public OIDC endpoints"
+            } else {
+                "must be `pure` when no tcp-egress Binding is declared"
+            },
         ));
     }
 
@@ -2582,6 +2592,37 @@ default = "pure"
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn an_oidc_issuer_binding_keeps_pure_effects_and_stays_scoped_to_one_service() {
+        let oidc = SERVICE_GROUP.replace(
+            "protocol = \"ato.secret@1\"",
+            "protocol = \"ato.oidc-issuer@1\"",
+        );
+        let draft = parse_capsule_toml_v2(&oidc).unwrap();
+        assert_eq!(draft.bindings[0].protocol, OIDC_ISSUER_PROTOCOL);
+        assert_eq!(draft.derivations[0].services[0].bindings, ["admin_secret"]);
+        // It reaches only Ato's own public OIDC endpoints, so it does not demand
+        // an external-effect class of its own.
+        assert_eq!(draft.effects, EffectClass::Pure);
+        // The ordinary visibility rule still applies: exactly one service reads it.
+        let unused = oidc.replace("bindings = [\"admin_secret\"]\n", "");
+        assert!(parse_capsule_toml_v2(&unused).is_err());
+    }
+
+    #[test]
+    fn an_unknown_serving_protocol_still_fails() {
+        for protocol in ["ato.oidc-issuer@1", "ato.unknown@1"] {
+            let text =
+                SERVICE_GROUP.replace("use = \"ato.oci@1\"", &format!("use = \"{protocol}\""));
+            let error = parse_capsule_toml_v2(&text).unwrap_err();
+            assert!(
+                matches!(error, CapsuleTomlV2Error::Invalid { ref path, .. } if path == "derivation.use"),
+                "{protocol}"
+            );
+        }
+        assert!(parse_capsule_toml_v2(SERVICE_GROUP).is_ok());
     }
 
     #[test]

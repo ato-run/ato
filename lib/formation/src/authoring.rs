@@ -61,6 +61,11 @@ pub const TCP_PROTOCOL: &str = "ato.tcp@1";
 /// A runtime-provided, policy-bound raw TCP egress endpoint. The binding value
 /// is an endpoint selected by the Runner, never an unrestricted network grant.
 pub const TCP_EGRESS_PROTOCOL: &str = "ato.tcp-egress@1";
+/// A Runner-owned fixed-operation route to Ato's own OpenID Provider. The
+/// service's server performs OIDC discovery, JWKS, token and userinfo through
+/// a purpose-built relay; it is not general network access, and unlike
+/// `TCP_EGRESS_PROTOCOL` it does not make the route externally effectful.
+pub const OIDC_ISSUER_PROTOCOL: &str = "ato.oidc-issuer@1";
 /// Writable continuation state, filesystem-shaped. Already the protocol every
 /// Formation `state_slot_declaration` carries.
 pub const STATE_FILESYSTEM_PROTOCOL: &str = "ato.state.filesystem@1";
