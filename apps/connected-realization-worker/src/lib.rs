@@ -196,6 +196,7 @@ fn runner_capabilities(
         if network_controls {
             capabilities.push("network=ato.tcp-egress@1");
             capabilities.push(runtime_launch::managed_embedding_relay::RUNTIME_FEATURE);
+            capabilities.push(runtime_launch::oidc_issuer_relay::RUNTIME_FEATURE);
         }
         if network_controls && fixed_tcp {
             capabilities.push("network=ato.fixed-tcp@1");
@@ -8731,6 +8732,11 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         let network = runner_capabilities(false, true, false, true, true);
         assert!(network.contains(&"network=ato.tcp-egress@1"));
         assert!(network.contains(&"network=ato.fixed-tcp@1"));
+        assert!(network.contains(&"network=ato.oidc-issuer@1"));
+        assert!(
+            !runner_capabilities(false, true, false, false, false)
+                .contains(&"network=ato.oidc-issuer@1")
+        );
     }
 
     fn capability_test_config(tap_host_cidr: Option<&str>) -> WorkerConfig {

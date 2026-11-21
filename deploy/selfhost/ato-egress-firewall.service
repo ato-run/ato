@@ -1,5 +1,5 @@
 [Unit]
-Description=Install Ato's two host egress rules before enabling status checks
+Description=Install Ato's host egress rules before enabling status checks
 After=network-pre.target
 
 [Service]
@@ -8,6 +8,7 @@ RemainAfterExit=yes
 ExecCondition=/bin/sh -c '! /usr/local/libexec/ato-egress-firewall-status >/dev/null 2>&1'
 ExecStart=/usr/sbin/iptables --wait 5 -I INPUT 1 -i atoe+ -m comment --comment ato-runtime-egress-default-deny -j DROP
 ExecStart=/usr/sbin/iptables --wait 5 -I INPUT 1 -i atoe+ -p tcp --dport 1080 -m comment --comment ato-runtime-egress-broker -j ACCEPT
+ExecStart=/usr/sbin/iptables --wait 5 -I INPUT 1 -i atoe+ -p tcp --dport 8091 -m comment --comment ato-runtime-oidc-issuer-relay -j ACCEPT
 ExecStartPost=/usr/local/libexec/ato-egress-firewall-status
 NoNewPrivileges=yes
 
