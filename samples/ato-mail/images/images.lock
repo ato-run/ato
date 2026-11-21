@@ -11,7 +11,7 @@ platform = "linux/amd64"
 source = "https://github.com/Govcraft/missive@7716106b6c4638426169dac264657437914bbe7f"
 image = "ghcr.io/koh0920/govcraft-missive@sha256:3dc89054b1a85ae6ad07e5cf1dc483bffa0ba7253b40fd8274803c765b04bc7c"
 platform = "linux/amd64"
-patches = ["missive-nondefault-port.patch", "missive-identity-submission-capability.patch"]
+patches = ["missive-nondefault-port.patch", "missive-identity-submission-capability.patch", "missive-ato-identity.patch", "missive-ato-accounts.patch"]
 
 [adapter]
 source = "samples/stalwart-missive-mail/transport-adapter"

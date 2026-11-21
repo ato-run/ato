@@ -9,7 +9,7 @@ records why each image differs from its upstream.
 | Sample pin (capsule.toml) | Built from |
 |---|---|
 | `ghcr.io/koh0920/stalwart-staging@sha256:25723c49…629b` | `Dockerfile.stalwart` ← `docker.io/stalwartlabs/stalwart@sha256:d898e81b…cdfe` (v0.16.22, linux/amd64) |
-| `ghcr.io/koh0920/govcraft-missive@sha256:3dc89054…bc7c` | `Dockerfile.missive` ← Govcraft/missive commit `7716106b6c4638426169dac264657437914bbe7f` + the two patches here |
+| `ghcr.io/koh0920/govcraft-missive@sha256:3dc89054…bc7c` | `Dockerfile.missive` ← Govcraft/missive commit `7716106b6c4638426169dac264657437914bbe7f` + the patches here |
 
 ## Why the Stalwart image is a thin layer
 
@@ -28,8 +28,8 @@ at the same path, and upstream declares `/etc/stalwart` and `/var/lib/stalwart`.
 
 ## Why the Missive image is patched
 
-Both patches are compatibility fixes for the pinned upstream commit, not
-product changes:
+The first two patches are compatibility fixes for the pinned upstream commit,
+not product changes:
 
 - `missive-nondefault-port.patch` — strips the port from the host used in the
   JMAP redirect allowlist. Without it, `jmap_url = "http://stalwart:8080"`
@@ -41,6 +41,86 @@ product changes:
 The image defines `ENTRYPOINT ["/usr/local/bin/missive"]`; the OCI Adapter uses
 the step's `argv` as the container command, so an image with only CMD would
 make `argv = ["serve", ...]` the executable itself.
+
+## Ato identity header (`missive-ato-identity.patch`)
+
+Ato's app gateway removes client-sent identity headers and adds
+`X-Ato-Account: <the signed-in person's app account>` to every request it
+forwards to an app that opted into identity forwarding (only Ato's gateway can
+reach the app). This third patch, applied after the two compatibility patches,
+lets Missive accept that header: a person signed in to Ato opens their mailbox
+without Missive's login form and without Missive ever holding the person's
+mail password.
+
+It adds an optional `[ato_identity]` section to Missive's config. Without the
+section Missive behaves exactly as before — password login works and the header
+is ignored:
+
+```toml
+[ato_identity]
+account_header = "x-ato-account"
+impersonator = "ato-webmail-broker@example.test"
+impersonator_password_env = "MISSIVE_ATO_IMPERSONATOR_PASSWORD"
+```
+
+With the section present and the environment variable set, a request carrying
+the header is opened through a Stalwart master-user: the JMAP Basic-auth user
+name is `<account>%<impersonator>` and the password is the impersonator's. The
+header value must be 1–255 printable ASCII characters with exactly one `@` and
+no `%` (anything else answers 400), a JMAP connection failure answers 502, and
+the login form is never shown on the header path. If the environment variable is
+unset or empty, the section is ignored with one startup warning.
+
+The impersonator is a dedicated Stalwart principal that needs the
+`authenticate` and `impersonate` permissions for the header path, created for
+example with enabled permissions
+`{"@type":"Replace","enabledPermissions":{"authenticate":true,"impersonate":true}}`.
+It needs more for account provisioning (see below). The broker password is
+delivered per Run through the environment variable and is never stored in
+Missive's session.
+
+## Ato account provisioning and app passwords (`missive-ato-accounts.patch`)
+
+The fourth patch, applied after the identity patch, implements the mailbox side
+of Ato's account lifecycle. Only Ato's Coordinator calls it: the gateway never
+forwards a client request whose path starts with `/__ato/` to an OCI app. Every
+route answers JSON, and all of them are unregistered (404) unless
+`[ato_identity]` is configured.
+
+| Route | Result |
+|---|---|
+| `PUT /__ato/accounts/{account}` body `{"display_name": string\|null}` | 201 `{"account","created":true}` when created, 200 `{"account","created":false}` when the account already exists (idempotent), 403 `{"error":"domain_not_provisioned"}` unless the address domain is in `provision_domains`, 400 `{"error":"invalid_account"}` when the address does not have exactly one `@` or contains `%` |
+| `GET /__ato/accounts/{account}/app-passwords` | 200 `{"app_passwords":[{"id","description","created_at","expires_at"}]}`; never the secret |
+| `POST /__ato/accounts/{account}/app-passwords` body `{"description","expires_at"}` | 201 `{"id","description","created_at","expires_at","secret"}`; this is the only response that carries the secret |
+| `DELETE /__ato/accounts/{account}/app-passwords/{id}` | 204; an unknown id is also 204 so Ato can retry |
+| `DELETE /__ato/accounts/{account}/app-passwords` | 204 after revoking every app password (used when Ato suspends the account) |
+
+`MISSIVE_ATO_PROVISION_DOMAINS` (comma-separated) overrides
+`[ato_identity] provision_domains` when it is set, so the Mail app can set it
+per service: changing the variable replaces only Missive's definition, whereas
+editing the shared workspace config would change the workspace and restart the
+whole Mail app, Stalwart included.
+
+The provisioning PUT creates the Stalwart principal with a random 32-byte
+password from the OS CSPRNG; it is never logged, stored, or returned. The
+app-password routes run impersonated as `{account}` and require the account
+header to equal the `{account}` path segment (403
+`{"error":"account_mismatch"}` otherwise). Provider failures answer 502
+`{"error":"provider_error","detail":"<JMAP error type>"}`.
+
+The operator must give the impersonator principal Stalwart's **User role** plus
+the `impersonate`, `sysAccountCreate` and `sysDomainGet` permissions: the User
+role makes it a principal that may own accounts, and Stalwart refuses to create
+an account with more rights than its creator. `sysDomainGet` is always needed:
+the provisioning PUT looks the address domain up with `x:Domain/get` before it
+creates the account. Without it Stalwart answers `forbidden` and the route
+answers 502 with `"detail":"forbidden"`.
+
+The image digests in `images.lock` (and the pins in `capsule.toml`) are **not
+yet rebuilt** for the identity and account patches: they still name the image
+built from the two compatibility patches, which neither accepts the header nor
+serves `/__ato/`. Rebuild with `build-images.sh`, verify, and update both pins
+before the sample relies on them.
 
 ## Building
 
