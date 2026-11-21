@@ -500,6 +500,69 @@ pub struct ServiceEgress {
     pub expected_secret_value: Option<String>,
 }
 
+/// What one service of a live group needs beyond its definition to run the
+/// same container again: the network bindings it was given, and the auxiliary
+/// networks those bindings arrived on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServiceEgressState {
+    /// Name/address pairs injected for this service's authorized egress.
+    pub environment: BTreeMap<String, String>,
+    /// The exact original scalar a managed-embedding projection replaced.
+    pub expected_rebindings: BTreeMap<String, String>,
+    /// Auxiliary networks of the group this service is attached to.
+    pub networks: Vec<String>,
+}
+
+/// A launched group and the per-service launch state a later replacement needs.
+pub struct LaunchedServiceGroup {
+    pub group: OciServiceGroup,
+    pub egress: BTreeMap<String, ServiceEgressState>,
+}
+
+/// Why one service of a live group could not be replaced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceReplacementFailure {
+    /// Stable machine-readable code for the Runner's report.
+    code: &'static str,
+    message: String,
+}
+
+impl ServiceReplacementFailure {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    /// The code the Runner reports with the refusal.
+    pub fn code(&self) -> &'static str {
+        self.code
+    }
+
+    /// The detail the Runner reports with the code (no code prefix).
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl std::fmt::Display for ServiceReplacementFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for ServiceReplacementFailure {}
+
+/// One service to replace inside a live group: the definition to start next,
+/// the definition running now, and the launch state both must reproduce.
+pub struct ServiceReplacement<'a> {
+    pub name: &'a str,
+    pub next: &'a OciServiceV2,
+    pub previous: &'a OciServiceV2,
+    pub egress: Option<&'a ServiceEgressState>,
+}
+
 /// Start an `ato.runtime-launch-spec.v2` OCI service group: one `--internal`
 /// network per Run, one container per service in authored order, each after
 /// its own readiness; only the Surface Endpoint is forwarded to the host.
@@ -512,7 +575,7 @@ pub fn launch_service_group(
     owner: &OciOwner,
     egress: Vec<ServiceEgress>,
     budget: StopBudget,
-) -> Result<OciServiceGroup> {
+) -> Result<LaunchedServiceGroup> {
     ensure!(
         cfg!(target_os = "linux"),
         "OCI service groups require a native Linux Runner"
@@ -531,6 +594,7 @@ pub fn launch_service_group(
     );
     let runtime_root = lease_runtime_root(context)?;
     let mut egress = egress;
+    let mut egress_state = BTreeMap::new();
     let mut starts = Vec::with_capacity(group_spec.services.len());
     for service in &group_spec.services {
         let (mine, others): (Vec<_>, Vec<_>) = egress
@@ -555,6 +619,18 @@ pub fn launch_service_group(
                     .map(|value| (grant.environment_name.clone(), value.clone()))
             })
             .collect::<BTreeMap<_, _>>();
+        let networks = mine
+            .iter()
+            .map(|grant| grant.network.name().to_owned())
+            .collect();
+        egress_state.insert(
+            service.name.clone(),
+            ServiceEgressState {
+                environment: network_environment.clone(),
+                expected_rebindings: expected_rebindings.clone(),
+                networks,
+            },
+        );
         let adapter = DockerOciAdapter::new(service_oci_spec_rebinding(
             spec,
             service,
@@ -576,7 +652,7 @@ pub fn launch_service_group(
         });
     }
     let network = OciNetwork::create(&spec.context.run_id, &owner.labels(None)?)?;
-    start_service_group(
+    let group = start_service_group(
         network,
         context.workspace_root(),
         starts,
@@ -593,7 +669,162 @@ pub fn launch_service_group(
                 .context("service was not declared")?;
             wait_until_service_ready(service, context, group, probe)
         },
-    )
+    )?;
+    Ok(LaunchedServiceGroup {
+        group,
+        egress: egress_state,
+    })
+}
+
+/// Start one service of a live group on the group's own network: the same
+/// adapter spec the launch path builds, the same alias, the same Surface host
+/// port mapping, the same ownership labels, and the same auxiliary egress
+/// networks. Readiness is the service's own, exactly as at launch.
+#[allow(clippy::too_many_arguments)]
+fn start_group_service(
+    group: &mut OciServiceGroup,
+    index: usize,
+    spec: &RuntimeLaunchSpecV2,
+    service: &OciServiceV2,
+    egress: Option<&ServiceEgressState>,
+    context: &ResolvedRuntimeLaunchContext,
+    probe: &dyn ReadinessProbe,
+    owner: &OciOwner,
+) -> Result<()> {
+    let empty = BTreeMap::new();
+    let (environment, expected_rebindings) = match egress {
+        Some(egress) => (&egress.environment, &egress.expected_rebindings),
+        None => (&empty, &empty),
+    };
+    let adapter = DockerOciAdapter::new(service_oci_spec_rebinding(
+        spec,
+        service,
+        context,
+        owner,
+        environment,
+        expected_rebindings,
+    )?)?;
+    let runtime_root = lease_runtime_root(context)?.join(&service.name);
+    let handle = adapter.spawn_in_network(
+        context.workspace_root(),
+        &runtime_root,
+        group.network(),
+        Some(&service.name),
+    )?;
+    let container_id = handle.container_id().to_owned();
+    group.insert_service(index, service.name.clone(), handle);
+    if let Some(egress) = egress {
+        group.connect_service_networks(&container_id, &egress.networks)?;
+    }
+    wait_until_service_ready(service, context, group, probe)
+}
+
+/// Stop and forget whatever a failed start left under a service name. An
+/// unconfirmed stop keeps the handle in the group as a stop leftover, so the
+/// only identity of a possibly-live container is never dropped.
+fn remove_started_service(group: &mut OciServiceGroup, name: &str, budget: StopBudget) {
+    let Some((_, mut handle)) = group.take_service(name) else {
+        return;
+    };
+    if !handle.stop_budgeted(budget).is_confirmed() {
+        group.retain_stop_leftover(name.to_owned(), handle);
+    }
+}
+
+/// Replace one service of a live group without touching any other service.
+///
+/// The previous container is stopped with the Run's stop budget first, which
+/// also frees its Surface host port; the next definition is then started on
+/// the same network and alias and must become ready. On any failure the new
+/// container is stopped, the previous definition is started again (same
+/// procedure), and the error reports which of the two steps failed. The group
+/// keeps its start order, every other service's container, and its labels.
+#[allow(clippy::too_many_arguments)]
+pub fn replace_group_service(
+    group: &mut OciServiceGroup,
+    next_spec: &RuntimeLaunchSpecV2,
+    previous_spec: &RuntimeLaunchSpecV2,
+    replacement: ServiceReplacement<'_>,
+    context: &ResolvedRuntimeLaunchContext,
+    probe: &dyn ReadinessProbe,
+    owner: &OciOwner,
+    budget: StopBudget,
+) -> Result<String, ServiceReplacementFailure> {
+    let name = replacement.name;
+    if name != replacement.next.name || name != replacement.previous.name {
+        return Err(ServiceReplacementFailure::new(
+            "invalid_replacement",
+            "the replacement's service names do not agree",
+        ));
+    }
+    let (index, mut previous_handle) = group.take_service(name).ok_or_else(|| {
+        ServiceReplacementFailure::new(
+            "service_missing",
+            format!("service {name} is not part of the running group"),
+        )
+    })?;
+    let previous_stop = previous_handle.stop_budgeted(budget);
+    if !previous_stop.is_confirmed() {
+        // Without a confirmed stop the old container may still own the alias
+        // and the Surface host port; starting the next definition would race
+        // two containers for them. Keep the handle for the group's stop.
+        group.retain_stop_leftover(name.to_owned(), previous_handle);
+        return Err(ServiceReplacementFailure::new(
+            "old_service_not_stopped",
+            format!("the previous {name} container did not stop: {previous_stop:?}"),
+        ));
+    }
+    if let Err(error) = start_group_service(
+        group,
+        index,
+        next_spec,
+        replacement.next,
+        replacement.egress,
+        context,
+        probe,
+        owner,
+    ) {
+        // Whatever the failed start left is not the service: stop it before
+        // the old definition gets the alias and the host port back.
+        remove_started_service(group, name, budget);
+        let rollback = start_group_service(
+            group,
+            index,
+            previous_spec,
+            replacement.previous,
+            replacement.egress,
+            context,
+            probe,
+            owner,
+        );
+        return Err(match rollback {
+            Ok(()) => ServiceReplacementFailure::new(
+                "replacement_failed",
+                format!(
+                    "the next {name} definition failed: {error:#}; the previous definition is running again"
+                ),
+            ),
+            Err(rollback_error) => {
+                remove_started_service(group, name, budget);
+                ServiceReplacementFailure::new(
+                    "rollback_failed",
+                    format!(
+                        "the next {name} definition failed: {error:#}; rolling back also failed: {rollback_error:#}"
+                    ),
+                )
+            }
+        });
+    }
+    group
+        .services()
+        .find(|(service, _)| *service == name)
+        .map(|(_, handle)| handle.container_id().to_owned())
+        .ok_or_else(|| {
+            ServiceReplacementFailure::new(
+                "internal_error",
+                format!("the replacement {name} container was lost after it became ready"),
+            )
+        })
 }
 
 /// The container one service of a v2 group asks for.
