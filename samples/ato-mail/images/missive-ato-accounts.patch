@@ -1575,10 +1575,55 @@ index 0000000..5f58f56
 +    }
 +}
 diff --git a/src/ato_identity.rs b/src/ato_identity.rs
-index 21fff9d..f544a71 100644
+index 21fff9d..2ee8b46 100644
 --- a/src/ato_identity.rs
 +++ b/src/ato_identity.rs
-@@ -39,6 +39,7 @@ pub struct AtoIdentity {
+@@ -17,6 +17,11 @@
+ //! This module is opt-in. Without `[ato_identity]` in the config, or when the
+ //! impersonator password environment variable is unset or empty, the header is
+ //! ignored and Missive behaves exactly as before.
++//!
++//! `[ato_identity] provision_domains` is overridden by
++//! `MISSIVE_ATO_PROVISION_DOMAINS` when that variable is set, so the Mail app
++//! can set the domains per service instead of editing the shared workspace
++//! config.
+ 
+ use std::sync::Arc;
+ 
+@@ -33,12 +38,40 @@ use crate::session::MissiveSession;
+ /// Longest account value the header may carry.
+ const MAX_ACCOUNT_LEN: usize = 255;
+ 
++/// Environment variable overriding `[ato_identity] provision_domains`.
++const PROVISION_DOMAINS_ENV: &str = "MISSIVE_ATO_PROVISION_DOMAINS";
++
++/// Parse the comma-separated value of `PROVISION_DOMAINS_ENV`.
++///
++/// Entries are trimmed and lowercased and empty entries are ignored, so an
++/// empty value yields an empty list.
++fn parse_provision_domains(raw: &str) -> Vec<String> {
++    raw.split(',')
++        .map(str::trim)
++        .filter(|domain| !domain.is_empty())
++        .map(str::to_ascii_lowercase)
++        .collect()
++}
++
++/// Resolve the provisioning domains.
++///
++/// `env` is the value of `PROVISION_DOMAINS_ENV` when the variable is set. The
++/// variable wins whenever it is set (an empty value means no domains), and the
++/// configured list is used only when it is unset.
++fn resolve_provision_domains(configured: &[String], env: Option<&str>) -> Vec<String> {
++    match env {
++        Some(raw) => parse_provision_domains(raw),
++        None => configured.to_vec(),
++    }
++}
++
+ /// The resolved `[ato_identity]` section.
+ #[derive(Debug, Clone)]
+ pub struct AtoIdentity {
      header: HeaderName,
      impersonator: String,
      password: SecretString,
@@ -1586,15 +1631,26 @@ index 21fff9d..f544a71 100644
  }
  
  /// Request extension carrying the resolved identity, or none when the feature
-@@ -94,6 +95,7 @@ impl AtoIdentity {
+@@ -76,6 +109,10 @@ impl AtoIdentity {
+                 return None;
+             }
+         };
++        let provision_domains = resolve_provision_domains(
++            &config.provision_domains,
++            std::env::var(PROVISION_DOMAINS_ENV).ok().as_deref(),
++        );
+         let header = match HeaderName::from_bytes(config.account_header.as_bytes()) {
+             Ok(header) => header,
+             Err(_) => {
+@@ -94,6 +131,7 @@ impl AtoIdentity {
              header,
              impersonator: config.impersonator.clone(),
              password,
-+            provision_domains: config.provision_domains.clone(),
++            provision_domains,
          })
      }
  
-@@ -102,15 +104,42 @@ impl AtoIdentity {
+@@ -102,15 +140,42 @@ impl AtoIdentity {
          &self.header
      }
  
@@ -1638,7 +1694,7 @@ index 21fff9d..f544a71 100644
  }
  
  impl AtoIdentityState {
-@@ -255,6 +284,7 @@ mod tests {
+@@ -255,6 +320,7 @@ mod tests {
              header: HeaderName::from_bytes(account_header.as_bytes()).unwrap(),
              impersonator: "ato-webmail-broker@example.test".to_string(),
              password: SecretString::from("broker-password"),
@@ -1646,22 +1702,75 @@ index 21fff9d..f544a71 100644
          }
      }
  
+@@ -262,6 +328,18 @@ mod tests {
+         AtoIdentityState(Some(Arc::new(identity(account_header))))
+     }
+ 
++    fn identity_config(configured: &[&str]) -> AtoIdentityConfig {
++        AtoIdentityConfig {
++            account_header: "x-ato-account".to_string(),
++            impersonator: "ato-webmail-broker@example.test".to_string(),
++            impersonator_password_env: "MISSIVE_ATO_IMPERSONATOR_PASSWORD".to_string(),
++            provision_domains: configured
++                .iter()
++                .map(|domain| (*domain).to_string())
++                .collect(),
++        }
++    }
++
+     #[test]
+     fn account_header_accepts_a_normal_address() {
+         assert!(validate_account("alice@example.test").is_ok());
+@@ -370,4 +448,32 @@ mod tests {
+             Err(MissiveError::AtoIdentityHeaderInvalid)
+         ));
+     }
++
++    #[test]
++    fn provision_domains_fall_back_to_the_config_file_when_the_variable_is_unset() {
++        let config = identity_config(&["example.test", "mail.example.test"]);
++        assert_eq!(
++            resolve_provision_domains(&config.provision_domains, None),
++            vec!["example.test".to_string(), "mail.example.test".to_string()]
++        );
++    }
++
++    #[test]
++    fn provision_domains_are_read_from_the_environment_when_it_is_set() {
++        let config = identity_config(&["config.example.test"]);
++        assert_eq!(
++            resolve_provision_domains(
++                &config.provision_domains,
++                Some(" Example.Test , mail.example.test ,, ")
++            ),
++            vec!["example.test".to_string(), "mail.example.test".to_string()]
++        );
++    }
++
++    #[test]
++    fn an_empty_environment_value_means_no_provisioned_domains() {
++        let config = identity_config(&["example.test"]);
++        assert!(resolve_provision_domains(&config.provision_domains, Some("")).is_empty());
++        assert!(resolve_provision_domains(&config.provision_domains, Some("   ")).is_empty());
++    }
+ }
 diff --git a/src/config.rs b/src/config.rs
-index ceb7a23..70e07a7 100644
+index ceb7a23..c46e383 100644
 --- a/src/config.rs
 +++ b/src/config.rs
-@@ -51,6 +51,10 @@ pub struct AtoIdentityConfig {
+@@ -51,6 +51,11 @@ pub struct AtoIdentityConfig {
      pub impersonator: String,
      /// Environment variable holding the impersonator's password.
      pub impersonator_password_env: String,
-+    /// Domains `PUT /__ato/accounts/{account}` may provision. An empty list
-+    /// (the default) refuses every provisioning request with 403.
++    /// Domains `PUT /__ato/accounts/{account}` may provision when
++    /// `MISSIVE_ATO_PROVISION_DOMAINS` is unset. An empty list (the default)
++    /// refuses every provisioning request with 403.
 +    #[serde(default)]
 +    pub provision_domains: Vec<String>,
  }
  
  impl AtoIdentityConfig {
-@@ -176,4 +180,30 @@ impersonator_password_env = "MISSIVE_ATO_IMPERSONATOR_PASSWORD"
+@@ -176,4 +181,30 @@ impersonator_password_env = "MISSIVE_ATO_IMPERSONATOR_PASSWORD"
          let config = MissiveConfig::default();
          assert!(config.ato_identity.is_none());
      }

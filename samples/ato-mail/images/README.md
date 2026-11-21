@@ -94,6 +94,12 @@ route answers JSON, and all of them are unregistered (404) unless
 | `DELETE /__ato/accounts/{account}/app-passwords/{id}` | 204; an unknown id is also 204 so Ato can retry |
 | `DELETE /__ato/accounts/{account}/app-passwords` | 204 after revoking every app password (used when Ato suspends the account) |
 
+`MISSIVE_ATO_PROVISION_DOMAINS` (comma-separated) overrides
+`[ato_identity] provision_domains` when it is set, so the Mail app can set it
+per service: changing the variable replaces only Missive's definition, whereas
+editing the shared workspace config would change the workspace and restart the
+whole Mail app, Stalwart included.
+
 The provisioning PUT creates the Stalwart principal with a random 32-byte
 password from the OS CSPRNG; it is never logged, stored, or returned. The
 app-password routes run impersonated as `{account}` and require the account
