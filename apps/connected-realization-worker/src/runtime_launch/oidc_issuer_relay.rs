@@ -30,13 +30,14 @@ use serde_json::Value;
 use url::Url;
 
 use super::lease::NetworkAuthorization;
-use super::network_broker::{ConnectionGroup, ConnectionPermit};
+use super::network_broker::{ConnectionGroup, ConnectionPermit, EGRESS_BROKER_PORT};
 
 pub const RUNTIME_FEATURE: &str = "network=ato.oidc-issuer@1";
-/// Fixed listener port on the service's dedicated egress bridge gateway.
-/// Distinct from the TCP egress broker's (and managed embedding relay's) 1080
-/// so a service can hold this authority next to an ordinary egress grant.
-pub const RELAY_PORT: u16 = 8091;
+/// Fixed listener port on the service's dedicated egress bridge gateway. Each
+/// grant gets its own bridge (and gateway address), so the relay listens on
+/// the port the host firewall already admits on Runner egress bridges, like
+/// the managed embedding relay: no host rule is added for it.
+pub const RELAY_PORT: u16 = EGRESS_BROKER_PORT;
 /// The issuer path every Coordinator-minted issuer ends with.
 const ISSUER_PATH_SUFFIX: &str = "/v1/selfhost/oidc";
 const MAX_GRANTS: usize = 8;

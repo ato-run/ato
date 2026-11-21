@@ -25,17 +25,6 @@ const MAX_CONNECTIONS_PER_LISTENER: usize = 128;
 const EGRESS_BRIDGE_PATTERN: &str = "atoe+";
 pub(super) const EGRESS_BROKER_PORT: u16 = 1080;
 
-/// The fixed listeners Runner-owned egress bridges may reach, in installation
-/// order. The default deny is always installed last (and therefore checked
-/// last) so it stays the final rule.
-const EGRESS_FIREWALL_ACCEPTS: [(u16, &str); 2] = [
-    (EGRESS_BROKER_PORT, "ato-runtime-egress-broker"),
-    (
-        super::oidc_issuer_relay::RELAY_PORT,
-        "ato-runtime-oidc-issuer-relay",
-    ),
-];
-
 /// Install the host-wide admission boundary for Runner-created egress
 /// bridges. Docker's `--internal` route blocks forwarding; these INPUT rules
 /// additionally expose exactly the broker Port on interfaces that only an
@@ -53,10 +42,8 @@ pub fn prepare_egress_firewall() -> Result<()> {
     }
     // Install default deny first. If the exact accept rule cannot be added,
     // startup fails with the egress bridges still closed.
-    ensure_iptables_rule(None)?;
-    for accept in EGRESS_FIREWALL_ACCEPTS {
-        ensure_iptables_rule(Some(accept))?;
-    }
+    ensure_iptables_rule(false)?;
+    ensure_iptables_rule(true)?;
     Ok(())
 }
 
@@ -113,59 +100,45 @@ fn ordered_firewall_rules(listing: &str) -> bool {
     if !matches!(lines.next(), Some("-P INPUT ACCEPT" | "-P INPUT DROP")) {
         return false;
     }
-    // Rules inserted at position 1 read back in reverse installation order:
-    // the last-installed accept first, then the earlier accepts, then default
-    // deny. Comparing the full order is the contract the status socket
-    // reports, so a missing or reordered rule fails closed.
-    let mut expected = EGRESS_FIREWALL_ACCEPTS
-        .iter()
-        .rev()
-        .map(|accept| iptables_arguments("-A", Some(*accept)))
-        .collect::<Vec<_>>();
-    expected.push(iptables_arguments("-A", None));
-    expected.into_iter().all(|expected| {
-        lines
-            .next()
-            .is_some_and(|line| firewall_rule_matches(line, &expected))
+    [true, false].into_iter().all(|accept| {
+        lines.next().is_some_and(|line| {
+            let expected = iptables_arguments("-A", accept);
+            let tokens: Vec<&str> = line.split_ascii_whitespace().collect();
+            if !tokens.len().is_multiple_of(2) || !tokens.starts_with(&["-A", "INPUT"]) {
+                return false;
+            }
+            // iptables -S can print the implicit TCP match explicitly, and
+            // prints extension matches in backend-specific order. Compare all
+            // option/value pairs, rejecting extra matches, negation or targets.
+            let mut actual = Vec::new();
+            let mut implicit_tcp = false;
+            for pair in tokens[2..].chunks_exact(2) {
+                if accept && pair == ["-m", "tcp"] && !implicit_tcp {
+                    implicit_tcp = true;
+                    continue;
+                }
+                let value = if pair[0] == "--comment" {
+                    pair[1]
+                        .strip_prefix('"')
+                        .and_then(|v| v.strip_suffix('"'))
+                        .unwrap_or(pair[1])
+                } else {
+                    pair[1]
+                };
+                actual.push((pair[0], value));
+            }
+            let mut wanted: Vec<_> = expected[4..]
+                .chunks_exact(2)
+                .map(|pair| (pair[0].as_str(), pair[1].as_str()))
+                .collect();
+            actual.sort_unstable();
+            wanted.sort_unstable();
+            actual == wanted
+        })
     })
 }
 
-fn firewall_rule_matches(line: &str, expected: &[String]) -> bool {
-    let tokens: Vec<&str> = line.split_ascii_whitespace().collect();
-    if !tokens.len().is_multiple_of(2) || !tokens.starts_with(&["-A", "INPUT"]) {
-        return false;
-    }
-    // iptables -S can print the implicit TCP match explicitly, and prints
-    // extension matches in backend-specific order. Compare all option/value
-    // pairs, rejecting extra matches, negation or targets.
-    let accepts_tcp = expected.windows(2).any(|pair| pair == ["-p", "tcp"]);
-    let mut actual = Vec::new();
-    let mut implicit_tcp = false;
-    for pair in tokens[2..].chunks_exact(2) {
-        if accepts_tcp && pair == ["-m", "tcp"] && !implicit_tcp {
-            implicit_tcp = true;
-            continue;
-        }
-        let value = if pair[0] == "--comment" {
-            pair[1]
-                .strip_prefix('"')
-                .and_then(|v| v.strip_suffix('"'))
-                .unwrap_or(pair[1])
-        } else {
-            pair[1]
-        };
-        actual.push((pair[0], value));
-    }
-    let mut wanted: Vec<_> = expected[4..]
-        .chunks_exact(2)
-        .map(|pair| (pair[0].as_str(), pair[1].as_str()))
-        .collect();
-    actual.sort_unstable();
-    wanted.sort_unstable();
-    actual == wanted
-}
-
-fn ensure_iptables_rule(accept: Option<(u16, &str)>) -> Result<()> {
+fn ensure_iptables_rule(accept: bool) -> Result<()> {
     let check = iptables_arguments("-C", accept);
     let checked = iptables_output(&check).context("inspect TCP egress firewall rule")?;
     if checked.status.success() {
@@ -202,7 +175,7 @@ fn iptables_output(arguments: &[String]) -> Result<Output> {
     }
 }
 
-fn iptables_arguments(operation: &str, accept: Option<(u16, &str)>) -> Vec<String> {
+fn iptables_arguments(operation: &str, accept: bool) -> Vec<String> {
     let mut arguments = vec![
         "--wait".to_owned(),
         "5".to_owned(),
@@ -213,24 +186,26 @@ fn iptables_arguments(operation: &str, accept: Option<(u16, &str)>) -> Vec<Strin
         arguments.push("1".to_owned());
     }
     arguments.extend(["-i".to_owned(), EGRESS_BRIDGE_PATTERN.to_owned()]);
-    if let Some((port, _)) = accept {
+    if accept {
         arguments.extend([
             "-p".to_owned(),
             "tcp".to_owned(),
             "--dport".to_owned(),
-            port.to_string(),
+            EGRESS_BROKER_PORT.to_string(),
         ]);
     }
     arguments.extend([
         "-m".to_owned(),
         "comment".to_owned(),
         "--comment".to_owned(),
-        match accept {
-            Some((_, comment)) => comment.to_owned(),
-            None => "ato-runtime-egress-default-deny".to_owned(),
-        },
+        if accept {
+            "ato-runtime-egress-broker"
+        } else {
+            "ato-runtime-egress-default-deny"
+        }
+        .to_owned(),
         "-j".to_owned(),
-        if accept.is_some() { "ACCEPT" } else { "DROP" }.to_owned(),
+        if accept { "ACCEPT" } else { "DROP" }.to_owned(),
     ]);
     arguments
 }
@@ -1101,75 +1076,46 @@ mod tests {
     }
 
     #[test]
-    fn firewall_status_requires_the_exact_input_rule_order() {
-        let oidc = "-A INPUT -i atoe+ -p tcp -m tcp --dport 8091 -m comment --comment \"ato-runtime-oidc-issuer-relay\" -j ACCEPT";
-        let broker = "-A INPUT -i atoe+ -p tcp -m tcp --dport 1080 -m comment --comment \"ato-runtime-egress-broker\" -j ACCEPT";
+    fn firewall_status_requires_the_exact_first_two_input_rules() {
+        let accept = "-A INPUT -i atoe+ -p tcp -m tcp --dport 1080 -m comment --comment \"ato-runtime-egress-broker\" -j ACCEPT";
         let deny = "-A INPUT -i atoe+ -m comment --comment ato-runtime-egress-default-deny -j DROP";
-        let listing = format!("-P INPUT DROP\n{oidc}\n{broker}\n{deny}\n");
-        assert!(ordered_firewall_rules(&listing));
-        // iptables -S may omit the implicit TCP match.
+        let first = format!("-P INPUT DROP\n{accept}\n{deny}\n");
+        assert!(ordered_firewall_rules(&first));
         assert!(ordered_firewall_rules(
-            &listing
-                .replace("-m tcp --dport 8091", "--dport 8091")
-                .replace("-m tcp --dport 1080", "--dport 1080")
+            &first.replace("-m tcp --dport 1080", "--dport 1080")
         ));
         for invalid in [
-            format!("-P INPUT DROP\n-A INPUT -j ACCEPT\n{oidc}\n{broker}\n{deny}"),
-            format!("-P INPUT DROP\n{broker}\n{oidc}\n{deny}"),
-            format!("-P INPUT DROP\n{broker}\n{deny}"),
-            format!("-P INPUT DROP\n{deny}\n{oidc}\n{broker}"),
-            listing.replace("8091", "8092"),
-            listing.replace("1080", "1081"),
-            listing.replace("atoe+", "br+"),
-            listing.replace(" --dport 8091", ""),
-            listing.replace(" --dport 1080", ""),
-            listing.replace("-j ACCEPT", "-s 127.0.0.1 -j ACCEPT"),
-            listing.replace("-p tcp", "-p udp"),
+            first.replace("-P INPUT DROP", "-P INPUT DROP\n-A INPUT -j ACCEPT"),
+            first.replace(accept, deny),
+            format!("-P INPUT ACCEPT\n{deny}\n{accept}"),
+            first.replace("1080", "1081"),
+            first.replace("atoe+", "br+"),
+            first.replace(" --dport 1080", ""),
+            first.replace("-j ACCEPT", "-s 127.0.0.1 -j ACCEPT"),
+            first.replace("-p tcp", "-p udp"),
         ] {
             assert!(!ordered_firewall_rules(&invalid), "{invalid}");
         }
     }
 
     #[test]
-    fn firewall_system_unit_matches_the_installed_rule_shapes() {
+    fn firewall_system_unit_matches_the_two_existing_rule_shapes() {
         let unit = include_str!("../../../../deploy/selfhost/ato-egress-firewall.service");
         let installed: Vec<_> = unit
             .lines()
             .filter_map(|line| line.strip_prefix("ExecStart=/usr/sbin/iptables "))
             .collect();
-        let expected = [
-            iptables_arguments("-I", None).join(" "),
-            iptables_arguments(
-                "-I",
-                Some((EGRESS_BROKER_PORT, "ato-runtime-egress-broker")),
-            )
-            .join(" "),
-            iptables_arguments(
-                "-I",
-                Some((
-                    super::super::oidc_issuer_relay::RELAY_PORT,
-                    "ato-runtime-oidc-issuer-relay",
-                )),
-            )
-            .join(" "),
-        ];
+        let expected = [false, true].map(|accept| iptables_arguments("-I", accept).join(" "));
         assert_eq!(installed, expected);
     }
 
     #[test]
-    fn firewall_opens_only_the_two_runner_ports_before_default_deny() {
-        let accepts = EGRESS_FIREWALL_ACCEPTS.map(|accept| iptables_arguments("-I", Some(accept)));
-        for (accept, (port, _)) in accepts.iter().zip(EGRESS_FIREWALL_ACCEPTS) {
-            let port = port.to_string();
-            assert!(
-                accept
-                    .windows(2)
-                    .any(|part| part == ["--dport", port.as_str()])
-            );
-            assert!(accept.windows(2).any(|part| part == ["-i", "atoe+"]));
-            assert_eq!(accept.last().map(String::as_str), Some("ACCEPT"));
-        }
-        let deny = iptables_arguments("-I", None);
+    fn firewall_opens_only_the_broker_port_before_default_deny() {
+        let accept = iptables_arguments("-I", true);
+        let deny = iptables_arguments("-I", false);
+        assert!(accept.windows(2).any(|part| part == ["--dport", "1080"]));
+        assert!(accept.windows(2).any(|part| part == ["-i", "atoe+"]));
+        assert_eq!(accept.last().map(String::as_str), Some("ACCEPT"));
         assert!(!deny.iter().any(|part| part == "--dport"));
         assert_eq!(deny.last().map(String::as_str), Some("DROP"));
     }
