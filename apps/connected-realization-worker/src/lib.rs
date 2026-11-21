@@ -3211,6 +3211,14 @@ impl ConnectedWorker {
                 native.observation_addr(),
             );
         }
+        let observation_targets =
+            runtime_launch::service_replacement::ObservationTargets::new(observation_targets);
+        // The replacement bookkeeping holds the same handle: after it swaps a
+        // service's container it repoints that service's entries here, so the
+        // Coordinator's next contract observation reaches what is running now.
+        active
+            .service_replacement
+            .set_observation_targets(observation_targets.clone());
         let _surface_gate = TcpProxy::start_with_mux(
             self.config.surface_listen,
             ProxyTarget::Tcp(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)),
@@ -3558,7 +3566,8 @@ impl ConnectedWorker {
                 presentation_frame: presentation_frame.clone(),
                 gate: surface_gate,
                 guest_surface_gateway: true,
-                observation_targets: BTreeMap::new(),
+                observation_targets:
+                    runtime_launch::service_replacement::ObservationTargets::default(),
             }),
         )?;
         let execution_id = format!("vm:{}:{}", lease.run_id, lease.id);
@@ -6537,8 +6546,10 @@ struct SurfaceMux {
     /// runtime-launch workloads — there the path is just an app path and stays
     /// behind the gate.
     guest_surface_gateway: bool,
-    /// Lease-owned container addresses, reachable only through an observation-scoped proof.
-    observation_targets: BTreeMap<String, SocketAddr>,
+    /// Lease-owned container addresses, reachable only through an
+    /// observation-scoped proof. Shared with the Run's replacement bookkeeping,
+    /// which repoints a replaced service at the container now running.
+    observation_targets: runtime_launch::service_replacement::ObservationTargets,
 }
 
 impl TcpProxy {
@@ -6676,7 +6687,7 @@ fn proxy_dispatched(mut client: TcpStream, surface_target: &ProxyTarget, mux: &S
                         target
                     );
                     if let Ok(mut upstream) =
-                        TcpStream::connect_timeout(target, Duration::from_secs(5))
+                        TcpStream::connect_timeout(&target, Duration::from_secs(5))
                     {
                         let _ = upstream.set_read_timeout(Some(Duration::from_secs(5)));
                         if upstream.write_all(request.as_bytes()).is_ok() {
@@ -9192,7 +9203,8 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
                 presentation_frame: None,
                 gate,
                 guest_surface_gateway: false,
-                observation_targets: BTreeMap::new(),
+                observation_targets:
+                    runtime_launch::service_replacement::ObservationTargets::default(),
             }),
         )
         .unwrap();
@@ -9262,7 +9274,9 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
                 presentation_frame: None,
                 gate: SurfaceGate::Assertion(gate.clone()),
                 guest_surface_gateway: false,
-                observation_targets: BTreeMap::from([("backend.http".to_owned(), upstream)]),
+                observation_targets: runtime_launch::service_replacement::ObservationTargets::new(
+                    BTreeMap::from([("backend.http".to_owned(), upstream)]),
+                ),
             }),
         )
         .unwrap();
@@ -9534,7 +9548,8 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
                 presentation_frame: None,
                 gate: SurfaceGate::Assertion(gate),
                 guest_surface_gateway: true,
-                observation_targets: BTreeMap::new(),
+                observation_targets:
+                    runtime_launch::service_replacement::ObservationTargets::default(),
             }),
         )
         .unwrap();

@@ -15,6 +15,8 @@
 //! directive, the pre-flight validation, and the per-Run bookkeeping.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use ato_adapter_oci::{OciOwner, OciServiceGroup, StopBudget};
 use ato_ipc::runtime_launch_v2::{OciServiceV2, RuntimeLaunchSpec, RuntimeLaunchSpecV2};
@@ -200,6 +202,7 @@ fn validate(
     running: &BTreeMap<String, RunningService>,
     running_group: &BTreeSet<String>,
     context: &ResolvedRuntimeLaunchContext,
+    fixed_tcp_services: &BTreeSet<String>,
 ) -> Result<ValidatedReplacement, Refusal> {
     let spec = directive.launch_spec.service_group_spec().ok_or_else(|| {
         Refusal::new(
@@ -286,6 +289,14 @@ fn validate(
             .find(|service| service.name == *name)
             .expect("named services were checked")
             .clone();
+        if fixed_tcp_services.contains(name.as_str()) {
+            return Err(Refusal::new(
+                "fixed_tcp_service",
+                format!(
+                    "service {name} holds a fixed TCP allocation; a replacement would leave the allocation pointing at a stopped container"
+                ),
+            ));
+        }
         if !previous.state_keys.is_empty() || !next.state_keys.is_empty() {
             return Err(Refusal::new(
                 "stateful_service",
@@ -343,6 +354,43 @@ fn endpoint_shape(service: &OciServiceV2) -> Vec<(&str, u16)> {
     shape
 }
 
+/// The live container address behind every endpoint a gated Surface
+/// observes. The listener holds this handle for the Run's lifetime, and the
+/// service-replacement bookkeeping holds the same one: a replacement repoints
+/// the replaced service's entries at the container it leaves running, without
+/// restarting the listener or changing what is observable.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ObservationTargets(Arc<RwLock<BTreeMap<String, SocketAddr>>>);
+
+impl ObservationTargets {
+    pub(crate) fn new(targets: BTreeMap<String, SocketAddr>) -> Self {
+        Self(Arc::new(RwLock::new(targets)))
+    }
+
+    /// The container an observation-scoped request for this endpoint must
+    /// reach. A poisoned lock means a writer panicked; the last written
+    /// values stay readable rather than turning a live gate into a 403.
+    pub(crate) fn get(&self, endpoint: &str) -> Option<SocketAddr> {
+        self.0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(endpoint)
+            .copied()
+    }
+
+    /// Point every endpoint of `service` at `address`. Only a value changes:
+    /// an endpoint the Surface did not start observing is never added, so the
+    /// observable set stays exactly what the gate started with.
+    fn repoint_service(&self, service: &OciServiceV2, address: IpAddr) {
+        let mut targets = self.0.write().unwrap_or_else(PoisonError::into_inner);
+        for endpoint in &service.endpoints {
+            if let Some(target) = targets.get_mut(&endpoint.name) {
+                *target = SocketAddr::new(address, endpoint.guest_port);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct AppliedOutcome {
     report: ServiceReplacementReport,
@@ -358,6 +406,13 @@ pub struct ServiceReplacementRun {
     running: BTreeMap<String, RunningService>,
     egress: BTreeMap<String, ServiceEgressState>,
     applied: BTreeMap<String, AppliedOutcome>,
+    /// Services the lease's network authorization binds a fixed TCP
+    /// allocation to. The allocation is forwarded to the container, so a
+    /// replacement would leave it pointing at a stopped container.
+    fixed_tcp_services: BTreeSet<String>,
+    /// The live observation targets of the Run's gated Surface, once it
+    /// starts. A replacement repoints the endpoints it left running.
+    observation_targets: Option<ObservationTargets>,
 }
 
 /// What the control loop must do with one poll's directive.
@@ -380,6 +435,7 @@ impl ServiceReplacementRun {
     pub(crate) fn new(
         spec: &RuntimeLaunchSpecV2,
         egress: BTreeMap<String, ServiceEgressState>,
+        fixed_tcp_services: BTreeSet<String>,
     ) -> Self {
         let running = spec
             .service_group()
@@ -401,6 +457,8 @@ impl ServiceReplacementRun {
             running,
             egress,
             applied: BTreeMap::new(),
+            fixed_tcp_services,
+            observation_targets: None,
         }
     }
 
@@ -414,7 +472,15 @@ impl ServiceReplacementRun {
             running: BTreeMap::new(),
             egress: BTreeMap::new(),
             applied: BTreeMap::new(),
+            fixed_tcp_services: BTreeSet::new(),
+            observation_targets: None,
         }
+    }
+
+    /// The gated Surface started: it observes through this Run's live
+    /// targets, and a replacement repoints the replaced service there.
+    pub(crate) fn set_observation_targets(&mut self, targets: ObservationTargets) {
+        self.observation_targets = Some(targets);
     }
 
     /// Handle one control poll's optional directive. Applying happens at most
@@ -503,6 +569,7 @@ impl ServiceReplacementRun {
             &self.running,
             &running_group,
             context,
+            &self.fixed_tcp_services,
         )?;
         Ok(self.apply_validated(validated, group, context, probe, owner, budget))
     }
@@ -556,7 +623,7 @@ impl ServiceReplacementRun {
                 }
             }
         }
-        match failure {
+        let report = match failure {
             None => ServiceReplacementReport::completed(replaced),
             Some((code, message)) => {
                 // The report names every service the directive asked for and
@@ -576,6 +643,33 @@ impl ServiceReplacementRun {
                     .collect();
                 ServiceReplacementReport::failed(code, message, services)
             }
+        };
+        // A successful replacement and a rollback both leave a container
+        // running for every attempted service: point the gate at whichever
+        // container that is before the outcome reaches the Coordinator.
+        self.repoint_observation_targets(group, &names);
+        report
+    }
+
+    /// Point the gated Surface at the container each attempted service runs
+    /// now: the next definition after a successful replacement, the previous
+    /// one after a rollback. A service whose rollback also failed has no
+    /// running container, and keeps its last target rather than a false one.
+    fn repoint_observation_targets(&self, group: &OciServiceGroup, names: &[String]) {
+        let Some(targets) = self.observation_targets.as_ref() else {
+            return;
+        };
+        for name in names {
+            let Some((_, handle)) = group.services().find(|(service, _)| service == name) else {
+                continue;
+            };
+            let Some(address) = handle.container_address() else {
+                continue;
+            };
+            let Some(running) = self.running.get(name) else {
+                continue;
+            };
+            targets.repoint_service(&running.service, address);
         }
     }
 }
@@ -747,6 +841,15 @@ mod tests {
         next: serde_json::Value,
         names: &[&str],
     ) -> &'static str {
+        refusal_code_with_fixed_tcp(current, next, names, &BTreeSet::new())
+    }
+
+    fn refusal_code_with_fixed_tcp(
+        current: serde_json::Value,
+        next: serde_json::Value,
+        names: &[&str],
+        fixed_tcp_services: &BTreeSet<String>,
+    ) -> &'static str {
         let current = parse(current);
         let directive = ServiceReplacementDirective::parse(&directive(next, names)).unwrap();
         let (_root, context) = context();
@@ -756,6 +859,7 @@ mod tests {
             &running(&current),
             &running_group(&current),
             &context,
+            fixed_tcp_services,
         )
         .err()
         .expect("the validation must refuse")
@@ -783,6 +887,7 @@ mod tests {
             &running(&current),
             &running_group(&current),
             &context,
+            &BTreeSet::new(),
         )
         .expect("a stateless named service may be replaced");
         assert_eq!(validated.services.len(), 1);
@@ -910,6 +1015,7 @@ mod tests {
                 &running(&current),
                 &running_group(&current),
                 &context,
+                &BTreeSet::new(),
             )
             .err()
             .expect("a non-group Run cannot be updated by service")
@@ -947,6 +1053,7 @@ mod tests {
             &running(&current),
             &running_group(&current),
             &context,
+            &BTreeSet::new(),
         )
         .expect("a redeemed secret is available to the replacement");
     }
@@ -963,6 +1070,94 @@ mod tests {
         .expect("a malformed spec must be refused at parse time");
         assert_eq!(directive.code, "invalid_launch_spec");
         let _ = current;
+    }
+
+    #[test]
+    fn service_replacement_validation_refuses_a_fixed_tcp_service() {
+        let fixed_tcp = BTreeSet::from(["web".to_owned()]);
+        assert_eq!(
+            refusal_code_with_fixed_tcp(base_spec(RUN_ID), base_spec(RUN_ID), &["web"], &fixed_tcp),
+            "fixed_tcp_service"
+        );
+    }
+
+    #[test]
+    fn service_replacement_validation_accepts_a_fixed_tcp_grant_on_an_unnamed_service() {
+        let fixed_tcp = BTreeSet::from(["worker".to_owned()]);
+        let current = parse(base_spec(RUN_ID));
+        let directive = ServiceReplacementDirective::parse(&directive(base_spec(RUN_ID), &["web"]))
+            .expect("directive");
+        let (_root, context) = context();
+        validate(
+            RUN_ID,
+            &directive,
+            &running(&current),
+            &running_group(&current),
+            &context,
+            &fixed_tcp,
+        )
+        .expect("a fixed TCP grant on a service the directive does not name is not a blocker");
+    }
+
+    #[test]
+    fn observation_targets_follow_the_replaced_service_through_success_and_rollback() {
+        let spec = parse(base_spec(RUN_ID));
+        let view = spec.service_group_spec().expect("a group");
+        let web = view
+            .service_group()
+            .services
+            .iter()
+            .find(|service| service.name == "web")
+            .expect("the fixture web service")
+            .clone();
+        let worker_address: IpAddr = "10.0.0.3".parse().unwrap();
+        let old_web: IpAddr = "10.0.0.2".parse().unwrap();
+        let next_web: IpAddr = "10.0.0.9".parse().unwrap();
+        let restarted_web: IpAddr = "10.0.0.10".parse().unwrap();
+        let targets = ObservationTargets::new(BTreeMap::from([
+            (
+                "worker.http".to_owned(),
+                SocketAddr::new(worker_address, 9000),
+            ),
+            ("app.http".to_owned(), SocketAddr::new(old_web, 8000)),
+        ]));
+        // A successful replacement runs the next definition in a new container.
+        targets.repoint_service(&web, next_web);
+        assert_eq!(
+            targets.get("app.http"),
+            Some(SocketAddr::new(next_web, 8000))
+        );
+        assert_eq!(
+            targets.get("worker.http"),
+            Some(SocketAddr::new(worker_address, 9000)),
+            "the other service keeps the container it started with"
+        );
+        // A rollback starts the previous definition again, in yet another container.
+        targets.repoint_service(&web, restarted_web);
+        assert_eq!(
+            targets.get("app.http"),
+            Some(SocketAddr::new(restarted_web, 8000))
+        );
+        assert_eq!(
+            targets.get("worker.http"),
+            Some(SocketAddr::new(worker_address, 9000))
+        );
+    }
+
+    #[test]
+    fn observation_targets_never_add_an_endpoint_the_surface_did_not_start_with() {
+        let spec = parse(base_spec(RUN_ID));
+        let view = spec.service_group_spec().expect("a group");
+        let worker = view
+            .service_group()
+            .services
+            .iter()
+            .find(|service| service.name == "worker")
+            .expect("the fixture worker service")
+            .clone();
+        let targets = ObservationTargets::new(BTreeMap::new());
+        targets.repoint_service(&worker, "10.0.0.3".parse().unwrap());
+        assert_eq!(targets.get("worker.http"), None);
     }
 
     #[test]

@@ -1232,8 +1232,20 @@ pub fn start(
                     return Err(settle_failed_start(state, &resolved.prepared, &stop, error));
                 }
             };
-            let service_replacement =
-                super::service_replacement::ServiceReplacementRun::new(spec, launched_group.egress);
+            let fixed_tcp_services = network_authorization
+                .map(|authorization| {
+                    authorization
+                        .fixed_tcp
+                        .iter()
+                        .map(|allocation| allocation.service_id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let service_replacement = super::service_replacement::ServiceReplacementRun::new(
+                spec,
+                launched_group.egress,
+                fixed_tcp_services,
+            );
             return Ok(ActiveRun {
                 launched: ActiveWorkload::Oci(Box::new(LaunchedOci::Group(launched_group.group))),
                 resolved,
