@@ -19,6 +19,7 @@ pub mod network_broker;
 pub mod oidc_issuer_relay;
 pub mod recovery;
 pub mod service_group;
+pub mod service_replacement;
 pub mod session;
 pub mod state_artifact;
 pub mod volume;

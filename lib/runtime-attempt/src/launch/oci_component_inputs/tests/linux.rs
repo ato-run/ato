@@ -190,7 +190,8 @@ fn two_components_scope_model_inputs_save_outputs_and_require_all_k() {
         .unwrap();
     let probe = LoopbackReadinessProbe::new(client.clone());
     let started = Instant::now();
-    let group = launch_service_group(&spec, &context, &probe, &owner, vec![], budget()).unwrap();
+    let launched = launch_service_group(&spec, &context, &probe, &owner, vec![], budget()).unwrap();
+    let group = launched.group;
     let backend = group
         .services()
         .find(|(name, _)| *name == "backend")
@@ -315,8 +316,8 @@ fn two_components_scope_model_inputs_save_outputs_and_require_all_k() {
         ..owner
     };
     let error = match launch_service_group(&spec, &context, &probe, &owner, vec![], budget()) {
-        Ok(group) => {
-            let _ = group.stop_gracefully(budget());
+        Ok(launched) => {
+            let _ = launched.group.stop_gracefully(budget());
             panic!("failed sibling accepted")
         }
         Err(error) => error,

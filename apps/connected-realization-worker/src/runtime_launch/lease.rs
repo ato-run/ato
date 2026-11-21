@@ -1003,6 +1003,9 @@ pub enum ActiveWorkload {
 pub struct ActiveRun {
     pub launched: ActiveWorkload,
     pub resolved: ResolvedRun,
+    /// This Run's service-replacement bookkeeping. A non-group Run carries
+    /// the empty form so a directive is refused and reported, never applied.
+    pub service_replacement: super::service_replacement::ServiceReplacementRun,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1214,14 +1217,14 @@ pub fn start(
     let spec = match spec {
         RuntimeLaunchSpec::V1(spec) => spec,
         RuntimeLaunchSpec::V2(spec) | RuntimeLaunchSpec::V3 { view: spec, .. } => {
-            let group = match super::service_group::launch_service_group(
+            let launched_group = match super::service_group::launch_service_group(
                 spec,
                 &resolved.context,
                 probe,
                 owner,
                 network_authorization,
             ) {
-                Ok(group) => group,
+                Ok(launched) => launched,
                 Err(error) => {
                     // The group stopped what it had started on its way out;
                     // the labels confirm nothing of this lease survived.
@@ -1229,9 +1232,24 @@ pub fn start(
                     return Err(settle_failed_start(state, &resolved.prepared, &stop, error));
                 }
             };
+            let fixed_tcp_services = network_authorization
+                .map(|authorization| {
+                    authorization
+                        .fixed_tcp
+                        .iter()
+                        .map(|allocation| allocation.service_id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let service_replacement = super::service_replacement::ServiceReplacementRun::new(
+                spec,
+                launched_group.egress,
+                fixed_tcp_services,
+            );
             return Ok(ActiveRun {
-                launched: ActiveWorkload::Oci(Box::new(LaunchedOci::Group(group))),
+                launched: ActiveWorkload::Oci(Box::new(LaunchedOci::Group(launched_group.group))),
                 resolved,
+                service_replacement,
             });
         }
     };
@@ -1298,7 +1316,11 @@ pub fn start(
             ActiveWorkload::Oci(Box::new(LaunchedOci::Container(launched)))
         }
     };
-    Ok(ActiveRun { launched, resolved })
+    Ok(ActiveRun {
+        launched,
+        resolved,
+        service_replacement: super::service_replacement::ServiceReplacementRun::not_a_group(),
+    })
 }
 
 /// Same prepared writers and stop proof as ordinary OCI; only physical start
@@ -1387,6 +1409,7 @@ pub fn start_native(
         Ok(native) => Ok(ActiveRun {
             launched: ActiveWorkload::Native(Box::new(native)),
             resolved,
+            service_replacement: super::service_replacement::ServiceReplacementRun::not_a_group(),
         }),
         Err(failure) => Err(settle_failed_start(
             state,
@@ -1460,7 +1483,9 @@ pub fn finish(
     state: &dyn StateArtifactTransport,
     commit_request_id: &str,
 ) -> (FinishedStop, Result<Vec<RunStateOutcome>>) {
-    let ActiveRun { launched, resolved } = active;
+    let ActiveRun {
+        launched, resolved, ..
+    } = active;
     let budget = stop_budget(spec.lifecycle());
     let services = match launched {
         ActiveWorkload::Process(process) => vec![(

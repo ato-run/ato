@@ -186,6 +186,10 @@ fn runner_capabilities(
         // it is offered exactly where single-container OCI is, by a build that
         // understands ato.runtime-launch-spec.v2.
         capabilities.push(ato_ipc::oci_service_group::OCI_SERVICE_GROUP_RUNTIME_FEATURE);
+        // A live group can have one service replaced in place. Advertised
+        // where groups are offered, so the Coordinator sends the directive
+        // only to a Runner that can apply it.
+        capabilities.push(runtime_launch::service_replacement::SERVICE_REPLACEMENT_RUNTIME_FEATURE);
         capabilities.push("runtime_feature=component_contract_observation_v1");
         // Volumes are their own feature: a group Runner is not a volume
         // Runner until it understands v3 AND has a writable volume store.
@@ -1851,6 +1855,11 @@ struct RuntimeServeControls<'a> {
     /// Resolved before the workload started; the listener this slot creates
     /// must use exactly the gate the lease was admitted with.
     surface_gate: SurfaceGate,
+    /// The same readiness probe the launch used, so a replaced service waits
+    /// for exactly what the launcher waits for.
+    probe: &'a dyn runtime_launch::process_executor::ReadinessProbe,
+    /// The Run's ownership labels, reproduced on a replacement container.
+    owner: &'a ato_adapter_oci::OciOwner,
 }
 
 pub struct ConnectedWorker {
@@ -2169,6 +2178,16 @@ impl ConnectedWorker {
     }
 
     fn control_stop_requested_runtime(&self, lease_id: &str, native: bool) -> Result<bool> {
+        Ok(self
+            .poll_control(lease_id, native)?
+            .is_some_and(|control| control.stop_requested))
+    }
+
+    /// One control poll. A transient failure is not an answer: the Run stays
+    /// within its authorization window and the caller polls again next tick.
+    /// The whole response is returned because an ACTIVE Run may also carry a
+    /// service-replacement directive.
+    fn poll_control(&self, lease_id: &str, native: bool) -> Result<Option<ControlResponse>> {
         match self.api.control_with_timeout(
             lease_id,
             if native {
@@ -2177,13 +2196,13 @@ impl ConnectedWorker {
                 Duration::from_secs(60)
             },
         ) {
-            Ok(control) => Ok(control.stop_requested),
+            Ok(control) => Ok(Some(control)),
             Err(error) => match classify_comm_error(&error) {
                 CommErrorKind::Transient => {
                     eprintln!(
                         "[control] transient poll failure for lease {lease_id}; polling again next tick: {error:#}"
                     );
-                    Ok(false)
+                    Ok(None)
                 }
                 _ => Err(error),
             },
@@ -2910,7 +2929,7 @@ impl ConnectedWorker {
                 &process_host,
             )
         };
-        let active = match started {
+        let mut active = match started {
             Ok(active) => active,
             Err(mut failure) => {
                 entry.process = failure.process.take();
@@ -2978,13 +2997,15 @@ impl ConnectedWorker {
             self.serve_runtime_launch(
                 lease,
                 spec,
-                &active,
+                &mut active,
                 &endpoint_name,
                 RuntimeServeControls {
                     hard_deadline,
                     execution_authorization: execution_authorization.as_mut(),
                     network_authorization,
                     surface_gate,
+                    probe: &probe,
+                    owner,
                 },
             )
         });
@@ -3078,7 +3099,7 @@ impl ConnectedWorker {
         &self,
         lease: &ClaimedLease,
         spec: &ato_ipc::runtime_launch_v2::RuntimeLaunchSpec,
-        active: &runtime_launch::lease::ActiveRun,
+        active: &mut runtime_launch::lease::ActiveRun,
         endpoint_name: &str,
         controls: RuntimeServeControls<'_>,
     ) -> Result<String> {
@@ -3087,6 +3108,8 @@ impl ConnectedWorker {
             mut execution_authorization,
             network_authorization,
             surface_gate,
+            probe,
+            owner,
         } = controls;
         ensure!(
             hard_deadline.is_none_or(|deadline| Instant::now() < deadline),
@@ -3188,6 +3211,14 @@ impl ConnectedWorker {
                 native.observation_addr(),
             );
         }
+        let observation_targets =
+            runtime_launch::service_replacement::ObservationTargets::new(observation_targets);
+        // The replacement bookkeeping holds the same handle: after it swaps a
+        // service's container it repoints that service's entries here, so the
+        // Coordinator's next contract observation reaches what is running now.
+        active
+            .service_replacement
+            .set_observation_targets(observation_targets.clone());
         let _surface_gate = TcpProxy::start_with_mux(
             self.config.surface_listen,
             ProxyTarget::Tcp(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)),
@@ -3295,7 +3326,9 @@ impl ConnectedWorker {
         let mut verification_retry = Some(Instant::now());
         let mut stop = || -> Result<bool> {
             #[cfg(unix)]
-            if let Some(native) = native
+            // Re-derived from the live workload: a replacement may mutate the
+            // group, so the closure owns the only borrow of it.
+            if let runtime_launch::lease::ActiveWorkload::Native(native) = &active.launched
                 && native.is_finished()
             {
                 // A Terminal program that exits by itself has finished its
@@ -3319,17 +3352,28 @@ impl ConnectedWorker {
                 self.heartbeat_best_effort(1);
                 last_heartbeat.set(Instant::now());
             }
-            if poll_runtime_launch_control(
-                || self.control_stop_requested_runtime(&lease.id, native_lane),
-                || {
-                    self.refresh_runtime_authorization(
-                        &lease.id,
-                        execution_authorization.as_deref_mut(),
-                        native_lane,
-                    )
-                },
+            let control = self.poll_control(&lease.id, native_lane)?;
+            if control
+                .as_ref()
+                .is_some_and(|control| control.stop_requested)
+            {
+                return Ok(true);
+            }
+            // Renew authority before a replacement, which may block for a
+            // stop plus a readiness timeout: the Run must not lose its
+            // execution authorization while it is doing the update.
+            if self.refresh_runtime_authorization(
+                &lease.id,
+                execution_authorization.as_deref_mut(),
+                native_lane,
             )? {
                 return Ok(true);
+            }
+            if let Some(directive) = control
+                .as_ref()
+                .and_then(|control| control.service_replacement.as_ref())
+            {
+                self.apply_service_replacement(lease, spec, active, directive, probe, owner);
             }
             if verification_retry.is_some_and(|at| Instant::now() >= at) {
                 match process_run_verification::report(
@@ -3353,6 +3397,57 @@ impl ConnectedWorker {
         };
         runtime_launch::lease::wait_for_stop(&mut stop, Duration::from_millis(500), hard_deadline)?;
         Ok(execution_id)
+    }
+
+    /// Apply one control poll's service-replacement directive, if any, and
+    /// report the result. A report that does not reach the Coordinator is
+    /// retried on the next poll with the same outcome; the replacement itself
+    /// never runs twice.
+    fn apply_service_replacement(
+        &self,
+        lease: &ClaimedLease,
+        spec: &ato_ipc::runtime_launch_v2::RuntimeLaunchSpec,
+        active: &mut runtime_launch::lease::ActiveRun,
+        directive: &serde_json::Value,
+        probe: &dyn runtime_launch::process_executor::ReadinessProbe,
+        owner: &ato_adapter_oci::OciOwner,
+    ) {
+        use runtime_launch::service_replacement::ProcessedDirective;
+
+        let budget = runtime_launch::recovery::stop_budget(spec.lifecycle());
+        let runtime_launch::lease::ActiveRun {
+            launched,
+            resolved,
+            service_replacement,
+        } = active;
+        let group = match launched {
+            runtime_launch::lease::ActiveWorkload::Oci(launched) => match launched.as_mut() {
+                ato_runtime_attempt::launch::oci::LaunchedOci::Group(group) => Some(group),
+                _ => None,
+            },
+            _ => None,
+        };
+        match service_replacement.process(directive, group, &resolved.context, probe, owner, budget)
+        {
+            ProcessedDirective::Report {
+                replacement_id,
+                report,
+            } => match self
+                .api
+                .report_service_replacement(&lease.id, &replacement_id, &report)
+            {
+                Ok(()) => service_replacement.mark_reported(&replacement_id),
+                Err(error) => eprintln!(
+                    "[service-replacement] run={} replacement={} report missed; re-reporting next poll: {error:#}",
+                    lease.run_id, replacement_id
+                ),
+            },
+            ProcessedDirective::AlreadyReported => {}
+            ProcessedDirective::Unreportable(reason) => eprintln!(
+                "[service-replacement] run={} directive ignored: {reason}",
+                lease.run_id
+            ),
+        }
     }
 
     fn refresh_runtime_authorization(
@@ -3471,7 +3566,8 @@ impl ConnectedWorker {
                 presentation_frame: presentation_frame.clone(),
                 gate: surface_gate,
                 guest_surface_gateway: true,
-                observation_targets: BTreeMap::new(),
+                observation_targets:
+                    runtime_launch::service_replacement::ObservationTargets::default(),
             }),
         )?;
         let execution_id = format!("vm:{}:{}", lease.run_id, lease.id);
@@ -5322,7 +5418,13 @@ struct ActivityIceServer {
 
 #[derive(Debug, Deserialize)]
 struct ControlResponse {
+    #[serde(default)]
     stop_requested: bool,
+    /// Optional service-replacement directive. Kept as opaque JSON: a
+    /// malformed directive is refused with a report, not allowed to break the
+    /// control poll and end the Run.
+    #[serde(default)]
+    service_replacement: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5885,6 +5987,21 @@ impl HttpRunnerApi {
         )
     }
 
+    fn report_service_replacement(
+        &self,
+        lease_id: &str,
+        replacement_id: &str,
+        report: &runtime_launch::service_replacement::ServiceReplacementReport,
+    ) -> Result<()> {
+        self.post_control_plane(
+            format!(
+                "{}/v1/runner-leases/{lease_id}/service-replacements/{replacement_id}",
+                self.base
+            ),
+            report,
+        )
+    }
+
     fn activity_executor_session(
         &self,
         activity_id: &str,
@@ -6429,8 +6546,10 @@ struct SurfaceMux {
     /// runtime-launch workloads — there the path is just an app path and stays
     /// behind the gate.
     guest_surface_gateway: bool,
-    /// Lease-owned container addresses, reachable only through an observation-scoped proof.
-    observation_targets: BTreeMap<String, SocketAddr>,
+    /// Lease-owned container addresses, reachable only through an
+    /// observation-scoped proof. Shared with the Run's replacement bookkeeping,
+    /// which repoints a replaced service at the container now running.
+    observation_targets: runtime_launch::service_replacement::ObservationTargets,
 }
 
 impl TcpProxy {
@@ -6568,7 +6687,7 @@ fn proxy_dispatched(mut client: TcpStream, surface_target: &ProxyTarget, mux: &S
                         target
                     );
                     if let Ok(mut upstream) =
-                        TcpStream::connect_timeout(target, Duration::from_secs(5))
+                        TcpStream::connect_timeout(&target, Duration::from_secs(5))
                     {
                         let _ = upstream.set_read_timeout(Some(Duration::from_secs(5)));
                         if upstream.write_all(request.as_bytes()).is_ok() {
@@ -8719,6 +8838,18 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
                 .contains(&"runtime_feature=oci_service_group_v1")
         );
         assert!(!process_only.contains(&"runtime_feature=oci_service_group_v1"));
+        // A live group can be updated one service at a time; the capability is
+        // offered exactly where groups are.
+        assert!(
+            runner_capabilities(false, true, false, false, false).contains(
+                &runtime_launch::service_replacement::SERVICE_REPLACEMENT_RUNTIME_FEATURE
+            )
+        );
+        assert!(
+            !process_only.contains(
+                &runtime_launch::service_replacement::SERVICE_REPLACEMENT_RUNTIME_FEATURE
+            )
+        );
         assert!(
             runner_capabilities(false, true, false, false, false)
                 .contains(&ato_ipc::runtime_launch::OCI_USER_RUNTIME_FEATURE)
@@ -9072,7 +9203,8 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
                 presentation_frame: None,
                 gate,
                 guest_surface_gateway: false,
-                observation_targets: BTreeMap::new(),
+                observation_targets:
+                    runtime_launch::service_replacement::ObservationTargets::default(),
             }),
         )
         .unwrap();
@@ -9142,7 +9274,9 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
                 presentation_frame: None,
                 gate: SurfaceGate::Assertion(gate.clone()),
                 guest_surface_gateway: false,
-                observation_targets: BTreeMap::from([("backend.http".to_owned(), upstream)]),
+                observation_targets: runtime_launch::service_replacement::ObservationTargets::new(
+                    BTreeMap::from([("backend.http".to_owned(), upstream)]),
+                ),
             }),
         )
         .unwrap();
@@ -9414,7 +9548,8 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
                 presentation_frame: None,
                 gate: SurfaceGate::Assertion(gate),
                 guest_surface_gateway: true,
-                observation_targets: BTreeMap::new(),
+                observation_targets:
+                    runtime_launch::service_replacement::ObservationTargets::default(),
             }),
         )
         .unwrap();
@@ -10167,5 +10302,27 @@ mod native_ready_budget_tests {
             test_budget().max_attempts,
             "bounded retry must stop at its attempt cap"
         );
+    }
+
+    #[test]
+    fn service_replacement_control_parses_an_older_response_without_the_directive() {
+        let control: ControlResponse =
+            serde_json::from_str(r#"{"stop_requested":true}"#).expect("older response");
+        assert!(control.stop_requested);
+        assert!(control.service_replacement.is_none());
+    }
+
+    #[test]
+    fn service_replacement_control_parses_the_optional_directive() {
+        let control: ControlResponse = serde_json::from_str(
+            r#"{"stop_requested":false,"service_replacement":{"replacement_id":"srep_01","launch_spec":{"protocol":"ato.runtime-launch-spec.v2"},"services":["web"]}}"#,
+        )
+        .expect("response with the directive");
+        assert!(!control.stop_requested);
+        let directive = control
+            .service_replacement
+            .expect("the directive is kept for the ACTIVE loop");
+        assert_eq!(directive["replacement_id"], "srep_01");
+        assert_eq!(directive["services"][0], "web");
     }
 }

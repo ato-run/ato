@@ -1362,6 +1362,10 @@ pub struct OciServiceGroup {
     network: Option<OciNetwork>,
     auxiliary_networks: Vec<OciNetwork>,
     services: Vec<(String, OciHandle)>,
+    /// Containers a caller handed back after an unconfirmed or failed stop.
+    /// They are no longer part of the start order, but the group still owns
+    /// them: stopping the group retries each one before the network goes.
+    stop_leftovers: Vec<(String, OciHandle)>,
     retained_resources: Vec<Box<dyn Send>>,
     /// The relay this Run started because its daemon keeps the container
     /// network out of reach. Owned by the group: it is stopped, and its
@@ -1378,6 +1382,7 @@ impl OciServiceGroup {
             network: Some(network),
             auxiliary_networks: Vec::new(),
             services: Vec::new(),
+            stop_leftovers: Vec::new(),
             retained_resources: Vec::new(),
             relay: None,
             exposed: Vec::new(),
@@ -1462,6 +1467,56 @@ impl OciServiceGroup {
         self.services.push((name, handle));
     }
 
+    /// Remove one service from the start order and hand its container back.
+    /// The caller stops it (or hands it back through insert_service or
+    /// retain_stop_leftover); the group's order is otherwise unchanged, so
+    /// re-inserting at the returned index restores it exactly.
+    pub fn take_service(&mut self, name: &str) -> Option<(usize, OciHandle)> {
+        let index = self
+            .services
+            .iter()
+            .position(|(service, _)| service == name)?;
+        Some((index, self.services.remove(index).1))
+    }
+
+    /// Put a service back at index in the start order. Out-of-range indices
+    /// restore it at the end rather than panicking: a replacement never has a
+    /// reason to lose a container, and stop order is still reverse start order.
+    pub fn insert_service(&mut self, index: usize, name: String, handle: OciHandle) {
+        let index = index.min(self.services.len());
+        self.services.insert(index, (name, handle));
+    }
+
+    /// Keep a container the caller could not confirm stopped, without counting
+    /// it as one of the group's live services. The group's stop retries it and
+    /// reports it alongside the services, so a failed replacement cannot leak
+    /// a container this slot still owns.
+    pub fn retain_stop_leftover(&mut self, name: String, handle: OciHandle) {
+        self.stop_leftovers.push((name, handle));
+    }
+
+    /// Connect an already-running container of this group to the auxiliary
+    /// networks it owns, selected by name. Every name must belong to this
+    /// group: a caller reproducing a service's egress must not silently start
+    /// a container with no route.
+    pub fn connect_service_networks(
+        &self,
+        container_id: &str,
+        network_names: &[String],
+    ) -> Result<()> {
+        for name in network_names {
+            let network = self
+                .auxiliary_networks
+                .iter()
+                .find(|network| network.name() == name)
+                .with_context(|| {
+                    format!("service replacement names auxiliary network {name}, which this group does not own")
+                })?;
+            network.connect_container(container_id)?;
+        }
+        Ok(())
+    }
+
     /// Keep an additional internal bridge owned by this group. It is removed
     /// only after every service is confirmed stopped.
     pub fn push_auxiliary_network(&mut self, network: OciNetwork) {
@@ -1493,6 +1548,14 @@ impl OciServiceGroup {
         for network in self.auxiliary_networks.drain(..) {
             network.forget();
         }
+    }
+
+    /// Every container a caller handed back after an unconfirmed or failed
+    /// stop, named exactly as the caller handed it back.
+    pub fn stop_leftovers(&self) -> impl Iterator<Item = (&str, &OciHandle)> {
+        self.stop_leftovers
+            .iter()
+            .map(|(name, handle)| (name.as_str(), handle))
     }
 
     pub fn services(&self) -> impl Iterator<Item = (&str, &OciHandle)> {
@@ -1533,6 +1596,12 @@ impl OciServiceGroup {
         let mut services = Vec::new();
         while let Some((name, handle)) = self.services.pop() {
             services.push((name, handle.stop_gracefully(budget)));
+        }
+        // A container a replacement could not stop is retried after the live
+        // services: it is not serving, so reverse start order has nothing to
+        // say about it, and its retained identity is the only way to reach it.
+        while let Some((name, mut handle)) = self.stop_leftovers.pop() {
+            services.push((name, handle.stop_budgeted(budget)));
         }
         // Proxies first: they only carry connections to services that are
         // already gone, and closing them is what ends those threads.
@@ -1596,7 +1665,11 @@ impl GroupStopReport {
 
 impl Drop for OciServiceGroup {
     fn drop(&mut self) {
-        if !self.services.is_empty() || self.network.is_some() || self.relay.is_some() {
+        if !self.services.is_empty()
+            || !self.stop_leftovers.is_empty()
+            || self.network.is_some()
+            || self.relay.is_some()
+        {
             let _ = self.stop_all(StopBudget::DEFAULT);
         }
     }
@@ -1781,6 +1854,13 @@ impl OciHandle {
     /// stop. The forwarder goes first so no new request reaches a workload
     /// that is shutting down.
     pub fn stop_gracefully(mut self, budget: StopBudget) -> StopOutcome {
+        self.shutdown(budget)
+    }
+
+    /// stop_gracefully without consuming the handle. Used where the caller
+    /// must decide whether an unconfirmed stop keeps the handle (a service
+    /// replacement must not lose the only identity it has).
+    pub fn stop_budgeted(&mut self, budget: StopBudget) -> StopOutcome {
         self.shutdown(budget)
     }
 
