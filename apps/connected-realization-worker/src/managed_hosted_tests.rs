@@ -119,7 +119,8 @@ fn actual_managed_embedding_lease_materializes_redeems_verifies_and_stops() {
         include_str!("../tests/managed-hosted/app.py"),
     )
     .unwrap();
-    let artifact = runtime_launch::state_artifact::pack_state_tree(&source).unwrap();
+    let workspace = runtime_launch::state_artifact::pack_canonical_state_tree(&source).unwrap();
+    let workspace_digest = runtime_launch::state_artifact::state_artifact_digest(&workspace);
     let services:Vec<Value>=["backend","web"].into_iter().map(|name|json!({
         "name":name,"image_reference":image,"image_digest_ref":image_digest,"entrypoint":"/usr/local/bin/python3",
         "user":{"uid":65534,"gid":65534},"argv":["/app/app.py"],"working_dir":"/app","workspace_mount_path":"/app",
@@ -130,7 +131,7 @@ fn actual_managed_embedding_lease_materializes_redeems_verifies_and_stops() {
         "resource_limits":{"cpu_limit_millis":500,"memory_bytes":134217728,"pids_limit":32},
     })).collect();
     let raw = json!({"protocol":"ato.runtime-launch-spec.v2","context":{"compute_id":"sdk-compute","compute_schema_id":"sdk-schema","compute_instance_id":"sdk-instance","run_id":RUN},
-        "workspace":{"materialization_ref":artifact.digest(),"cwd_relative":""},"state_attachments":[],
+        "workspace":{"materialization_ref":workspace_digest,"cwd_relative":""},"state_attachments":[],
         "lifecycle":{"graceful_shutdown_ms":1000,"force_kill_after_ms":2000},
         "realization":{"kind":"oci_service_group","platform":"linux/amd64","services":services,"total_limits":{"cpu_limit_millis":1000,"memory_bytes":268435456,"pids_limit":64}}});
     let spec =
@@ -174,8 +175,8 @@ fn actual_managed_embedding_lease_materializes_redeems_verifies_and_stops() {
         stopped.clone(),
         ready.clone(),
     );
-    let bytes = artifact.bytes().to_vec();
-    let workspace_path = format!("/v1/runner-leases/{LEASE}/workspace/{}", artifact.digest());
+    let bytes = workspace;
+    let workspace_path = format!("/v1/runner-leases/{LEASE}/workspace/{workspace_digest}");
     let lease_prefix = format!("/v1/runner-leases/{LEASE}");
     let expected_execution_id = digest.clone();
     let binding = fixture.clone();

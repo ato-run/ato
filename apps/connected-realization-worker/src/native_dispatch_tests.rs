@@ -447,8 +447,9 @@ fn run_actual_native_dispatch_with_browser(
         )
         .unwrap();
     }
-    let artifact = runtime_launch::state_artifact::pack_state_tree(&source).unwrap();
-    spec.workspace.materialization_ref = artifact.digest().to_owned();
+    let workspace = runtime_launch::state_artifact::pack_canonical_state_tree(&source).unwrap();
+    spec.workspace.materialization_ref =
+        runtime_launch::state_artifact::state_artifact_digest(&workspace);
     let mut command = native_command(&spec, descriptor.clone(), &d.derivation_ref().unwrap());
     if let Some(fixture) = &browser {
         fixture.configure(&mut command);
@@ -491,7 +492,7 @@ fn run_actual_native_dispatch_with_browser(
         session_id: format!("run:{run_id}"),
         surface_id: descriptor.surface_id().unwrap().to_owned(),
     };
-    let bytes = artifact.bytes().to_vec();
+    let bytes = workspace;
     let digest = spec.canonical_digest().unwrap();
     let server_browser = browser.clone();
     let server_terminal = terminal_browser.clone();

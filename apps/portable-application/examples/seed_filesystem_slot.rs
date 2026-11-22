@@ -11,7 +11,9 @@ use ato_portable_application::{
     },
     validate_all_derivations,
 };
-use ato_runtime_attempt::launch::state_artifact::{STATE_ARTIFACT_FORMAT, pack_state_tree};
+use ato_runtime_attempt::launch::state_artifact::{
+    STATE_ARTIFACT_FORMAT, pack_canonical_state_tree, state_artifact_digest,
+};
 use clap::Parser;
 use tempfile::NamedTempFile;
 
@@ -58,11 +60,15 @@ fn main() -> Result<()> {
         !parent.starts_with(&root),
         "write the bundle outside its input tree"
     );
-    let state = pack_state_tree(&root)?;
+    // A bundle object is the canonical tar itself: the digest is its content
+    // address, and the encoding change belongs to the Runner transport, not to
+    // the portable bundle.
+    let state = pack_canonical_state_tree(&root)?;
+    let digest = state_artifact_digest(&state);
     let capture = HostedInstanceCaptureV1 {
         schema: HOSTED_CAPTURE_SCHEMA.into(),
         resources: vec![HostedCaptureResourceV1 {
-            object_id: state.digest().to_owned(),
+            object_id: digest.clone(),
             slot: args.slot,
             protocol: STATE_ARTIFACT_FORMAT.into(),
             size: state.len() as u64,
@@ -70,7 +76,7 @@ fn main() -> Result<()> {
         assets: Vec::new(),
         asset_bindings: Vec::new(),
     };
-    let objects = BTreeMap::from([(state.digest().to_owned(), state.bytes().to_vec())]);
+    let objects = BTreeMap::from([(digest, state)]);
     let (bytes, saved) = build_hosted_export(
         &source,
         Some(&capture),

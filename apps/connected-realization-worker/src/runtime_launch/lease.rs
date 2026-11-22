@@ -2105,7 +2105,11 @@ mod tests {
             ) -> Result<super::super::state_artifact::StateWriterGrant> {
                 panic!("a writer was taken for a launch this Runner cannot hold")
             }
-            fn download(&self, _: &str) -> Result<Vec<u8>> {
+            fn download(
+                &self,
+                _: &str,
+                _: &std::path::Path,
+            ) -> Result<super::super::state_artifact::DownloadedStateArtifact> {
                 unreachable!()
             }
             fn commit(

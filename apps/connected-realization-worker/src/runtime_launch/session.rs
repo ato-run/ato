@@ -31,7 +31,7 @@ mod tests {
     use super::super::lease::{ActiveRun, ActiveWorkload, ResolvedRun};
     use super::super::process_executor::{ProcessLaunchHost, ReadinessProbe};
     use super::super::resolved::{ResolvedStateAttachment, allocate_endpoint};
-    use super::super::state_artifact::{StateArtifact, state_artifact_digest};
+    use super::super::state_artifact::{ArtifactEncoding, DownloadedStateArtifact, StateArtifact};
     use super::*;
 
     // Exercise the Hosted production lifecycle, not a second start/finish
@@ -110,7 +110,7 @@ mod tests {
         fence: u64,
         head: Option<String>,
         head_digest: Option<String>,
-        artifacts: BTreeMap<String, Vec<u8>>,
+        artifacts: BTreeMap<String, (Vec<u8>, ArtifactEncoding)>,
         revisions: Vec<String>,
         /// Who currently holds the slot. `None` means free — which is what
         /// every failure path has to restore.
@@ -140,13 +140,18 @@ mod tests {
             })
         }
 
-        fn download(&self, artifact_digest: &str) -> Result<Vec<u8>> {
+        fn download(
+            &self,
+            artifact_digest: &str,
+            _scratch: &Path,
+        ) -> Result<DownloadedStateArtifact> {
             let plane = self.inner.lock().expect("lock");
-            plane
+            let (bytes, encoding) = plane
                 .artifacts
                 .get(artifact_digest)
                 .cloned()
-                .context("artifact is not in the store")
+                .context("artifact is not in the store")?;
+            DownloadedStateArtifact::from_encoded_bytes(encoding, bytes)
         }
 
         fn commit(
@@ -164,9 +169,10 @@ mod tests {
                 "commit does not descend from the head"
             );
             let revision = format!("isrev_{}", plane.revisions.len() + 1);
-            plane
-                .artifacts
-                .insert(artifact.digest().to_owned(), artifact.bytes().to_vec());
+            plane.artifacts.insert(
+                artifact.digest().to_owned(),
+                (artifact.encoded_bytes()?, artifact.encoding()),
+            );
             plane.head = Some(revision.clone());
             plane.head_digest = Some(artifact.digest().to_owned());
             plane.revisions.push(revision.clone());
@@ -414,8 +420,10 @@ while True:
             let inner = plane.inner.lock().expect("lock");
             inner.head_digest.clone().expect("head digest")
         };
-        let bytes = plane.download(&head).expect("download");
-        super::super::state_artifact::unpack_state_tree(&bytes, &head, restored.path())
+        plane
+            .download(&head, restored.path())
+            .expect("download")
+            .unpack(&head, restored.path())
             .expect("unpacks");
 
         let rows = std::process::Command::new("python3")
@@ -543,8 +551,8 @@ while True:
             b"not-really-sqlite"
         );
         assert_eq!(
-            state_artifact_digest(pack_state_tree(&target).expect("repacks").bytes()),
-            state_artifact_digest(artifact.bytes())
+            pack_state_tree(&target).expect("repacks").digest(),
+            artifact.digest()
         );
     }
 
