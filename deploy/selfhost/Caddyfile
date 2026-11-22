@@ -58,7 +58,7 @@
 	}
 	handle {
 		root * /srv
-		header Content-Security-Policy "connect-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'"
+		header Content-Security-Policy "connect-src 'self'; frame-src 'self' https://*.{$ATO_APPS_HOST}; base-uri 'self'; object-src 'none'; frame-ancestors 'none'"
 		try_files {path} /index.html
 		file_server
 	}
