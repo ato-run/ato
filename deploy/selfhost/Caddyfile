@@ -42,7 +42,21 @@
 		X-Content-Type-Options nosniff
 		Referrer-Policy same-origin
 	}
-	@api path /api /api/* /v1 /v1/* /health
+	# OAuth for external MCP clients is served by the API: the discovery
+	# documents, client registration, token and revocation, and the
+	# authorization request itself. The consent page the API sends the
+	# browser to (/oauth/authorize?request_id=...) is the web's own.
+	@api path /api /api/* /v1 /v1/* /health /.well-known/oauth-protected-resource /.well-known/oauth-protected-resource/* /.well-known/oauth-authorization-server /.well-known/oauth-authorization-server/* /oauth/register /oauth/token /oauth/revoke
+	@oauth_authorize {
+		path /oauth/authorize
+		not query request_id=*
+	}
+	handle @oauth_authorize {
+		reverse_proxy unix//run/ato-api/proxy.sock {
+			header_up X-Ato-Client-Address {remote}
+			import api_restart_retry
+		}
+	}
 	handle @api {
 		# header_up replaces anything the client sent with the TCP peer of
 		# this listener. On 8444, the PROXY protocol wrapper has already
