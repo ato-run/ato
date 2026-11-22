@@ -156,6 +156,10 @@ const BASE_RUNNER_CAPABILITIES: &[&str] = &[
     // neither, and the control plane refuses to place such a route there.
     ato_runtime_attempt::startup::STARTUP_JSON_RUNTIME_FEATURE,
     ato_runtime_attempt::startup::STARTUP_STATUS_RUNTIME_FEATURE,
+    // State artifacts are gzip encoded on the wire and accepted in either
+    // encoding. A Coordinator that cannot decode them must not place a
+    // state-backed Run here.
+    ato_runtime_attempt::launch::state_artifact::STATE_ARTIFACT_GZIP_CAPABILITY,
     runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND,
     NAMESPACE_ISOLATION_CAPABILITY,
     "isolation:runtime_launch=untrusted-v1",
@@ -8828,6 +8832,11 @@ globalThis.__ATO_WEBMCP_FIXTURE_TOOLS__=[{
         assert!(process_only.contains(&"execution_abi=process"));
         assert!(!process_only.contains(&"execution_abi=oci"));
         assert!(process_only.contains(&"isolation=untrusted-v1"));
+        // The state artifact encoding this build sends and accepts. It is not
+        // an OCI capability: every build of this Runner packs state.
+        assert!(process_only.contains(
+            &ato_runtime_attempt::launch::state_artifact::STATE_ARTIFACT_GZIP_CAPABILITY
+        ));
         assert!(process_only.contains(&"materializer=ato.materialize.vm.snapshot@1"));
         assert!(process_only.contains(&"backend=firecracker"));
         assert!(

@@ -10,9 +10,11 @@
 //! A workspace and a state attachment are both "a filesystem tree, addressed
 //! by the digest of its bytes". Giving the workspace a second format would
 //! mean a second packer, a second traversal check and a second set of limits —
-//! three more places for the two to disagree about what a tree is. So
-//! `pack_state_tree` / `unpack_state_tree` serve both, and the containment and
-//! atomicity properties they already carry apply here unchanged.
+//! three more places for the two to disagree about what a tree is. So the
+//! canonical tar packer and the workspace expander serve both, and the
+//! containment and atomicity properties they already carry apply here
+//! unchanged. A state artifact may additionally be gzip encoded on the wire; a
+//! workspace is always the identity tar, which is the form this path uses.
 //!
 //! The difference is direction, and it is enforced by the mount rather than by
 //! the format: a workspace is bound read-only into the sandbox, so nothing the
@@ -184,7 +186,7 @@ fn is_placeholder_digest(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::state_artifact::pack_state_tree;
+    use super::super::state_artifact::pack_canonical_state_tree;
     use super::*;
 
     struct Bytes(Vec<u8>);
@@ -204,9 +206,9 @@ mod tests {
     fn fixture() -> (tempfile::TempDir, Vec<u8>, String) {
         let source = tempfile::tempdir().expect("tempdir");
         std::fs::write(source.path().join("app.py"), "print('hi')\n").expect("write");
-        let artifact = pack_state_tree(source.path()).expect("packs");
-        let digest = artifact.digest().to_owned();
-        (source, artifact.bytes().to_vec(), digest)
+        let artifact = pack_canonical_state_tree(source.path()).expect("packs");
+        let digest = state_artifact_digest(&artifact);
+        (source, artifact, digest)
     }
 
     #[test]

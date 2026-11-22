@@ -862,6 +862,7 @@ dependencies = [
  "ato-sandbox",
  "ato-tls-observe",
  "base64 0.22.1",
+ "flate2",
  "fs2",
  "hex",
  "libc",

@@ -4,15 +4,17 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use super::super::state_artifact::{GrantedVolume, StateArtifact, StateWriterGrant};
+use super::super::state_artifact::{
+    DownloadedStateArtifact, GrantedVolume, StateArtifact, StateWriterGrant,
+};
 use super::super::volume::{VolumeStatus, VolumeStore};
 use super::*;
 
 const VOLUME: &str = "svol_01M2SVCGR0VP000000000000V1";
 const OTHER: &str = "svol_01M2SVCGR0VP000000000000V2";
 
-/// (fence, parent, request id, artifact bytes) of one commit.
-type Commit = (u64, Option<String>, String, Vec<u8>);
+/// (fence, parent, request id, digest of the committed tree) of one commit.
+type Commit = (u64, Option<String>, String, String);
 
 /// The control plane as the operation's grant describes it.
 struct Plane {
@@ -35,8 +37,9 @@ impl StateArtifactTransport for Plane {
             }),
         })
     }
-    fn download(&self, _digest: &str) -> Result<Vec<u8>> {
-        Ok(self.artifact.as_ref().unwrap().bytes().to_vec())
+    fn download(&self, _digest: &str, _scratch: &Path) -> Result<DownloadedStateArtifact> {
+        let artifact = self.artifact.as_ref().unwrap();
+        DownloadedStateArtifact::from_encoded_bytes(artifact.encoding(), artifact.encoded_bytes()?)
     }
     fn commit(
         &self,
@@ -50,7 +53,7 @@ impl StateArtifactTransport for Plane {
             writer_fence,
             parent.map(str::to_owned),
             request_id.to_owned(),
-            artifact.bytes().to_vec(),
+            artifact.digest().to_owned(),
         ));
         Ok("isrev_checkpoint".to_owned())
     }
@@ -116,13 +119,13 @@ fn a_checkpoint_commits_the_volume_from_its_granted_parent() {
     perform(&command(VolumeOperationKind::Checkpoint, 7), &store, &plane).unwrap();
     let commits = plane.commits.borrow();
     assert_eq!(commits.len(), 1);
-    let (fence, parent, request_id, bytes) = &commits[0];
+    let (fence, parent, request_id, digest) = &commits[0];
     assert_eq!(*fence, 7);
     assert_eq!(parent.as_deref(), Some("isrev_parent"));
     assert_eq!(request_id, "vop:vop_01M2SVCGR0VP0000000000000");
     // The committed artifact is exactly the volume's data.
     let packed = pack_state_tree(&store.data_dir(VOLUME).unwrap()).unwrap();
-    assert_eq!(bytes, packed.bytes());
+    assert_eq!(*digest, packed.digest());
     // Reading changes nothing.
     assert_eq!(read(&store, VOLUME), "A");
 }
