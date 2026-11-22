@@ -14,7 +14,7 @@ use ato_ipc::runtime_launch_v2::RuntimeLaunchSpecV2;
 use ato_runtime_attempt::launch::oci::{self as oci_launch, LaunchedServiceGroup, ServiceEgress};
 
 use super::managed_embedding_relay::{self, ManagedEmbeddingRelay};
-use super::oidc_issuer_relay::{self, OidcIssuerRelay};
+use super::oidc_issuer_relay::{self, OidcIssuerGrant, OidcIssuerRelay};
 use super::process_executor::ReadinessProbe;
 use super::resolved::ResolvedRuntimeLaunchContext;
 use super::{lease::NetworkAuthorization, network_broker::TcpEgressBroker};
@@ -90,10 +90,11 @@ pub fn launch_service_group(
                 &owner.labels(Some(&grant.service_id))?,
             )?;
             let relay = OidcIssuerRelay::start(network.gateway_address()?, grant)?;
+            let (environment_name, environment_value) = oidc_issuer_environment(grant, &relay);
             egress.push(ServiceEgress {
                 service: grant.service_id.clone(),
-                environment_name: grant.environment.clone(),
-                environment_value: relay.binding_value(),
+                environment_name,
+                environment_value,
                 expected_secret_value: None,
                 network,
                 guard: Box::new(relay),
@@ -108,6 +109,12 @@ pub fn launch_service_group(
         egress,
         super::recovery::stop_budget(&spec.lifecycle),
     )
+}
+
+/// The environment entry one OIDC issuer grant projects into its service: the
+/// name the Coordinator authorized and the relay's back-channel issuer base.
+fn oidc_issuer_environment(grant: &OidcIssuerGrant, relay: &OidcIssuerRelay) -> (String, String) {
+    (grant.environment.clone(), relay.binding_value())
 }
 
 #[cfg(test)]
@@ -127,6 +134,104 @@ mod tests {
     const VOLUME_FIXTURE: &str = include_str!(
         "../../../../lib/ipc/tests/fixtures/runtime-launch-spec-v3/service-group-volume.json"
     );
+    const GROUP_FIXTURE: &str = include_str!(
+        "../../../../lib/ipc/tests/fixtures/runtime-launch-spec-v2/service-group.json"
+    );
+
+    /// The v2 fixture's Surface service alone. A launch spec admits a group of
+    /// one so a single-container app that declares a network Binding rides this
+    /// same group launch and gets the same Runner-owned relays.
+    fn one_service_group() -> RuntimeLaunchSpecV2 {
+        let mut raw: serde_json::Value = serde_json::from_str(GROUP_FIXTURE).unwrap();
+        let services = raw["realization"]["services"].as_array_mut().unwrap();
+        services.retain(|service| service["name"] == "web");
+        let limits = services[0]["resource_limits"].clone();
+        raw["realization"]["total_limits"] = limits;
+        raw["state_attachments"] = serde_json::json!([]);
+        RuntimeLaunchSpec::parse(&serde_json::to_string(&raw).unwrap())
+            .expect("a one-service group is a valid launch spec")
+            .service_group_spec()
+            .expect("a group")
+            .clone()
+    }
+
+    /// The one service of that group receives its authorized issuer environment
+    /// and the launch starts the relay that value points at.
+    #[test]
+    fn a_one_service_group_with_an_oidc_issuer_grant_gets_its_environment_and_relay() {
+        let spec = one_service_group();
+        let group = spec.service_group();
+        assert_eq!(group.services.len(), 1);
+        let grant = oidc_issuer_relay::OidcIssuerGrant {
+            service_id: "web".to_owned(),
+            binding_id: "oidc_issuer".to_owned(),
+            environment: "ATO_BINDING_OIDC_ISSUER".to_owned(),
+            issuer: "https://issuer.example/v1/selfhost/oidc".to_owned(),
+        };
+        let authorization = NetworkAuthorization {
+            egress: Vec::new(),
+            fixed_tcp: Vec::new(),
+            managed_embeddings: Vec::new(),
+            oidc_issuers: vec![grant.clone()],
+        };
+        // The group guard admits a grant naming the only service.
+        oidc_issuer_relay::validate_group_grants(&spec, &authorization)
+            .expect("a one-service group authorizes its issuer relay");
+        // What the launch starts for that grant: loopback here, an ephemeral
+        // port instead of the fixed egress-bridge port.
+        let relay = OidcIssuerRelay::start_at("127.0.0.1:0".parse().unwrap(), &grant)
+            .expect("the issuer relay starts");
+        let (environment_name, environment_value) = oidc_issuer_environment(&grant, &relay);
+        assert_eq!(environment_name, "ATO_BINDING_OIDC_ISSUER");
+        assert!(
+            environment_value.starts_with("http://127.0.0.1:"),
+            "{environment_value}"
+        );
+        assert!(
+            environment_value.ends_with("/v1/selfhost/oidc"),
+            "{environment_value}"
+        );
+
+        // The container spec the group creates carries that exact entry, so the
+        // app's OIDC client discovers Ato's issuer through the relay.
+        let workspace = tempfile::tempdir().unwrap();
+        let context = ResolvedRuntimeLaunchContext::new(
+            workspace.path().to_path_buf(),
+            "",
+            BTreeMap::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![allocate_endpoint(
+                &EndpointV1 {
+                    name: "app.http".to_owned(),
+                    protocol: "http".to_owned(),
+                    guest_port: Some(8080),
+                    allocation: EndpointAllocationV1::Automatic,
+                    preferred_port: None,
+                },
+                18080,
+            )],
+        )
+        .expect("context");
+        let owner = OciOwner {
+            runner_id: "runner-a".to_owned(),
+            slot_id: "slot-1".to_owned(),
+            lease_id: "lease-1".to_owned(),
+            run_id: spec.context.run_id.clone(),
+            incarnation: "inc".to_owned(),
+        };
+        let network_environment =
+            BTreeMap::from([(environment_name.clone(), environment_value.clone())]);
+        let oci = service_oci_spec(
+            &spec,
+            &group.services[0],
+            &context,
+            &owner,
+            &network_environment,
+        )
+        .expect("service spec");
+        assert_eq!(oci.environment[&environment_name], environment_value);
+    }
 
     #[test]
     fn a_volume_is_mounted_into_its_one_service_and_no_other() {

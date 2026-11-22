@@ -2142,6 +2142,36 @@ mod tests {
         assert!(error.to_string().contains("no volume store"), "{error}");
     }
 
+    /// Networks (including the OIDC issuer relay) stay a group feature. The
+    /// single-step V1 path still admits no network authorization at all, and a
+    /// one-service group is a group, not a V1 route.
+    #[test]
+    fn a_v1_single_step_launch_still_refuses_network_authorization() {
+        let fixture = include_str!(
+            "../../../../lib/ipc/tests/fixtures/runtime-launch-spec-v1/fastapi-oci.json"
+        );
+        let spec = RuntimeLaunchSpecV1::parse(fixture).expect("v1 OCI fixture");
+        let mut command = command_for(&spec, &spec.canonical_digest().unwrap());
+        command.network_authorization = Some(NetworkAuthorization {
+            egress: Vec::new(),
+            fixed_tcp: Vec::new(),
+            managed_embeddings: Vec::new(),
+            oidc_issuers: vec![crate::runtime_launch::oidc_issuer_relay::OidcIssuerGrant {
+                service_id: "web".to_owned(),
+                binding_id: "oidc_issuer".to_owned(),
+                environment: "ATO_BINDING_OIDC_ISSUER".to_owned(),
+                issuer: "https://issuer.example/v1/selfhost/oidc".to_owned(),
+            }],
+        });
+        let error = verified_spec(&command).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("network authorization requires an OCI service group"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn an_unknown_lease_kind_has_no_handler_to_fall_back_to() {
         // Deserializing the envelope is the refusal: there is no catch-all

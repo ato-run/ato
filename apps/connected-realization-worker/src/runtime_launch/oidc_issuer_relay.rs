@@ -195,8 +195,15 @@ impl OidcIssuerRelay {
 
     pub fn start(gateway: IpAddr, grant: &OidcIssuerGrant) -> Result<Self> {
         ensure!(gateway.is_ipv4(), "OIDC issuer relay gateway must be IPv4");
+        Self::start_at(SocketAddr::new(gateway, RELAY_PORT), grant)
+    }
+
+    /// Bind on an exact endpoint. Production derives the endpoint from the
+    /// grant's egress-bridge gateway and [`RELAY_PORT`]; a test uses an
+    /// ephemeral loopback port so it never competes for the fixed one.
+    pub(crate) fn start_at(endpoint: SocketAddr, grant: &OidcIssuerGrant) -> Result<Self> {
         let client = Self::client()?;
-        Self::start_with_client(SocketAddr::new(gateway, RELAY_PORT), grant, client)
+        Self::start_with_client(endpoint, grant, client)
     }
 
     fn start_with_client(

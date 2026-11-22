@@ -162,6 +162,43 @@ fn volume_invariants_are_refused() {
     );
 }
 
+/// The fixture's Surface service alone, holding the volume: a launch spec
+/// admits a group of one, and its one state slot moves onto that service.
+fn one_service_volume_group() -> RuntimeLaunchSpecV3 {
+    let mut spec = volume();
+    let LaunchRealizationV2::OciServiceGroup(group) = &mut spec.realization;
+    group.services.retain(|service| service.name == "web");
+    group.services[0].state_keys = vec!["data".to_owned()];
+    group.total_limits = group.services[0].resource_limits.clone();
+    spec
+}
+
+#[test]
+fn a_one_service_volume_group_is_a_valid_launch_spec() {
+    let spec = one_service_volume_group();
+    spec.validate()
+        .expect("one service with a volume is a launch spec group");
+    assert_eq!(spec.service_group().services.len(), 1);
+    // The v2 group view an executor reads carries the same one service, with
+    // the volume's state key on it.
+    let view = spec.group_view();
+    assert_eq!(view.service_group().services.len(), 1);
+    assert_eq!(
+        view.service_group().services[0].state_keys,
+        ["data".to_owned()]
+    );
+    assert!(view.validate().is_ok());
+    // Zero services is still below the launch-spec minimum.
+    let error = refused(|spec| {
+        let LaunchRealizationV2::OciServiceGroup(group) = &mut spec.realization;
+        group.services.clear();
+    });
+    assert_eq!(
+        error.code(),
+        "ATO_ERR_RUNTIME_LAUNCH_SPEC_INVALID_SERVICE_GROUP"
+    );
+}
+
 #[test]
 fn the_spec_carries_no_host_path() {
     for fixture in [VOLUME_FIXTURE, SEEDED_FIXTURE] {

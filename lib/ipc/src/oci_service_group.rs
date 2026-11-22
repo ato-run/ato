@@ -1,12 +1,22 @@
-//! Bounds of an OCI service group: several `ato.oci@1` serving steps of ONE
+//! Bounds of an OCI service group: `ato.oci@1` serving steps of ONE
 //! Derivation, realized together on one Runner.
 //!
-//! These numbers are the single authority for both judges of a group — the
-//! portable profile that validates a bound Derivation and the launch spec a
-//! Runner re-validates — so the two can never admit different shapes.
+//! These numbers are the single authority for the bounds both judges of a
+//! group share — the portable profile that validates a bound Derivation and the
+//! launch spec a Runner re-validates — so the two can never admit different
+//! shapes. The minimum is the one bound they do NOT share: an authored route
+//! still needs two steps, while a launch spec may carry one so a
+//! single-container app that declares a network Binding rides the same group
+//! launch and gets the same Runner-owned relays.
 
-/// Fewest serving steps that make a group; one step is the ordinary OCI route.
+/// Fewest serving steps an authored route needs to become a group; one step is
+/// the ordinary OCI route and must not declare step-scoped fields.
 pub const OCI_SERVICE_GROUP_MIN_SERVICES: usize = 2;
+/// Fewest services a launch spec may carry. A group of one is still launched as
+/// a group on purpose: that is how a single-container app with a network
+/// Binding reaches the relay/egress path instead of the V1 route, which admits
+/// no network authorization.
+pub const RUNTIME_LAUNCH_SPEC_MIN_SERVICES: usize = 1;
 pub const OCI_SERVICE_GROUP_MAX_SERVICES: usize = 4;
 /// Ports across every service of the group, Surface included.
 pub const OCI_SERVICE_GROUP_MAX_PORTS: usize = 8;

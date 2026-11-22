@@ -1,4 +1,5 @@
 use super::*;
+use crate::oci_service_group::OCI_SERVICE_GROUP_MIN_SERVICES;
 use crate::runtime_launch::LaunchRealizationV1;
 
 const GROUP_FIXTURE: &str =
@@ -97,15 +98,54 @@ fn secrets_are_redeemed_across_services_but_scoped_to_one() {
     );
 }
 
+/// The fixture's Surface service alone. A launch spec admits a group of one so
+/// a single-container app that declares a network Binding gets the Runner's
+/// group launch (and its relays); authoring still refuses a one-step group.
+fn one_service_group() -> RuntimeLaunchSpecV2 {
+    let mut spec = group();
+    services(&mut spec).retain(|service| service.name == "web");
+    spec.state_attachments.clear();
+    match &mut spec.realization {
+        LaunchRealizationV2::OciServiceGroup(group) => {
+            group.total_limits = group.services[0].resource_limits.clone();
+        }
+    }
+    spec
+}
+
+#[test]
+fn a_one_service_group_is_a_valid_launch_spec() {
+    let spec = one_service_group();
+    spec.validate()
+        .expect("a launch spec admits one service as a group");
+    let group = spec.service_group();
+    assert_eq!(group.services.len(), 1);
+    let (service, surface) = group.surface().expect("the one Surface Endpoint");
+    assert_eq!(
+        (service.name.as_str(), surface.name.as_str()),
+        ("web", "app.http")
+    );
+    // Still one canonical form, digestible and re-readable.
+    let bytes = spec.canonical_bytes().unwrap();
+    assert_eq!(
+        RuntimeLaunchSpecV2::parse(std::str::from_utf8(&bytes).unwrap()).unwrap(),
+        spec
+    );
+    // The two judges keep different minima on purpose: the authored route needs
+    // two steps, the launch spec only one.
+    assert_eq!(OCI_SERVICE_GROUP_MIN_SERVICES, 2);
+    assert_eq!(RUNTIME_LAUNCH_SPEC_MIN_SERVICES, 1);
+}
+
 #[test]
 fn every_group_invariant_is_enforced() {
     type Mutation = Box<dyn FnOnce(&mut RuntimeLaunchSpecV2)>;
     let cases: Vec<(&str, &str, Mutation)> = vec![
         (
-            "one service",
+            "no service",
             "INVALID_SERVICE_GROUP",
             Box::new(|s| {
-                services(s).truncate(1);
+                services(s).clear();
             }),
         ),
         (
