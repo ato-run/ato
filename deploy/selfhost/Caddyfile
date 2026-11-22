@@ -18,6 +18,16 @@
 	}
 }
 
+# While ./start.sh recreates the API container, a request finds nothing to
+# connect to. Keep trying for a while instead of answering 502 at once: an App
+# page loads dozens of files through the API, and every one of them failed
+# during a restart. Only a request that could not be sent is retried, so a
+# request the API received is never sent twice.
+(api_restart_retry) {
+	lb_try_duration 30s
+	lb_try_interval 250ms
+}
+
 # The client address is set by the management listener that observed the
 # connection. It is removed from every request that goes anywhere else.
 (no_network_identity) {
@@ -39,6 +49,7 @@
 		# replaced that peer with the tailnet address.
 		reverse_proxy unix//run/ato-api/proxy.sock {
 			header_up X-Ato-Client-Address {remote}
+			import api_restart_retry
 		}
 	}
 	handle /assets/* {
@@ -69,7 +80,9 @@ https://{$ATO_HOST}:8444 {
 (apps) {
 	tls {$ATO_TLS:internal}
 	import no_network_identity
-	reverse_proxy api:8787
+	reverse_proxy api:8787 {
+		import api_restart_retry
+	}
 }
 
 https://*.{$ATO_APPS_HOST} {
