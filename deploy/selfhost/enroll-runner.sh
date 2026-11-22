@@ -3,18 +3,18 @@ set -euo pipefail
 umask 077
 
 # Runner 0 is the installation this distribution has always enrolled: its own
-# env file, state directory and surface target. Runner 1..3 are extra
+# env file, state directory and surface target. Runner 1..9 are extra
 # single-slot Runners on the same guest, each enrolled with its own identity.
 case "${1:-}" in
   "") runner=0 ;;
-  1 | 2 | 3) runner=$1 ;;
+  [1-9]) runner=$1 ;;
   *)
-    echo 'Usage: enroll-runner.sh [runner-number 1|2|3]' >&2
+    echo 'Usage: enroll-runner.sh [runner-number 1-9]' >&2
     exit 1
     ;;
 esac
 if [[ $# -gt 1 ]]; then
-  echo 'Usage: enroll-runner.sh [runner-number 1|2|3]' >&2
+  echo 'Usage: enroll-runner.sh [runner-number 1-9]' >&2
   exit 1
 fi
 
