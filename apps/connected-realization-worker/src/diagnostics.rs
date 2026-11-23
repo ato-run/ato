@@ -277,8 +277,10 @@ mod tests {
         );
         let advertised = capabilities["advertised_lease_kinds"].as_array().unwrap();
         assert!(
-            advertised.iter().all(|kind| kind == "runtime_launch"),
-            "explicit placement keeps runtime_launch only: {advertised:?}"
+            advertised.iter().all(|kind| kind
+                .as_str()
+                .is_some_and(crate::supports_explicit_runner_assignment)),
+            "explicit placement advertised a kind without assignment support: {advertised:?}"
         );
         let entries = capabilities["capabilities"].as_array().unwrap();
         assert!(entries.len() >= 4, "one entry per known capability");
@@ -309,6 +311,18 @@ mod tests {
         }
         // Explicit placement is named for the lease kind it removes, so the
         // operator sees the restriction instead of a vanished kind.
+        let legacy = entries
+            .iter()
+            .find(|entry| entry["capability"] == "lease_kind:portable_capsule_v2")
+            .expect("the legacy lease kind is always reported");
+        assert!(
+            legacy["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason["code"] == "explicit_placement_restricts_lease_kinds"),
+            "{legacy}"
+        );
         let volumes = entries
             .iter()
             .find(|entry| entry["capability"] == "lease_kind:state_volume_maintenance")
@@ -318,7 +332,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|reason| reason["code"] == "explicit_placement_restricts_lease_kinds"),
+                .any(|reason| reason["code"] == "state_volume_store_not_verified"),
             "{volumes}"
         );
     }

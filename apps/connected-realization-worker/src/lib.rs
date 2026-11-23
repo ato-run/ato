@@ -243,6 +243,11 @@ fn with_explicit_runtime_placement_capability(
 ) -> Vec<&'static str> {
     if required {
         capabilities.push(EXPLICIT_RUNNER_ASSIGNMENT_RUNTIME_FEATURE);
+        if capabilities.contains(&runtime_launch::volume::RUNNER_PERSISTENT_VOLUME_FEATURE) {
+            capabilities.push(
+                runtime_launch::volume_maintenance::EXPLICIT_STATE_VOLUME_MAINTENANCE_FEATURE,
+            );
+        }
     }
     capabilities
 }
@@ -253,20 +258,33 @@ pub(crate) fn explicit_runtime_placement_kinds(
     required: bool,
 ) -> Vec<&'static str> {
     if required {
-        kinds.retain(|kind| *kind == runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND);
+        kinds.retain(|kind| supports_explicit_runner_assignment(kind));
     }
     kinds
 }
+
+fn supports_explicit_runner_assignment(kind: &str) -> bool {
+    matches!(
+        kind,
+        runtime_launch::lease::RUNTIME_LAUNCH_LEASE_KIND
+            | runtime_launch::volume_maintenance::STATE_VOLUME_MAINTENANCE_LEASE_KIND
+    )
+}
+
 fn validate_explicit_runner_placement(config: &WorkerConfig, command: &LeaseCommand) -> Result<()> {
     match command {
         LeaseCommand::RuntimeLaunch(command) => command.validate_runner_assignment(
             &config.runner_id,
             config.require_explicit_runtime_placement,
         ),
+        LeaseCommand::VolumeMaintenance(command) => command.validate_runner_assignment(
+            &config.runner_id,
+            config.require_explicit_runtime_placement,
+        ),
         _ => {
             ensure!(
                 !config.require_explicit_runtime_placement,
-                "explicit_runner_assignment_unsupported_lease: explicit-only Runner accepts runtime_launch only"
+                "explicit_runner_assignment_unsupported_lease: this lease kind has no explicit placement"
             );
             Ok(())
         }
@@ -1483,6 +1501,32 @@ const ENROLLMENT_TOKEN_ENV: &str = "ATO_RUNNER_ENROLLMENT_TOKEN";
 #[cfg(unix)]
 const CREDENTIALS_FILE_ENV: &str = "ATO_RUNNER_CREDENTIALS_FILE";
 
+/// A site may provision its own CA before enrolling this machine. Reuse that
+/// trust configuration after enrollment as the same API issues all leases.
+fn control_plane_client(builder: reqwest::blocking::ClientBuilder) -> Result<Client> {
+    let path = std::env::var_os("ATO_RUNNER_API_CA_FILE");
+    build_control_plane_client(builder, path.as_deref().map(Path::new))
+}
+
+fn build_control_plane_client(
+    mut builder: reqwest::blocking::ClientBuilder,
+    ca_path: Option<&Path>,
+) -> Result<Client> {
+    if let Some(path) = ca_path {
+        let pem = fs::read(path).context("read ATO_RUNNER_API_CA_FILE")?;
+        let certificates = reqwest::Certificate::from_pem_bundle(&pem)
+            .context("parse ATO_RUNNER_API_CA_FILE as PEM certificates")?;
+        ensure!(
+            !certificates.is_empty(),
+            "ATO_RUNNER_API_CA_FILE contains no PEM certificate"
+        );
+        for certificate in certificates {
+            builder = builder.add_root_certificate(certificate);
+        }
+    }
+    Ok(builder.build()?)
+}
+
 /// Exchange an enrollment token for this Runner's identity, then start over
 /// without the token.
 ///
@@ -1545,7 +1589,7 @@ fn enroll_from_token(config: &WorkerConfig) -> Result<()> {
                 "signature": device_key.enrollment_signature(&token),
             });
         }
-        let response: serde_json::Value = reqwest::blocking::Client::new()
+        let response: serde_json::Value = control_plane_client(Client::builder())?
             .post(format!("{api_base}/v1/runners/enroll"))
             .json(&request_body)
             .send()
@@ -2295,6 +2339,10 @@ impl ConnectedWorker {
         lease: &ClaimedLease,
         command: &runtime_launch::volume_maintenance::VolumeMaintenanceLeaseCommand,
     ) -> Result<()> {
+        command.validate_runner_assignment(
+            &self.config.runner_id,
+            self.config.require_explicit_runtime_placement,
+        )?;
         ensure!(
             runtime_launch::recovery::slot_recovered(),
             "this Runner slot has not confirmed its previous Runs stopped; refusing volume work"
@@ -5401,7 +5449,7 @@ pub struct HttpRunnerApi {
 impl HttpRunnerApi {
     pub fn new(base: &str, runner_id: &str, token: &str) -> Result<Self> {
         Ok(Self {
-            client: Client::builder().timeout(Duration::from_secs(60)).build()?,
+            client: control_plane_client(Client::builder().timeout(Duration::from_secs(60)))?,
             base: base.trim_end_matches('/').to_owned(),
             runner_id: runner_id.to_owned(),
             token: token.to_owned(),
@@ -6779,6 +6827,26 @@ mod tests {
 
     use super::*;
     use tungstenite::client::IntoClientRequest;
+
+    #[test]
+    fn control_plane_ca_rejects_missing_or_invalid_certificates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("root.pem");
+        assert!(build_control_plane_client(Client::builder(), Some(&path)).is_err());
+        for contents in [
+            "not a certificate",
+            "-----BEGIN CERTIFICATE-----\nYQ==\n-----END CERTIFICATE-----",
+        ] {
+            fs::write(&path, contents).unwrap();
+            assert!(build_control_plane_client(Client::builder(), Some(&path)).is_err());
+        }
+        fs::write(
+            &path,
+            include_bytes!("../../../samples/stalwart-missive-mail/ca/fixture-ca.pem"),
+        )
+        .unwrap();
+        build_control_plane_client(Client::builder(), Some(&path)).unwrap();
+    }
 
     #[test]
     fn runner_version_reports_only_a_valid_explicit_build_commit() {

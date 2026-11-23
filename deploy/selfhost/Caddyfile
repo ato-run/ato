@@ -1,0 +1,166 @@
+{
+	admin off
+	auto_https disable_redirects
+	https_port 8443
+	skip_install_trust
+	# The public listener (:8443) never accepts PROXY protocol. Only the
+	# dedicated listener in the web container's namespace does, and only from
+	# tailscaled, which connects over loopback in that same namespace.
+	servers 127.0.0.1:8444 {
+		listener_wrappers {
+			proxy_protocol {
+				timeout 5s
+				allow 127.0.0.1/32
+				fallback_policy reject
+			}
+			tls
+		}
+	}
+}
+
+# While ./start.sh recreates the API container, a request finds nothing to
+# connect to. Keep trying for a while instead of answering 502 at once: an App
+# page loads dozens of files through the API, and every one of them failed
+# during a restart. Only a request that could not be sent is retried, so a
+# request the API received is never sent twice.
+(api_restart_retry) {
+	lb_try_duration 30s
+	lb_try_interval 250ms
+}
+
+# The client address is set by the management listener that observed the
+# connection. It is removed from every request that goes anywhere else.
+(no_network_identity) {
+	request_header -X-Ato-Client-Address
+}
+
+# Both management listeners serve the same site. Keep the handlers in one
+# snippet so the public and Tailscale paths cannot drift.
+(management) {
+	tls {$ATO_TLS:internal}
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy same-origin
+	}
+	# OAuth for external MCP clients is served by the API: the discovery
+	# documents, client registration, token and revocation, and the
+	# authorization request itself. The consent page the API sends the
+	# browser to (/oauth/authorize?request_id=...) is the web's own.
+	@api path /api /api/* /v1 /v1/* /health /.well-known/oauth-protected-resource /.well-known/oauth-protected-resource/* /.well-known/oauth-authorization-server /.well-known/oauth-authorization-server/* /oauth/register /oauth/token /oauth/revoke
+	@oauth_authorize {
+		path /oauth/authorize
+		not query request_id=*
+	}
+	handle @oauth_authorize {
+		reverse_proxy unix//run/ato-api/proxy.sock {
+			header_up X-Ato-Client-Address {remote}
+			import api_restart_retry
+		}
+	}
+	handle @api {
+		# header_up replaces anything the client sent with the TCP peer of
+		# this listener. On 8444, the PROXY protocol wrapper has already
+		# replaced that peer with the tailnet address.
+		reverse_proxy unix//run/ato-api/proxy.sock {
+			header_up X-Ato-Client-Address {remote}
+			import api_restart_retry
+		}
+	}
+	handle /assets/* {
+		root * /srv
+		# Hashed file names: a new build never reuses one.
+		header Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
+	handle {
+		root * /srv
+		header Content-Security-Policy "connect-src 'self'; frame-src 'self' https://*.{$ATO_APPS_HOST}; base-uri 'self'; object-src 'none'; frame-ancestors 'none'"
+		# The shell names the current assets: revalidate it every time (ETag),
+		# or a browser keeps a previous build after a deploy (2026-11-23).
+		header Cache-Control "no-cache"
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+https://{$ATO_HOST} {
+	import management
+}
+
+# This listener is not published. Only a process in the web container's
+# network namespace, currently the tailscale sidecar, can open it.
+https://{$ATO_HOST}:8444 {
+	bind 127.0.0.1
+	import management
+}
+
+# Applications get no network identity on either listener: the header is
+# removed and the API's TCP listener does not accept one.
+(apps) {
+	tls {$ATO_TLS:internal}
+	import no_network_identity
+	reverse_proxy api:8787 {
+		import api_restart_retry
+	}
+}
+
+https://*.{$ATO_APPS_HOST} {
+	import apps
+}
+
+# Tailnet clients reach every name through the dedicated listener, so the
+# applications are served there as well.
+https://*.{$ATO_APPS_HOST}:8444 {
+	bind 127.0.0.1
+	import apps
+}
+
+# Every Runner has its own site and socket. Runner 0 keeps the site this
+# distribution started with; Runners 1..3 are numbered in the URL and the
+# socket name. The body lives in one snippet so the four sites cannot drift.
+# Only the API reaches Runner 1..3, over the control network: compose.yaml
+# never publishes 8445..8447.
+(runner_ingress) {
+	tls {$ATO_TLS:internal}
+	import no_network_identity
+	@asserted header X-Ato-Run-Assertion *
+	handle @asserted {
+		# The API names the app's public host in X-Forwarded-Host. The app sees
+		# that name as Host, not this site's name, so its own Origin and
+		# redirect checks work. The gate still verifies the assertion first.
+		@public_host header X-Forwarded-Host *
+		reverse_proxy @public_host unix//run/ato-runner-ingress/{args[0]} {
+			header_up Host {http.request.header.X-Forwarded-Host}
+			header_up X-Forwarded-Host {http.request.header.X-Forwarded-Host}
+			# One request per upstream connection: the Runner gate verifies each
+			# request's assertion only when its connection opens.
+			transport http {
+				keepalive off
+			}
+		}
+		reverse_proxy unix//run/ato-runner-ingress/{args[0]} {
+			# One request per upstream connection: the Runner gate verifies each
+			# request's assertion only when its connection opens.
+			transport http {
+				keepalive off
+			}
+		}
+	}
+	respond 403
+}
+
+https://runner.{$ATO_HOST} {
+	import runner_ingress surface.sock
+}
+
+https://runner.{$ATO_HOST}:8445 {
+	import runner_ingress surface-1.sock
+}
+
+https://runner.{$ATO_HOST}:8446 {
+	import runner_ingress surface-2.sock
+}
+
+https://runner.{$ATO_HOST}:8447 {
+	import runner_ingress surface-3.sock
+}

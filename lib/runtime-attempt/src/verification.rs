@@ -14,7 +14,8 @@
 //! to the candidate afterwards is its owner's and is not in the receipt.
 
 use ato_formation::authoring::{
-    BoundContract, BoundDerivation, HTTP_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER, TlsStart,
+    BoundContract, BoundDerivation, HTTP_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER,
+    TLS_PINNED_ROOT_CONTRACT_VERIFIER, TlsStart,
 };
 use ato_formation::scenario::ScenarioObservation;
 use ato_formation::verify::{
@@ -123,6 +124,7 @@ pub struct RequiredObservation {
 /// A TLS observation the Contract needs, by logical port.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequiredTlsObservation {
+    pub root_ca_digest: Option<String>,
     pub requirement_id: String,
     pub port_id: String,
     /// The name the certificate must cover, exactly as K states it.
@@ -171,14 +173,24 @@ pub fn required_tls_observations(spec: &AttemptSpec<'_>) -> Vec<RequiredTlsObser
     spec.contract
         .requirements
         .iter()
-        .filter(|requirement| requirement.verifier == TLS_CONTRACT_VERIFIER)
+        .filter(|requirement| {
+            matches!(
+                requirement.verifier.as_str(),
+                TLS_CONTRACT_VERIFIER | TLS_PINNED_ROOT_CONTRACT_VERIFIER
+            )
+        })
         .filter_map(|requirement| {
+            ato_formation::authoring::required_tls_anchor(
+                &requirement.verifier,
+                requirement.digest.as_deref(),
+            )?;
             let port_id = requirement.port.clone()?;
             spec.derivation
                 .ports
                 .iter()
                 .any(|port| port.id == port_id)
                 .then(|| RequiredTlsObservation {
+                    root_ca_digest: requirement.digest.clone(),
                     requirement_id: requirement.id.clone(),
                     port_id,
                     server_name: requirement.server_name.clone().unwrap_or_default(),
@@ -1126,6 +1138,44 @@ mod tests {
             ObservationOutcome::Failed { code, .. } => code,
             other => panic!("expected a failure, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn pinned_tls_verdict_and_receipt_require_the_declared_anchor() {
+        let pin = format!("sha256:{}", "ab".repeat(32));
+        let mut requirement =
+            tls_requirement("imaps", "app.http", "mail.example", TlsStart::Implicit);
+        requirement.verifier = TLS_PINNED_ROOT_CONTRACT_VERIFIER.to_owned();
+        requirement.digest = Some(pin.clone());
+        let contract = tls_contract(requirement);
+        let mut facts = tls_facts("imaps", "app.http", "mail.example");
+        assert_eq!(
+            tls_failure_code(&contract, facts.clone()),
+            "tls_chain_untrusted"
+        );
+        facts.trust_anchor = pin;
+        let derivation = derivation();
+        let spec = spec(&contract, &derivation, TREE, None);
+        let mut point =
+            verify_observed_candidate(&spec, vec![], vec![], vec![facts], execution(), &hosted());
+        assert!(point.receipt.fully_satisfied);
+        let assignment = ato_formation::receipt::ReceiptAssignment {
+            contract: &contract,
+            contract_ref: "sha256:k",
+            derivation_ref: "sha256:d",
+            attempt_id: "attempt-1",
+            request_id: None,
+        };
+        ato_formation::receipt::accept_receipt(&assignment, &point.receipt).unwrap();
+        point.receipt.observations[0]
+            .evidence
+            .as_mut()
+            .unwrap()
+            .tls
+            .as_mut()
+            .unwrap()
+            .trust_anchor = "public-roots".to_owned();
+        assert!(ato_formation::receipt::accept_receipt(&assignment, &point.receipt).is_err());
     }
 
     #[test]

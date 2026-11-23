@@ -180,6 +180,45 @@ fn implicit_tls_reports_the_presented_certificate() {
 }
 
 #[test]
+fn a_pinned_root_checks_the_exact_der_and_the_server_chain() {
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let cert = fixture_der("valid/cert.pem", "CERTIFICATE");
+    let digest = format!("{:x}", Sha256::digest(&cert));
+    let pin = format!("sha256:{digest}");
+    let path = dir.path().join(format!("{digest}.der"));
+    assert!(TrustAnchors::from_pinned_directory(dir.path(), &pin).is_err());
+    assert!(TrustAnchors::from_pinned_directory(dir.path(), "../root").is_err());
+    std::fs::write(&path, b"unrelated root").unwrap();
+    assert!(TrustAnchors::from_pinned_directory(dir.path(), &pin).is_err());
+    std::fs::write(&path, cert).unwrap();
+    for (fixture, trusted) in [
+        ("valid", true),
+        ("high-serial", false),
+        ("wrong-name", false),
+    ] {
+        let address = spawn_tls_server(
+            &format!("{fixture}/cert.pem"),
+            &format!("{fixture}/key.pem"),
+        );
+        let facts = observe_tls(
+            address,
+            "mail.ato.test",
+            TlsStart::Implicit,
+            TIMEOUT,
+            TrustAnchors::from_pinned_directory(dir.path(), &pin).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(facts.trust_anchor, pin);
+        assert_eq!(facts.trusted, trusted);
+        if fixture == "high-serial" {
+            assert!(facts.server_name_matches && facts.within_validity);
+        }
+        assert_eq!(facts.handshake_completed, trusted);
+    }
+}
+
+#[test]
 fn public_roots_report_an_untrusted_self_signed_chain() {
     let address = spawn_tls_server("valid/cert.pem", "valid/key.pem");
     let facts = observe_tls(

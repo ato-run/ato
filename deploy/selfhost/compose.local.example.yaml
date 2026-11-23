@@ -1,0 +1,26 @@
+# Copy to compose.local.yaml and keep only what this host needs. ./stack adds
+# the file to every command; an update of the distribution never touches it.
+#
+# Sign-in and mail settings (ATO_AUTH_*, ATO_MAIL*, ATO_FIXED_TCP_BIND_ADDRESSES)
+# go in .env: compose.yaml passes each one to the API when it is set there.
+services:
+  api:
+    # The API's network has no route out. Its mail server name must resolve to
+    # an address on the control bridge's host side (CONTROL_GATEWAY, from
+    # `docker network inspect ato-selfhost_control`):
+    #   ATO_MAIL=ato_mail  the Runner's fixed TCP listener for the Mail app
+    #   ATO_MAIL=smtp      the forwarder installed by install-smtp-egress.sh
+    # The validator shares this file, so its TLS observations use the same name.
+    extra_hosts:
+      - "mail.example.org:172.18.0.1"
+    environment:
+      ATO_MAIL_SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+      # Only for a mail server whose certificate is not publicly trusted.
+      ATO_MAIL_SMTP_CA_FILE: /run/ato-mail-smtp-ca/root.pem
+    secrets: [smtp_password]
+    volumes:
+      - ./.tmp/mail-smtp-ca:/run/ato-mail-smtp-ca:ro
+secrets:
+  smtp_password:
+    # One line, readable by the API's user (UID 1000) and nobody else.
+    file: ./.tmp/secrets/smtp_password

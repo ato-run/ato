@@ -9,7 +9,7 @@ records why each image differs from its upstream.
 | Sample pin (capsule.toml) | Built from |
 |---|---|
 | `ghcr.io/koh0920/stalwart-staging@sha256:25723c49…629b` | `Dockerfile.stalwart` ← `docker.io/stalwartlabs/stalwart@sha256:d898e81b…cdfe` (v0.16.22, linux/amd64) |
-| `ghcr.io/koh0920/govcraft-missive@sha256:3dc89054…bc7c` | `Dockerfile.missive` ← Govcraft/missive commit `7716106b6c4638426169dac264657437914bbe7f` + the two patches here |
+| `ghcr.io/koh0920/govcraft-missive@sha256:3dc89054…bc7c` | `Dockerfile.missive` ← Govcraft/missive commit `7716106b6c4638426169dac264657437914bbe7f` + the two JMAP compatibility patches |
 
 ## Why the Stalwart image is a thin layer
 
@@ -41,6 +41,19 @@ product changes:
 The image defines `ENTRYPOINT ["/usr/local/bin/missive"]`; the OCI Adapter uses
 the step's `argv` as the container command, so an image with only CMD would
 make `argv = ["serve", ...]` the executable itself.
+
+## セルフホスト用のブラウザ資産
+
+`Dockerfile.missive` は `missive-offline-assets.patch` を適用し、HTMX 2.0.4 と
+SSE 拡張 2.2.2 を Missive の `/static/vendor/` から配信します。Docker ビルドで
+npm の tarball の SHA-256 を照合し、各配布物の 0BSD LICENSE を同じディレクトリに
+収録します。アカウントメニューは HTML の details/summary、ダイアログは dialog、
+フォントはローカルのフォールバックを利用します。受信箱の描画には外部 CDN を
+必要としません。
+
+ビルド後に出力される linux/amd64 の manifest digest を検証用 Capsule の
+`missive` サービスに固定してから pack します。既存の `3dc89054…bc7c` は
+以前の CDN を参照する公開済みバイナリを指します。
 
 ## Building
 

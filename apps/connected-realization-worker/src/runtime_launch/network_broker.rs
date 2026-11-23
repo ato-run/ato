@@ -35,11 +35,107 @@ pub fn prepare_egress_firewall() -> Result<()> {
         cfg!(target_os = "linux"),
         "TCP egress firewall requires a native Linux Runner"
     );
+    match std::env::var_os("ATO_RUNNER_EGRESS_FIREWALL_MODE").as_deref() {
+        Some(mode) if mode == "verify-only" => return verify_operator_firewall(),
+        None => {}
+        Some(_) => anyhow::bail!("unsupported ATO_RUNNER_EGRESS_FIREWALL_MODE"),
+    }
     // Install default deny first. If the exact accept rule cannot be added,
     // startup fails with the egress bridges still closed.
     ensure_iptables_rule(false)?;
     ensure_iptables_rule(true)?;
     Ok(())
+}
+
+/// Non-privileged admission. The fixed socket in /run is created by PID 1.
+/// The Runner sends no parameters and cannot ask the service to change a rule.
+#[cfg(target_os = "linux")]
+fn verify_operator_firewall() -> Result<()> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    use std::os::unix::net::UnixStream;
+    let dir = std::fs::symlink_metadata("/run")?;
+    ensure!(
+        dir.is_dir() && dir.uid() == 0 && dir.mode() & 0o022 == 0,
+        "untrusted firewall status directory"
+    );
+    let path = "/run/ato-egress-firewall-status.sock";
+    let socket = std::fs::symlink_metadata(path)?;
+    ensure!(
+        socket.file_type().is_socket() && socket.uid() == 0,
+        "untrusted firewall status socket"
+    );
+    let connection = UnixStream::connect(path)?;
+    connection.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut reply = Vec::new();
+    connection.take(16).read_to_end(&mut reply)?;
+    ensure!(
+        reply == b"ready\n",
+        "required host INPUT rules are absent or out of order"
+    );
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn verify_operator_firewall() -> Result<()> {
+    anyhow::bail!("firewall inspection requires Linux")
+}
+
+/// Entry point for the root-owned socket service. Its only kernel operation
+/// is listing the INPUT chain. Only a boolean verdict leaves the service.
+pub fn inspect_operator_firewall() -> Result<()> {
+    let output = Command::new("/usr/sbin/iptables")
+        .env_clear()
+        .args(["--wait", "2", "-S", "INPUT"])
+        .output()?;
+    ensure!(output.status.success(), "could not read host INPUT rules");
+    ensure!(
+        ordered_firewall_rules(std::str::from_utf8(&output.stdout)?),
+        "required host INPUT rules are absent or out of order"
+    );
+    Ok(())
+}
+
+fn ordered_firewall_rules(listing: &str) -> bool {
+    let mut lines = listing.lines();
+    if !matches!(lines.next(), Some("-P INPUT ACCEPT" | "-P INPUT DROP")) {
+        return false;
+    }
+    [true, false].into_iter().all(|accept| {
+        lines.next().is_some_and(|line| {
+            let expected = iptables_arguments("-A", accept);
+            let tokens: Vec<&str> = line.split_ascii_whitespace().collect();
+            if !tokens.len().is_multiple_of(2) || !tokens.starts_with(&["-A", "INPUT"]) {
+                return false;
+            }
+            // iptables -S can print the implicit TCP match explicitly, and
+            // prints extension matches in backend-specific order. Compare all
+            // option/value pairs, rejecting extra matches, negation or targets.
+            let mut actual = Vec::new();
+            let mut implicit_tcp = false;
+            for pair in tokens[2..].chunks_exact(2) {
+                if accept && pair == ["-m", "tcp"] && !implicit_tcp {
+                    implicit_tcp = true;
+                    continue;
+                }
+                let value = if pair[0] == "--comment" {
+                    pair[1]
+                        .strip_prefix('"')
+                        .and_then(|v| v.strip_suffix('"'))
+                        .unwrap_or(pair[1])
+                } else {
+                    pair[1]
+                };
+                actual.push((pair[0], value));
+            }
+            let mut wanted: Vec<_> = expected[4..]
+                .chunks_exact(2)
+                .map(|pair| (pair[0].as_str(), pair[1].as_str()))
+                .collect();
+            actual.sort_unstable();
+            wanted.sort_unstable();
+            actual == wanted
+        })
+    })
 }
 
 fn ensure_iptables_rule(accept: bool) -> Result<()> {
@@ -977,6 +1073,40 @@ mod tests {
         };
         assert!(!upper_half.permits(Ipv4Addr::new(169, 254, 169, 254), 443));
         assert!(Ipv4Cidr::parse("0.0.0.0/0").is_err());
+    }
+
+    #[test]
+    fn firewall_status_requires_the_exact_first_two_input_rules() {
+        let accept = "-A INPUT -i atoe+ -p tcp -m tcp --dport 1080 -m comment --comment \"ato-runtime-egress-broker\" -j ACCEPT";
+        let deny = "-A INPUT -i atoe+ -m comment --comment ato-runtime-egress-default-deny -j DROP";
+        let first = format!("-P INPUT DROP\n{accept}\n{deny}\n");
+        assert!(ordered_firewall_rules(&first));
+        assert!(ordered_firewall_rules(
+            &first.replace("-m tcp --dport 1080", "--dport 1080")
+        ));
+        for invalid in [
+            first.replace("-P INPUT DROP", "-P INPUT DROP\n-A INPUT -j ACCEPT"),
+            first.replace(accept, deny),
+            format!("-P INPUT ACCEPT\n{deny}\n{accept}"),
+            first.replace("1080", "1081"),
+            first.replace("atoe+", "br+"),
+            first.replace(" --dport 1080", ""),
+            first.replace("-j ACCEPT", "-s 127.0.0.1 -j ACCEPT"),
+            first.replace("-p tcp", "-p udp"),
+        ] {
+            assert!(!ordered_firewall_rules(&invalid), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn firewall_system_unit_matches_the_two_existing_rule_shapes() {
+        let unit = include_str!("../../../../deploy/selfhost/ato-egress-firewall.service");
+        let installed: Vec<_> = unit
+            .lines()
+            .filter_map(|line| line.strip_prefix("ExecStart=/usr/sbin/iptables "))
+            .collect();
+        let expected = [false, true].map(|accept| iptables_arguments("-I", accept).join(" "));
+        assert_eq!(installed, expected);
     }
 
     #[test]

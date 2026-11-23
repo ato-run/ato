@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 use crate::authoring::{
     BoundContract, HTTP_CONTRACT_VERIFIER, INSTANCE_SNAPSHOT_CONTRACT_VERIFIER,
     SCENARIO_CONTRACT_VERIFIER, TERMINAL_CONTRACT_VERIFIER, TLS_CONTRACT_VERIFIER,
-    WORKSPACE_CONTRACT_VERIFIER,
+    TLS_PINNED_ROOT_CONTRACT_VERIFIER, WORKSPACE_CONTRACT_VERIFIER,
 };
 use crate::scenario::is_scenario_ref;
 use crate::verify::{
@@ -53,7 +53,7 @@ fn reject(code: &'static str, detail: impl Into<String>) -> ReceiptRejection {
 
 /// A `sha256:<64 lowercase hex>` reference, as terminal evidence states the
 /// digest of the bytes it captured.
-fn is_sha256_ref(value: &str) -> bool {
+pub(crate) fn is_sha256_ref(value: &str) -> bool {
     value.strip_prefix("sha256:").is_some_and(|digest| {
         digest.len() == 64
             && digest
@@ -306,7 +306,7 @@ fn check_observation(
                 return inconsistent("the restored snapshot is not the one K requires");
             }
         }
-        TLS_CONTRACT_VERIFIER => {
+        TLS_CONTRACT_VERIFIER | TLS_PINNED_ROOT_CONTRACT_VERIFIER => {
             let Some(tls) = evidence.tls.as_ref() else {
                 return inconsistent("a satisfied TLS verdict carries no certificate evidence");
             };
@@ -329,11 +329,17 @@ fn check_observation(
             if !is_serial_hex(&tls.presented_serial) {
                 return inconsistent("the presented serial is not a lowercase hex integer");
             }
-            // A satisfied TLS verdict states that a public port serves a
-            // currently valid, publicly rooted certificate over a completed
+            // A satisfied TLS verdict states that the selected port serves a
+            // currently valid certificate anchored as K requires over a completed
             // handshake. Anything else cannot have satisfied K.
-            if tls.trust_anchor != crate::verify::TLS_TRUST_ANCHOR_PUBLIC_ROOTS {
-                return inconsistent("a satisfied TLS verdict is not anchored in public roots");
+            if crate::authoring::required_tls_anchor(
+                &requirement.verifier,
+                requirement.digest.as_deref(),
+            ) != Some(tls.trust_anchor.as_str())
+            {
+                return inconsistent(
+                    "a satisfied TLS verdict is not anchored in the root K requires",
+                );
             }
             if tls.days_remaining < 0 {
                 return inconsistent("a satisfied TLS verdict is already expired");

@@ -1,0 +1,16 @@
+[Unit]
+Description=Ato self-hosted Connected Runner %i
+After=network-online.target
+
+[Service]
+Environment=ATO_RUNNER_EGRESS_FIREWALL_MODE=verify-only
+EnvironmentFile=%h/.config/ato-selfhost/runner-%i.env
+# The surface target comes from ATO_RUNTIME_SURFACE_TARGET in the env file, not
+# from --surface-target: a CLI flag would override the environment.
+ExecStart=%h/.cargo/bin/ato-connected-realization-worker --work-root %h/.local/share/ato-selfhost/runners/%i/work --state-volume-root %h/.local/share/ato-selfhost/runners/%i/volumes --runner-credentials-file %h/.local/share/ato-selfhost/runners/%i/identity/runner.json --require-explicit-runtime-placement
+UMask=0077
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=default.target

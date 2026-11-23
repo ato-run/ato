@@ -1,0 +1,14 @@
+[Unit]
+Description=Verify Ato egress rules in the live INPUT chain
+
+[Service]
+ExecStart=/usr/local/libexec/ato-egress-firewall-status
+StandardInput=socket
+StandardOutput=socket
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+RestrictAddressFamilies=AF_NETLINK AF_INET AF_UNIX
+RuntimeMaxSec=5s
