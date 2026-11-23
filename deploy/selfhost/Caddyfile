@@ -68,11 +68,16 @@
 	}
 	handle /assets/* {
 		root * /srv
+		# Hashed file names: a new build never reuses one.
+		header Cache-Control "public, max-age=31536000, immutable"
 		file_server
 	}
 	handle {
 		root * /srv
 		header Content-Security-Policy "connect-src 'self'; frame-src 'self' https://*.{$ATO_APPS_HOST}; base-uri 'self'; object-src 'none'; frame-ancestors 'none'"
+		# The shell names the current assets: revalidate it every time (ETag),
+		# or a browser keeps a previous build after a deploy (2026-11-23).
+		header Cache-Control "no-cache"
 		try_files {path} /index.html
 		file_server
 	}
